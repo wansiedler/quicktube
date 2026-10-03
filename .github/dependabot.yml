@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # Keep the SHA-pinned actions current — Dependabot bumps the pin and the
+  # comment together, so pinning by digest stays maintainable.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ci
+
+  # Package.swift declares no third-party dependencies today; this only
+  # becomes active if one is ever added.
+  - package-ecosystem: swift
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: deps
+
+  # Pinned CI toolchain (zizmor).
+  - package-ecosystem: pip
+    directory: /.github
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ci

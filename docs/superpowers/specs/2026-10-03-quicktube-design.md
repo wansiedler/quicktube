@@ -133,6 +133,30 @@ Recordings are never deleted automatically.
 - **Quota.** `videos.insert` costs 1600 units against a default daily quota
   of 10000, so about 6 uploads per day.
 
+## Repository and CI
+
+Private GitHub repo `wansiedler/quicktube`. The pipeline is ported from
+`wansiedler/bybit-balance` and adapted from XcodeGen/xcodebuild to SwiftPM:
+
+| Job | Gate | What |
+|---|---|---|
+| build | hard | `swift build -c release` on `macos-15`; swift-format lint as a non-blocking warning |
+| tests | hard | `swift test --enable-code-coverage` plus a per-file coverage floor (100%) on pure-logic files of `QuickTubeCore` |
+| actionlint | hard | lints the workflow files |
+| security | hard | Trivy filesystem scan (vuln, secret, misconfig); SARIF upload opt-in via `ENABLE_CODE_SCANNING` |
+| secrets | hard | gitleaks over full history |
+| supply-chain | hard | zizmor workflow audit, hash-pinned install |
+| sonar | opt-in | `ENABLE_SONAR_CI` variable plus `SONAR_TOKEN` secret |
+| CodeQL (own workflow) | opt-in | `ENABLE_CODE_SCANNING`; weekly and on PRs |
+
+All actions are pinned by commit SHA; Dependabot bumps actions, the pip pin
+and Swift packages weekly. Pre-commit runs swift-format (strict), actionlint
+and a blocker for Google OAuth client secrets and refresh tokens.
+
+Every file added to the coverage-floor list must be free of I/O; files that
+talk to ScreenCaptureKit, the Keychain or the network are covered through
+their protocols and fakes instead.
+
 ## Testing
 
 Unit tests on `QuickTubeCore`:

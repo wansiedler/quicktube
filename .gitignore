@@ -1,0 +1,25 @@
+# SwiftPM / build output
+.build/
+build/
+DerivedData/
+*.xcresult
+*.xcuserstate
+xcuserdata/
+.swiftpm/
+
+# Assembled bundle — recreate with `make app`
+QuickTube.app/
+
+# CI scratch
+trivy-results.sarif
+actionlint-errors.json
+.scannerwork/
+
+# macOS
+.DS_Store
+
+# Secrets — never commit OAuth credentials
+client_secret*.json
+*.p12
+*.mobileprovision
+*.certSigningRequest
