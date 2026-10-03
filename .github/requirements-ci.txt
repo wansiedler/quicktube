@@ -1,0 +1,4 @@
+# Pipeline toolchain, pinned so a bump is a reviewable PR (dependabot watches
+# this file: pip ecosystem, directory /.github). The app itself is Swift with
+# no third-party dependencies; this is CI tooling only.
+zizmor==1.30.0
