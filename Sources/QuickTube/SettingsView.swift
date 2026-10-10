@@ -65,7 +65,7 @@ struct SettingsView: View {
             }
             Section("Telegram") {
                 SecureField("Bot token", text: $model.telegramToken)
-                TextField("Channel (@name or -100… id)", text: $model.telegramChat)
+                TextField("Channel (@name, -100… id) or your user id for a private chat", text: $model.telegramChat)
                 HStack {
                     Button("Save Telegram") { model.saveTelegram() }
                     Spacer()

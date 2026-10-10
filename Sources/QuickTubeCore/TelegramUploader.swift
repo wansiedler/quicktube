@@ -117,9 +117,13 @@ public actor TelegramUploader: VideoUploader {
     }
 
     /// Public channels link by username; private channels and groups by their id without the `-100`.
+    /// A private chat with the bot has no shareable link, so the deep link opens the message locally.
     static func messageLink(chat: Reply.Message.Chat, messageID: Int) -> URL {
-        if let username = chat.username, !username.isEmpty {
+        if let username = chat.username, !username.isEmpty, chat.id < 0 {
             return URL(string: "https://t.me/\(username)/\(messageID)")!
+        }
+        guard chat.id < 0 else {
+            return URL(string: "tg://openmessage?user_id=\(chat.id)&message_id=\(messageID)")!
         }
         var id = String(chat.id)
         if id.hasPrefix("-100") { id.removeFirst(4) } else if id.hasPrefix("-") { id.removeFirst() }

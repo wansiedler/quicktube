@@ -59,6 +59,15 @@ extension NetworkSuite {
             #expect(result.link == URL(string: "https://t.me/c/1234567890/7"))
         }
 
+        @Test func privateChatUsesDeepLink() async throws {
+            let uploader = makeUploader()
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "4242"))
+            let file = try makeFile(bytes: 4)
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "alex", id: 4242, messageID: 9)))
+            let result = try await uploader.upload(file: file, title: "T") { _ in }
+            #expect(result.link == URL(string: "tg://openmessage?user_id=4242&message_id=9"))
+        }
+
         @Test func missingConfigurationIsReported() async throws {
             let uploader = makeUploader()
             let file = try makeFile(bytes: 4)
