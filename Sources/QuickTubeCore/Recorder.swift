@@ -42,13 +42,25 @@ public actor Recorder: ScreenRecorder {
         }
     }
 
+    /// Lets a non-Sendable SDK result cross back into the actor; it is used from the actor only.
+    private struct Unchecked<Value>: @unchecked Sendable {
+        let value: Value
+    }
+
+    /// Swift 6.2 refuses to hand the non-Sendable `SCShareableContent` from the SDK's async
+    /// method straight into an actor; fetching it in a nonisolated helper sidesteps that.
+    private nonisolated static func shareableContent() async throws -> Unchecked<SCShareableContent> {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        return Unchecked(value: content)
+    }
+
     private func beginSession() async throws -> Session {
         guard await AVCaptureDevice.requestAccess(for: .audio) else {
             throw RecorderError.microphonePermissionDenied
         }
         let content: SCShareableContent
         do {
-            content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            content = try await Self.shareableContent().value
         } catch {
             throw RecorderError.screenPermissionDenied
         }
