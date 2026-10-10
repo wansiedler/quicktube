@@ -26,4 +26,25 @@ import Testing
         #expect(String(decoding: body, as: UTF8.self).contains("close this window"))
         #expect(try await callback == LoopbackServer.Callback(code: "abc", state: "xyz", error: nil))
     }
+
+    @Test func stopWhileWaitingThrowsCancellation() async throws {
+        let server = try LoopbackServer()
+        _ = try await server.start()
+        let waiting = Task { try await server.waitForCallback() }
+        await server.stop()
+        await #expect(throws: CancellationError.self) { try await waiting.value }
+    }
+
+    @Test func ignoresUnrelatedRequestsBeforeCallback() async throws {
+        let server = try LoopbackServer()
+        let port = try await server.start()
+        async let callback = server.waitForCallback()
+        let (_, favicon) = try await URLSession.shared.data(
+            from: URL(string: "http://127.0.0.1:\(port)/favicon.ico")!)
+        #expect((favicon as? HTTPURLResponse)?.statusCode == 404)
+        let (_, response) = try await URLSession.shared.data(
+            from: URL(string: "http://127.0.0.1:\(port)/?code=abc&state=xyz")!)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(try await callback == LoopbackServer.Callback(code: "abc", state: "xyz", error: nil))
+    }
 }

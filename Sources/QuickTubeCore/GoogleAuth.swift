@@ -91,6 +91,7 @@ public actor GoogleAuth: TokenProvider {
     public func signIn(openBrowser: @escaping @Sendable (URL) -> Void) async throws {
         let server = try LoopbackServer()
         let port = try await server.start()
+        defer { Task { await server.stop() } }
         let redirectURI = "http://127.0.0.1:\(port)"
         let pkce = PKCE.random()
         let state = UUID().uuidString
