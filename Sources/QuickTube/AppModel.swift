@@ -22,6 +22,8 @@ final class AppModel {
     private var signInTask: Task<Void, Never>?
     private(set) var launchAtLogin = false
     var launchAtLoginMessage: String?
+    private(set) var microphoneStatus = Permissions.microphone
+    private(set) var screenRecordingStatus = Permissions.screenRecording
 
     init() {
         let auth = GoogleAuth(store: KeychainStore())
@@ -50,6 +52,28 @@ final class AppModel {
         }
         notifier.requestPermission()
         refreshAuth()
+        // Ask for the recording grants now, so the first hotkey press records instead of prompting.
+        if Bundle.main.bundleIdentifier != nil {
+            Task {
+                await Permissions.requestMissing()
+                refreshPermissions()
+            }
+        }
+    }
+
+    func refreshPermissions() {
+        microphoneStatus = Permissions.microphone
+        screenRecordingStatus = Permissions.screenRecording
+    }
+
+    func requestMicrophone() {
+        Task {
+            microphoneStatus = await Permissions.requestMicrophone()
+        }
+    }
+
+    func requestScreenRecording() {
+        screenRecordingStatus = Permissions.requestScreenRecording()
     }
 
     /// Registers `newCombo` and persists it; on failure keeps the previous shortcut and says why.

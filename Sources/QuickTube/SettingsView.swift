@@ -20,6 +20,17 @@ struct SettingsView: View {
                     Text(message).font(.callout).foregroundStyle(.secondary)
                 }
             }
+            Section("Permissions") {
+                permissionRow(
+                    "Microphone", status: model.microphoneStatus, pane: Permissions.microphonePane,
+                    request: { model.requestMicrophone() })
+                permissionRow(
+                    "Screen Recording", status: model.screenRecordingStatus,
+                    pane: Permissions.screenRecordingPane,
+                    request: { model.requestScreenRecording() })
+                Text("macOS applies a new Screen Recording grant after QuickTube is relaunched.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
             Section("Google") {
                 TextField("OAuth client ID", text: $model.clientID)
                 SecureField("OAuth client secret", text: $model.clientSecret)
@@ -57,8 +68,29 @@ struct SettingsView: View {
         .onAppear {
             model.refreshAuth()
             model.refreshLaunchAtLogin()
+            model.refreshPermissions()
         }
         .onDisappear { stopListening() }
+    }
+
+    @ViewBuilder
+    private func permissionRow(
+        _ name: String, status: Permissions.Status, pane: URL, request: @escaping () -> Void
+    ) -> some View {
+        HStack {
+            Text(name)
+            Spacer()
+            Text(status.label)
+                .foregroundStyle(status == .granted ? Color.secondary : Color.red)
+            switch status {
+            case .granted:
+                EmptyView()
+            case .notDetermined:
+                Button("Request") { request() }
+            case .denied:
+                Button("Open System Settings") { NSWorkspace.shared.open(pane) }
+            }
+        }
     }
 
     private func startListening() {

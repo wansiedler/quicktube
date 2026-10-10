@@ -36,6 +36,7 @@ recordings a day.
 
 | Action | How |
 |---|---|
+| Grant permissions | asked at first launch; status under Settings → Permissions |
 | Start recording | `⌃⌥⌘R` (change in Settings) |
 | Stop and upload | `⌃⌥⌘R` again |
 | Retry a failed upload | menu → Retry Upload |
