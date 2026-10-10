@@ -75,6 +75,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var telegramCompressToFit = true
     /// The Bot API accepts 50 MB; self-hosted Bot API servers allow up to 2000 MB.
     public var telegramLimitMB = 50
+    /// Compression only lowers bitrate by default; when true it may also step the frame size down.
+    public var telegramAllowDownscale = false
 
     /// The Telegram limit in bytes, clamped to the range Settings offers.
     public var telegramLimitBytes: Int { min(max(telegramLimitMB, 10), 2000) << 20 }
@@ -87,7 +89,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         case keystrokeOverlayEnabled, overlaysInRecording, trimTailSeconds, trimHeadSeconds
         case titleTemplate, deleteAfterUpload, deleteOlderThanDays, automaticUpdates
         case gifEnabled, gifFPS, gifMaxWidth, gifMaxSeconds, quality
-        case telegramCompressToFit, telegramLimitMB
+        case telegramCompressToFit, telegramLimitMB, telegramAllowDownscale
     }
 
     public init(from decoder: Decoder) throws {
@@ -130,6 +132,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
         telegramCompressToFit =
             c.lenient(Bool.self, .telegramCompressToFit) ?? d.telegramCompressToFit
         telegramLimitMB = c.lenient(Int.self, .telegramLimitMB) ?? d.telegramLimitMB
+        telegramAllowDownscale =
+            c.lenient(Bool.self, .telegramAllowDownscale) ?? d.telegramAllowDownscale
     }
 
     /// UserDefaults key holding the JSON-encoded settings.

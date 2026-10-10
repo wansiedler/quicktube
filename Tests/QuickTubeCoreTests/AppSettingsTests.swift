@@ -21,6 +21,7 @@ import Testing
         #expect(s.quality == .default)
         #expect(s.telegramCompressToFit && s.telegramLimitMB == 50)
         #expect(s.telegramLimitBytes == 50 << 20)
+        #expect(!s.telegramAllowDownscale)
     }
 
     @Test func telegramLimitBytesIsClamped() {
@@ -64,6 +65,7 @@ import Testing
         s.quality = RecordingQuality(resolution: .fullHD, fps: 30)
         s.telegramCompressToFit = false
         s.telegramLimitMB = 2000
+        s.telegramAllowDownscale = true
         return s
     }
 

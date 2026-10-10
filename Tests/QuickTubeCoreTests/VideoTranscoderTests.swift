@@ -26,35 +26,35 @@ import VideoToolbox
     @Test func stepsDownTheLongSideWhenBitsPerPixelTooLow() {
         // 60 s at 60 fps: ~6.3 Mbit/s is 0.05 bit/pixel/frame at 1080p, 0.11 at 720p.
         let info = VideoInfo(width: 2560, height: 1440, fps: 60, duration: 60)
-        let plan = VideoTranscoder.plan(info: info, limitBytes: Self.fiftyMB)
+        let plan = VideoTranscoder.plan(info: info, limitBytes: Self.fiftyMB, allowDownscale: true)
         #expect(plan.width == 1280 && plan.height == 720)
     }
 
     @Test func portraitStepsDownTheHeight() {
         let info = VideoInfo(width: 1440, height: 2560, fps: 60, duration: 60)
-        let plan = VideoTranscoder.plan(info: info, limitBytes: Self.fiftyMB)
+        let plan = VideoTranscoder.plan(info: info, limitBytes: Self.fiftyMB, allowDownscale: true)
         #expect(plan.width == 720 && plan.height == 1280)
     }
 
     @Test func stopsAt640WhenNothingIsEnough() {
         let info = VideoInfo(width: 3840, height: 2160, fps: 60, duration: 1800)
-        let plan = VideoTranscoder.plan(info: info, limitBytes: Self.fiftyMB)
+        let plan = VideoTranscoder.plan(info: info, limitBytes: Self.fiftyMB, allowDownscale: true)
         #expect(plan.width == 640 && plan.height == 360)
     }
 
     @Test func neverUpscales() {
         let small = VideoInfo(width: 600, height: 400, fps: 60, duration: 3600)
-        let plan = VideoTranscoder.plan(info: small, limitBytes: Self.fiftyMB)
+        let plan = VideoTranscoder.plan(info: small, limitBytes: Self.fiftyMB, allowDownscale: true)
         #expect(plan.width == 600 && plan.height == 400)
         // Only steps below the natural long side are considered.
         let mid = VideoInfo(width: 1100, height: 700, fps: 60, duration: 3600)
-        let midPlan = VideoTranscoder.plan(info: mid, limitBytes: Self.fiftyMB)
+        let midPlan = VideoTranscoder.plan(info: mid, limitBytes: Self.fiftyMB, allowDownscale: true)
         #expect(midPlan.width == 640 && midPlan.height == 408)
     }
 
     @Test func dimensionsAreEven() {
         let info = VideoInfo(width: 1366, height: 769, fps: 30, duration: 600)
-        let plan = VideoTranscoder.plan(info: info, limitBytes: Self.fiftyMB)
+        let plan = VideoTranscoder.plan(info: info, limitBytes: Self.fiftyMB, allowDownscale: true)
         #expect(plan.width % 2 == 0 && plan.height % 2 == 0)
         let odd = VideoInfo(width: 1001, height: 777, fps: 30, duration: 1)
         let oddPlan = VideoTranscoder.plan(info: odd, limitBytes: Self.fiftyMB)
@@ -64,7 +64,17 @@ import VideoToolbox
     @Test func clampsTheMinimumVideoBitrate() {
         let info = VideoInfo(width: 1920, height: 1080, fps: 30, duration: 3600)
         let plan = VideoTranscoder.plan(info: info, limitBytes: 1 << 20)
-        #expect(plan.videoBitrate == 300_000)
+        #expect(plan.videoBitrate == 150_000)
+    }
+
+    @Test func keepsNaturalSizeByDefaultEvenWhenBitsPerPixelIsTiny() {
+        let info = VideoInfo(width: 3840, height: 2160, fps: 60, duration: 1800)
+        let plan = VideoTranscoder.plan(info: info, limitBytes: Self.fiftyMB)
+        #expect(plan.width == 3840 && plan.height == 2160)
+        #expect(plan == VideoTranscoder.plan(info: info, limitBytes: Self.fiftyMB, allowDownscale: false))
+        let odd = VideoInfo(width: 1001, height: 777, fps: 60, duration: 3600)
+        let oddPlan = VideoTranscoder.plan(info: odd, limitBytes: Self.fiftyMB)
+        #expect(oddPlan.width == 1000 && oddPlan.height == 776)
     }
 
     @Test func missingFrameRateAssumes30AndZeroDurationIsSafe() {

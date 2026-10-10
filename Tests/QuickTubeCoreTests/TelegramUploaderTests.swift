@@ -9,6 +9,7 @@ extension NetworkSuite {
         func makeUploader(
             limitBytes: Int = TelegramUploader.botAPILimit,
             compressToFit: Bool = true,
+            allowDownscale: Bool = false,
             videoInfo: @escaping @Sendable (URL) async throws -> VideoInfo = {
                 _ in throw VideoInfo.ReadError.noVideoTrack
             },
@@ -21,7 +22,8 @@ extension NetworkSuite {
             return TelegramUploader(
                 store: store, session: StubURLProtocol.makeSession(),
                 baseURL: URL(string: "https://tg.example")!, limitBytes: { limitBytes },
-                compressToFit: { compressToFit }, videoInfo: videoInfo, transcode: transcode)
+                compressToFit: { compressToFit }, allowDownscale: { allowDownscale }, videoInfo: videoInfo,
+                transcode: transcode)
         }
 
         /// A transcode stub that writes `bytes` bytes of 0xEE to the requested output.
@@ -135,6 +137,23 @@ extension NetworkSuite {
                 _ = try await uploader.upload(file: file, title: "T") { _ in }
             }
             #expect(StubURLProtocol.requests.isEmpty)
+        }
+
+        @Test func downscaleSettingIsPassedToThePlan() async throws {
+            let calls = TranscodeCalls()
+            let uploader = makeUploader(
+                limitBytes: 100, allowDownscale: true, videoInfo: { _ in Self.info },
+                transcode: fakeTranscode(bytes: 60, calls: calls))
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 200)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+
+            _ = try await uploader.upload(file: file, title: "T") { _ in }
+
+            let call = try #require(calls.all.first)
+            #expect(call.plan == VideoTranscoder.plan(info: Self.info, limitBytes: 100, allowDownscale: true))
+            #expect(call.plan != VideoTranscoder.plan(info: Self.info, limitBytes: 100))
         }
 
         @Test func oversizedFileIsTranscodedAndTheCopySent() async throws {

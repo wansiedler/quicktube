@@ -25,7 +25,7 @@ public enum TranscodeError: Error, Equatable {
 /// Re-encodes a recording to HEVC + AAC at a target size and bitrate (used to fit Telegram's limit).
 public enum VideoTranscoder {
     /// Below this the picture falls apart regardless of size.
-    public static let minimumVideoBitrate = 300_000
+    public static let minimumVideoBitrate = 150_000
     /// Container overhead and encoder overshoot.
     static let headroom = 0.92
     /// Under this many bits per pixel per frame screen text smears, so the size steps down.
@@ -34,9 +34,12 @@ public enum VideoTranscoder {
     static let fallbackFPS = 30.0
 
     /// Pure: pick an output size and bitrates so the file fits `limitBytes` with 8 % headroom.
-    /// The natural size is kept while the video bitrate gives at least 0.1 bit/pixel/frame;
-    /// otherwise the long side steps down 1920 → 1280 → 960 → 640 (never up), keeping aspect and even dimensions.
-    public static func plan(info: VideoInfo, limitBytes: Int, audioBitrate: Int = 96_000) -> TranscodePlan {
+    /// The natural (even-rounded) size is always kept unless `allowDownscale` is true; then it is kept while the
+    /// video bitrate gives at least 0.1 bit/pixel/frame, otherwise the long side steps down
+    /// 1920 → 1280 → 960 → 640 (never up), keeping aspect and even dimensions.
+    public static func plan(
+        info: VideoInfo, limitBytes: Int, audioBitrate: Int = 96_000, allowDownscale: Bool = false
+    ) -> TranscodePlan {
         let duration = info.duration > 0 ? info.duration : 1
         let bitsPerSecond = (Double(limitBytes) * 8 * headroom / duration).rounded(.down)
         let video = max(minimumVideoBitrate, Int(bitsPerSecond) - audioBitrate)
@@ -47,7 +50,7 @@ public enum VideoTranscoder {
 
         let longSide = max(info.width, info.height)
         var size = (evenDown(info.width), evenDown(info.height))
-        if !enough(size) {
+        if allowDownscale && !enough(size) {
             for side in longSideSteps where side < longSide {
                 size = scaled(width: info.width, height: info.height, longSide: side)
                 if enough(size) { break }

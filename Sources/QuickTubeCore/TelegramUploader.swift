@@ -33,6 +33,7 @@ public actor TelegramUploader: VideoUploader {
     private let baseURL: URL
     private let limitBytes: @Sendable () -> Int
     private let compressToFit: @Sendable () -> Bool
+    private let allowDownscale: @Sendable () -> Bool
     private let log: @Sendable (String) -> Void
     private let videoInfo: @Sendable (URL) async throws -> VideoInfo
     private let transcode: Transcode
@@ -43,13 +44,14 @@ public actor TelegramUploader: VideoUploader {
             URL, TranscodePlan, URL, @escaping @Sendable (Double) -> Void
         ) async throws -> URL
 
-    /// `limitBytes` and `compressToFit` are read at each upload, so Settings changes apply immediately.
+    /// `limitBytes`, `compressToFit` and `allowDownscale` are read at each upload, so Settings changes apply immediately.
     public init(
         store: SecretStore,
         session: URLSession = .shared,
         baseURL: URL = URL(string: "https://api.telegram.org")!,
         limitBytes: @escaping @Sendable () -> Int = { TelegramUploader.botAPILimit },
         compressToFit: @escaping @Sendable () -> Bool = { true },
+        allowDownscale: @escaping @Sendable () -> Bool = { false },
         log: @escaping @Sendable (String) -> Void = { _ in },
         videoInfo: @escaping @Sendable (URL) async throws -> VideoInfo = { try await VideoInfo.read($0) },
         transcode: @escaping Transcode = {
@@ -61,6 +63,7 @@ public actor TelegramUploader: VideoUploader {
         self.baseURL = baseURL
         self.limitBytes = limitBytes
         self.compressToFit = compressToFit
+        self.allowDownscale = allowDownscale
         self.log = log
         self.videoInfo = videoInfo
         self.transcode = transcode
@@ -113,7 +116,7 @@ public actor TelegramUploader: VideoUploader {
         defer { if let transcoded { try? FileManager.default.removeItem(at: transcoded) } }
         if oversized {
             guard let info else { throw TranscodeError.cannotRead }
-            let plan = VideoTranscoder.plan(info: info, limitBytes: limit)
+            let plan = VideoTranscoder.plan(info: info, limitBytes: limit, allowDownscale: allowDownscale())
             let output = Self.transcodeURL(for: file)
             transcoded = output
             log("Telegram: \(size) bytes over the \(limit)-byte limit, transcoding with \(plan)")

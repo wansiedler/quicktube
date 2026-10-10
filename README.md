@@ -43,10 +43,12 @@ channel instead of YouTube; the message link goes on the clipboard.
    (`@name` for a public channel, or the `-100…` id for a private one) → Save.
 
 The Bot API accepts files up to 50 MB. Longer recordings are re-encoded
-(HEVC + AAC, lower bitrate and, if needed, lower resolution) into a temporary
+(HEVC + AAC at a lower bitrate; the frame size and length are kept) into a temporary
 `<name>.telegram.mp4` that is sent and then deleted; the original stays on disk.
 Settings → Telegram can turn compression off or change the limit — raise it
-only if you run a self-hosted Bot API server (up to 2000 MB).
+only if you run a self-hosted Bot API server (up to 2000 MB). Compression
+never shrinks the frame size unless you enable "Allow downscaling when
+compressing" there.
 
 ## Google Drive (optional)
 

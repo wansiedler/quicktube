@@ -92,6 +92,9 @@ struct SettingsView: View {
                     Text(model.telegramConfigured ? "Configured" : "Not set up").foregroundStyle(.secondary)
                 }
                 Toggle("Compress to fit the limit", isOn: $model.settings.telegramCompressToFit)
+                Toggle("Allow downscaling when compressing", isOn: $model.settings.telegramAllowDownscale)
+                Text("Off: compression only lowers video and audio quality, the frame size stays.")
+                    .font(.callout).foregroundStyle(.secondary)
                 Stepper(
                     "Limit (MB): \(model.settings.telegramLimitMB)", value: $model.settings.telegramLimitMB,
                     in: 10...2000, step: 10)
