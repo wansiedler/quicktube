@@ -1,26 +1,35 @@
 import AVFoundation
 import Foundation
 
-/// Pixel size, frame rate and length of a finished recording.
+/// Pixel size, frame rate, length and audio layout of a finished recording.
 public struct VideoInfo: Sendable, Equatable {
     public let width: Int
     public let height: Int
     /// nil when the file has no usable frame rate (variable-rate screen captures can report none).
     public let fps: Double?
     public let duration: TimeInterval
+    /// Number of audio tracks; nil when unknown (then a transcode plan reserves room for mixed audio).
+    public let audioTrackCount: Int?
+    /// The estimated data rate (bit/s) of the audio track when there is exactly one, else nil.
+    public let audioDataRate: Float?
 
-    public init(width: Int, height: Int, fps: Double?, duration: TimeInterval) {
+    public init(
+        width: Int, height: Int, fps: Double?, duration: TimeInterval, audioTrackCount: Int? = nil,
+        audioDataRate: Float? = nil
+    ) {
         self.width = width
         self.height = height
         self.fps = fps
         self.duration = duration
+        self.audioTrackCount = audioTrackCount
+        self.audioDataRate = audioDataRate
     }
 
     public enum ReadError: Error, Equatable {
         case noVideoTrack
     }
 
-    /// Reads the first video track; the size is the displayed one (rotation applied).
+    /// Reads the first video track (the size is the displayed one, rotation applied) and counts the audio tracks.
     public static func read(_ url: URL) async throws -> VideoInfo {
         let asset = AVURLAsset(url: url)
         let tracks = try await asset.load(.tracks)
@@ -31,10 +40,15 @@ public struct VideoInfo: Sendable, Equatable {
             .naturalSize, .preferredTransform, .nominalFrameRate, .minFrameDuration)
         let duration = try await asset.load(.duration)
         let (width, height) = displaySize(natural: size, transform: transform)
+        let audioTracks = tracks.filter { $0.mediaType == .audio }
+        var audioDataRate: Float?
+        if audioTracks.count == 1 {
+            audioDataRate = try? await audioTracks[0].load(.estimatedDataRate)
+        }
         return VideoInfo(
             width: width, height: height,
             fps: frameRate(nominal: nominal, minFrameDuration: minDuration),
-            duration: duration.seconds)
+            duration: duration.seconds, audioTrackCount: audioTracks.count, audioDataRate: audioDataRate)
     }
 
     /// The displayed size: the natural size with the track's rotation applied.

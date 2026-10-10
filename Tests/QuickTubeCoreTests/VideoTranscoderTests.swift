@@ -14,7 +14,50 @@ import VideoToolbox
         let used = Double(plan.videoBitrate + plan.audioBitrate) * 60
         #expect(used <= budget)
         #expect(used > budget - 60 * 2)
-        #expect(plan.audioBitrate == 96_000)
+        #expect(plan.audioBitrate == 160_000)
+    }
+
+    @Test func audioStrategyPassesOneTrackThroughAndMixesSeveral() {
+        #expect(VideoTranscoder.audioStrategy(trackCount: 0, estimatedDataRate: nil) == .none)
+        #expect(VideoTranscoder.audioStrategy(trackCount: 0, estimatedDataRate: 128_000) == .none)
+        #expect(
+            VideoTranscoder.audioStrategy(trackCount: 1, estimatedDataRate: 191_999.4)
+                == .passthrough(bitrate: 192_000))
+        #expect(
+            VideoTranscoder.audioStrategy(trackCount: 2, estimatedDataRate: nil) == .mix(bitrate: 160_000))
+        #expect(
+            VideoTranscoder.audioStrategy(trackCount: 3, estimatedDataRate: 64_000) == .mix(bitrate: 160_000))
+        #expect(
+            VideoTranscoder.audioStrategy(trackCount: 1, estimatedDataRate: 128_000, canPassThrough: false)
+                == .mix(bitrate: 160_000))
+        #expect(AudioStrategy.none.bitrate == 0)
+        #expect(AudioStrategy.passthrough(bitrate: 5).bitrate == 5)
+        #expect(AudioStrategy.mix(bitrate: 7).bitrate == 7)
+    }
+
+    @Test func audioStrategyFallsBackTo160kWhenTheRateIsUnknown() {
+        for rate: Float? in [nil, 0, -1, .nan, .infinity] {
+            #expect(
+                VideoTranscoder.audioStrategy(trackCount: 1, estimatedDataRate: rate)
+                    == .passthrough(bitrate: 160_000))
+        }
+    }
+
+    @Test func planBudgetsTheAudioByStrategy() {
+        func plan(_ count: Int?, _ rate: Float?, audioBitrate: Int? = nil) -> TranscodePlan {
+            let info = VideoInfo(
+                width: 1920, height: 1080, fps: 30, duration: 60, audioTrackCount: count, audioDataRate: rate)
+            return VideoTranscoder.plan(info: info, limitBytes: Self.fiftyMB, audioBitrate: audioBitrate)
+        }
+        let total = Int((Double(Self.fiftyMB) * 8 * 0.92 / 60).rounded(.down))
+        #expect(plan(nil, nil).audioBitrate == 160_000)
+        #expect(plan(0, nil).audioBitrate == 0)
+        #expect(plan(0, nil).videoBitrate == total)
+        #expect(plan(1, 256_000).audioBitrate == 256_000)
+        #expect(plan(1, 256_000).videoBitrate == total - 256_000)
+        #expect(plan(1, nil).audioBitrate == 160_000)
+        #expect(plan(2, nil).audioBitrate == 160_000)
+        #expect(plan(2, nil, audioBitrate: 96_000).audioBitrate == 96_000)
     }
 
     @Test func keepsNaturalSizeWhenBitsPerPixelSuffice() {
@@ -61,7 +104,7 @@ import VideoToolbox
         #expect(oddPlan.width == 1000 && oddPlan.height == 776)
     }
 
-    @Test func compressionPropertiesPreferSpeedAndSkipReordering() {
+    @Test func compressionPropertiesPreferSpeedAndSkipReordering() throws {
         let properties = VideoTranscoder.compressionProperties(bitrate: 2_000_000, fps: 29.97)
         #expect(properties[AVVideoAverageBitRateKey] as? Int == 2_000_000)
         #expect(properties[AVVideoAllowFrameReorderingKey] as? Bool == false)
@@ -69,8 +112,31 @@ import VideoToolbox
             properties[kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String] as? Bool
                 == true)
         #expect(properties[AVVideoExpectedSourceFrameRateKey] as? Int == 30)
+        let limits = try #require(
+            properties[kVTCompressionPropertyKey_DataRateLimits as String] as? [NSNumber])
+        #expect(limits == [NSNumber(value: 250_000), NSNumber(value: 1.0)])
         let unknownFPS = VideoTranscoder.compressionProperties(bitrate: 1, fps: 0)
         #expect(unknownFPS[AVVideoExpectedSourceFrameRateKey] == nil)
+    }
+
+    @Test func encoderSpecificationRequiresTheHardwareEncoder() {
+        let specification = VideoTranscoder.encoderSpecification()
+        #expect(
+            specification[kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String]
+                as? Bool
+                == true)
+        #expect(
+            specification[kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String]
+                as? Bool
+                == true)
+    }
+
+    @Test func throughputLineReportsFramesSecondsAndFPS() {
+        #expect(
+            VideoTranscoder.throughputLine(frames: 2640, seconds: 61.24)
+                == "transcoded 2640 frames in 61.2 s (43 fps)")
+        #expect(
+            VideoTranscoder.throughputLine(frames: 5, seconds: 0) == "transcoded 5 frames in 0.0 s (0 fps)")
     }
 
     @Test func clampsTheMinimumVideoBitrate() {
@@ -108,7 +174,12 @@ import VideoToolbox
         let plan = TranscodePlan(width: 320, height: 240, videoBitrate: 300_000, audioBitrate: 64_000)
         let output = dir.appending(path: "clip.telegram.mp4")
         let seen = ProgressLog()
-        let result = try await VideoTranscoder.transcode(input, plan: plan, output: output) { seen.add($0) }
+        let logged = AskedStrings()
+        let result = try await VideoTranscoder.transcode(
+            input, plan: plan, output: output, log: { logged.add($0) }
+        ) { seen.add($0) }
+        let throughput = try #require(logged.all.last)
+        #expect(throughput.hasPrefix("transcoded 30 frames in "))
 
         #expect(result == output)
         let info = try await VideoInfo.read(output)
@@ -179,6 +250,70 @@ import VideoToolbox
     }
 
     @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
+    func passesASingleAACTrackThroughUntouched() async throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appending(path: "clip.mov")
+        try await ClipMaker.make(input, width: 640, height: 480, fps: 30, seconds: 1, audio: true)
+        let sourceInfo = try await VideoInfo.read(input)
+        #expect(sourceInfo.audioTrackCount == 1)
+        let sourceRate = try #require(sourceInfo.audioDataRate)
+        #expect(sourceRate > 0)
+        let sourceTrack = try #require(
+            try await AVURLAsset(url: input).loadTracks(withMediaType: .audio).first)
+        let sourceFormat = try #require(try await sourceTrack.load(.formatDescriptions).first)
+        let sourceASBD = try #require(
+            CMAudioFormatDescriptionGetStreamBasicDescription(sourceFormat)?.pointee)
+        let limit = 1 << 20
+        let plan = VideoTranscoder.plan(info: sourceInfo, limitBytes: limit)
+        #expect(plan.audioBitrate == Int(sourceRate.rounded(.up)))
+        let output = dir.appending(path: "clip.telegram.mp4")
+
+        _ = try await VideoTranscoder.transcode(input, plan: plan, output: output) { _ in }
+
+        let size = try #require(
+            try FileManager.default.attributesOfItem(atPath: output.path)[.size] as? Int)
+        #expect(size <= limit)
+        let audio = try #require(try await AVURLAsset(url: output).loadTracks(withMediaType: .audio).first)
+        let format = try #require(try await audio.load(.formatDescriptions).first)
+        #expect(CMFormatDescriptionGetMediaSubType(format) == kAudioFormatMPEG4AAC)
+        let asbd = try #require(CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee)
+        #expect(asbd.mSampleRate == sourceASBD.mSampleRate)
+        #expect(asbd.mChannelsPerFrame == sourceASBD.mChannelsPerFrame)
+        // A copy keeps the source's data rate; a re-encode at the old default would land near 96 kbit/s.
+        let outputRate = try await audio.load(.estimatedDataRate)
+        #expect(abs(outputRate - sourceRate) <= sourceRate * 0.05)
+        let outputInfo = try await VideoInfo.read(output)
+        #expect(outputInfo.audioTrackCount == 1)
+    }
+
+    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
+    func mixesSeveralAudioTracksIntoOneAACTrack() async throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appending(path: "clip.mov")
+        try await ClipMaker.make(
+            input, width: 640, height: 480, fps: 30, seconds: 1, audio: true, audioTracks: 2)
+        let sourceInfo = try await VideoInfo.read(input)
+        #expect(sourceInfo.audioTrackCount == 2)
+        #expect(sourceInfo.audioDataRate == nil)
+        let plan = VideoTranscoder.plan(info: sourceInfo, limitBytes: 1 << 20)
+        #expect(plan.audioBitrate == 160_000)
+        let output = dir.appending(path: "clip.telegram.mp4")
+
+        _ = try await VideoTranscoder.transcode(input, plan: plan, output: output) { _ in }
+
+        let audio = try await AVURLAsset(url: output).loadTracks(withMediaType: .audio)
+        #expect(audio.count == 1)
+        let format = try #require(try await audio.first?.load(.formatDescriptions).first)
+        #expect(CMFormatDescriptionGetMediaSubType(format) == kAudioFormatMPEG4AAC)
+        let asbd = try #require(CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee)
+        #expect(asbd.mSampleRate == 48_000 && asbd.mChannelsPerFrame == 2)
+    }
+
+    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
     func cancellationThrowsCancellationErrorAndLeavesNoOutput() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -210,7 +345,8 @@ import VideoToolbox
     }
 }
 
-/// Writes a short H.264 clip of solid frames (plus optional silent LPCM audio) with AVAssetWriter.
+/// Writes a short H.264 clip of solid frames (plus optional silent AAC audio, `audioTracks` tracks of it)
+/// with AVAssetWriter.
 enum ClipMaker {
     struct Failure: Error {}
 
@@ -237,7 +373,8 @@ enum ClipMaker {
     }
 
     static func make(
-        _ url: URL, width: Int, height: Int, fps: Int32, seconds: Int, audio: Bool = false
+        _ url: URL, width: Int, height: Int, fps: Int32, seconds: Int, audio: Bool = false,
+        audioTracks: Int = 1
     ) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let input = AVAssetWriterInput(
@@ -254,8 +391,8 @@ enum ClipMaker {
             ])
         guard writer.canAdd(input) else { throw Failure() }
         writer.add(input)
-        let sound = audio ? try SilentAudio(fps: Int(fps)) : nil
-        if let sound {
+        let sounds = audio ? try (0..<audioTracks).map { _ in try SilentAudio(fps: Int(fps)) } : []
+        for sound in sounds {
             guard writer.canAdd(sound.input) else { throw Failure() }
             writer.add(sound.input)
         }
@@ -276,13 +413,13 @@ enum ClipMaker {
             else {
                 throw Failure()
             }
-            if let sound {
+            for sound in sounds {
                 while !sound.input.isReadyForMoreMediaData { try await Task.sleep(for: .milliseconds(5)) }
                 guard sound.input.append(try sound.chunk(index: frame)) else { throw Failure() }
             }
         }
         input.markAsFinished()
-        sound?.input.markAsFinished()
+        for sound in sounds { sound.input.markAsFinished() }
         writer.endSession(atSourceTime: CMTime(value: Int64(fps) * Int64(seconds), timescale: fps))
         await writer.finishWriting()
         guard writer.status == .completed else { throw Failure() }

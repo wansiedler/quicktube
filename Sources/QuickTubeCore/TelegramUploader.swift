@@ -45,6 +45,7 @@ public actor TelegramUploader: VideoUploader {
         ) async throws -> URL
 
     /// `limitBytes`, `compressToFit` and `allowDownscale` are read at each upload, so Settings changes apply immediately.
+    /// `transcode` defaults to `VideoTranscoder.transcode`, logging through `log`.
     public init(
         store: SecretStore,
         session: URLSession = .shared,
@@ -54,9 +55,7 @@ public actor TelegramUploader: VideoUploader {
         allowDownscale: @escaping @Sendable () -> Bool = { false },
         log: @escaping @Sendable (String) -> Void = { _ in },
         videoInfo: @escaping @Sendable (URL) async throws -> VideoInfo = { try await VideoInfo.read($0) },
-        transcode: @escaping Transcode = {
-            try await VideoTranscoder.transcode($0, plan: $1, output: $2, progress: $3)
-        }
+        transcode: Transcode? = nil
     ) {
         self.store = store
         self.session = session
@@ -66,7 +65,22 @@ public actor TelegramUploader: VideoUploader {
         self.allowDownscale = allowDownscale
         self.log = log
         self.videoInfo = videoInfo
-        self.transcode = transcode
+        self.transcode =
+            transcode ?? { input, plan, output, progress in
+                try await VideoTranscoder.transcode(
+                    input, plan: plan, output: output, log: { log("Telegram: \($0)") }, progress: progress)
+            }
+    }
+
+    /// The plan for a second attempt after the first came out at `actualBytes`: the video bitrate scaled by
+    /// `limit / actual × 0.9`, never below `VideoTranscoder.minimumVideoBitrate`; size and audio unchanged.
+    public static func retryPlan(after plan: TranscodePlan, actualBytes: Int, limitBytes: Int)
+        -> TranscodePlan
+    {
+        let scale = Double(limitBytes) / Double(max(1, actualBytes)) * 0.9
+        let video = max(VideoTranscoder.minimumVideoBitrate, Int(Double(plan.videoBitrate) * scale))
+        return TranscodePlan(
+            width: plan.width, height: plan.height, videoBitrate: video, audioBitrate: plan.audioBitrate)
     }
 
     public func configuration() throws -> TelegramConfiguration? {
@@ -113,7 +127,7 @@ public actor TelegramUploader: VideoUploader {
         defer { if let transcoded { try? FileManager.default.removeItem(at: transcoded) } }
         if oversized {
             guard let info else { throw TranscodeError.cannotRead }
-            let plan = VideoTranscoder.plan(info: info, limitBytes: limit, allowDownscale: allowDownscale())
+            var plan = VideoTranscoder.plan(info: info, limitBytes: limit, allowDownscale: allowDownscale())
             let output = Self.transcodeURL(for: file)
             transcoded = output
             context.onStatus(
@@ -122,8 +136,25 @@ public actor TelegramUploader: VideoUploader {
             progress(0)
             sending = try await transcode(file, plan, output) { progress($0) }
             transcoded = sending
-            let newSize = Self.fileSize(sending)
+            var newSize = Self.fileSize(sending)
             guard newSize > 0 else { throw UploadError.fileUnreadable }
+            log("Telegram: attempt 1 wrote \(newSize) bytes (limit \(limit))")
+            // The encoder can miss the target at very high resolutions; one retry at a proportionally lower rate.
+            if newSize > limit {
+                plan = Self.retryPlan(after: plan, actualBytes: newSize, limitBytes: limit)
+                let line = RecordingNaming.compressionLine(
+                    from: info, sizeBytes: size, to: plan, targetBytes: limit)
+                context.onStatus(line.replacingOccurrences(of: "Compressing", with: "Compressing again"))
+                log(
+                    "Telegram: \(newSize) bytes still over the \(limit)-byte limit, transcoding again with \(plan)"
+                )
+                progress(0)
+                sending = try await transcode(file, plan, output) { progress($0) }
+                transcoded = sending
+                newSize = Self.fileSize(sending)
+                guard newSize > 0 else { throw UploadError.fileUnreadable }
+                log("Telegram: attempt 2 wrote \(newSize) bytes (limit \(limit))")
+            }
             guard newSize <= limit else { throw TelegramError.fileTooLarge(limit: limit, actual: newSize) }
 
             // The player proportions must match the file that is sent, not the recording.

@@ -23,7 +23,26 @@ public enum TranscodeError: Error, Equatable {
     case failed(String)
 }
 
-/// Re-encodes a recording to HEVC + AAC at a target size and bitrate (used to fit Telegram's limit).
+/// How a transcode treats the source audio.
+public enum AudioStrategy: Sendable, Equatable {
+    /// No audio track; the output has none either.
+    case none
+    /// One track, copied as is (no re-encode); `bitrate` is what it costs in the size budget.
+    case passthrough(bitrate: Int)
+    /// Several tracks (microphone + system audio), mixed and encoded to stereo 48 kHz AAC at `bitrate`.
+    case mix(bitrate: Int)
+
+    /// Bit/s the audio takes out of the size budget.
+    public var bitrate: Int {
+        switch self {
+        case .none: 0
+        case .passthrough(let bitrate), .mix(let bitrate): bitrate
+        }
+    }
+}
+
+/// Re-encodes a recording's video to HEVC at a target size and bitrate (used to fit Telegram's limit), keeping
+/// a single audio track untouched and mixing several into one AAC track.
 public enum VideoTranscoder {
     /// Below this the picture falls apart regardless of size.
     public static let minimumVideoBitrate = 150_000
@@ -33,12 +52,51 @@ public enum VideoTranscoder {
     static let minimumBitsPerPixel = 0.1
     static let longSideSteps = [1920, 1280, 960, 640]
     static let fallbackFPS = 30.0
+    /// AAC bitrate for a mix of several audio tracks.
+    public static let mixedAudioBitrate = 160_000
+    /// Budget for a passed-through track whose data rate is unknown.
+    public static let passthroughFallbackBitrate = 160_000
+    /// The range the AAC encoder accepts for 48 kHz stereo; a mix bitrate is clamped into it.
+    static let aacBitrateRange = 64_000...320_000
 
-    /// The HEVC encoder settings: the bitrate plus speed over quality and no frame reordering (no B-frame
+    /// Pure: one track is passed through (budgeted at its estimated data rate, else 160 kbit/s), several are
+    /// mixed to AAC at 160 kbit/s, none means no audio. `canPassThrough` false (a track the MP4 writer cannot
+    /// take as is) mixes even a single track.
+    public static func audioStrategy(
+        trackCount: Int, estimatedDataRate: Float?, canPassThrough: Bool = true
+    ) -> AudioStrategy {
+        guard trackCount > 0 else { return .none }
+        guard trackCount == 1, canPassThrough else { return .mix(bitrate: mixedAudioBitrate) }
+        guard let rate = estimatedDataRate, rate.isFinite, rate > 0 else {
+            return .passthrough(bitrate: passthroughFallbackBitrate)
+        }
+        return .passthrough(bitrate: Int(rate.rounded(.up)))
+    }
+
+    /// Requires the hardware HEVC encoder so a slow software fallback cannot happen silently; `transcode` retries
+    /// without it (and logs that) when the machine has none.
+    public static func encoderSpecification() -> [String: Any] {
+        [
+            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: true,
+            kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String: true,
+        ]
+    }
+
+    /// "transcoded 2640 frames in 61.2 s (43 fps)".
+    public static func throughputLine(frames: Int, seconds: Double) -> String {
+        let fps = seconds > 0 ? Int((Double(frames) / seconds).rounded()) : 0
+        return "transcoded \(frames) frames in \(String(format: "%.1f", seconds)) s (\(fps) fps)"
+    }
+
+    /// The HEVC encoder settings: the bitrate (also as a hard per-second cap) plus speed over quality and no frame reordering (no B-frame
     /// delay), since a Telegram copy only has to fit the limit, not look its best.
     public static func compressionProperties(bitrate: Int, fps: Double) -> [String: Any] {
         var properties: [String: Any] = [
             AVVideoAverageBitRateKey: bitrate,
+            // A hard cap of bitrate/8 bytes per 1 s window; the average alone overshoots at 6K.
+            kVTCompressionPropertyKey_DataRateLimits as String: [
+                NSNumber(value: bitrate / 8), NSNumber(value: 1.0),
+            ],
             AVVideoAllowFrameReorderingKey: false,
             kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String: true,
         ]
@@ -47,12 +105,20 @@ public enum VideoTranscoder {
     }
 
     /// Pure: pick an output size and bitrates so the file fits `limitBytes` with 8 % headroom.
+    /// The audio share is `audioBitrate` when given, else the `audioStrategy` for `info`'s audio tracks
+    /// (160 kbit/s when the track count is unknown).
     /// The natural (even-rounded) size is always kept unless `allowDownscale` is true; then it is kept while the
     /// video bitrate gives at least 0.1 bit/pixel/frame, otherwise the long side steps down
     /// 1920 → 1280 → 960 → 640 (never up), keeping aspect and even dimensions.
     public static func plan(
-        info: VideoInfo, limitBytes: Int, audioBitrate: Int = 96_000, allowDownscale: Bool = false
+        info: VideoInfo, limitBytes: Int, audioBitrate: Int? = nil, allowDownscale: Bool = false
     ) -> TranscodePlan {
+        let audioBitrate =
+            audioBitrate
+            ?? info.audioTrackCount.map {
+                audioStrategy(trackCount: $0, estimatedDataRate: info.audioDataRate).bitrate
+            }
+            ?? mixedAudioBitrate
         let duration = info.duration > 0 ? info.duration : 1
         let bitsPerSecond = (Double(limitBytes) * 8 * headroom / duration).rounded(.down)
         let video = max(minimumVideoBitrate, Int(bitsPerSecond) - audioBitrate)
@@ -82,14 +148,17 @@ public enum VideoTranscoder {
         return (evenRound(Double(width) * Double(longSide) / Double(height)), longSide)
     }
 
-    /// AVAssetReader → AVAssetWriter (HEVC at `plan.videoBitrate`, AAC at `plan.audioBitrate`), reporting
-    /// progress 0…1. Replaces `output` if it exists and removes it again on failure. Returns `output`.
+    /// AVAssetReader → AVAssetWriter, reporting progress 0…1. Video is re-encoded to HEVC at `plan.videoBitrate`;
+    /// a single AAC audio track is copied untouched, several tracks are mixed to stereo 48 kHz AAC at
+    /// `plan.audioBitrate` (clamped to 64–320 kbit/s). Replaces `output` if it exists and removes it again on failure. Returns `output`.
+    /// `log` gets the software-encoder fallback and, on success, a throughput line (frames, seconds, fps).
     public static func transcode(
-        _ input: URL, plan: TranscodePlan, output: URL, progress: @escaping @Sendable (Double) -> Void
+        _ input: URL, plan: TranscodePlan, output: URL, log: (@Sendable (String) -> Void)? = nil,
+        progress: @escaping @Sendable (Double) -> Void
     ) async throws -> URL {
         // Reader and writer are not Sendable; they live and die inside this detached task.
         let task = Task.detached(priority: .utility) {
-            try await run(input, plan: plan, output: output, progress: progress)
+            try await run(input, plan: plan, output: output, log: log, progress: progress)
         }
         return try await withTaskCancellationHandler {
             try await task.value
@@ -99,8 +168,11 @@ public enum VideoTranscoder {
     }
 
     private static func run(
-        _ input: URL, plan: TranscodePlan, output: URL, progress: @escaping @Sendable (Double) -> Void
+        _ input: URL, plan: TranscodePlan, output: URL, log: (@Sendable (String) -> Void)?,
+        progress: @escaping @Sendable (Double) -> Void
     ) async throws -> URL {
+        let clock = ContinuousClock()
+        let start = clock.now
         let asset = AVURLAsset(url: input)
         let tracks: [AVAssetTrack]
         let duration: CMTime
@@ -120,6 +192,16 @@ public enum VideoTranscoder {
             throw TranscodeError.cannotRead
         }
         let audioTracks = tracks.filter { $0.mediaType == .audio }
+        // Only AAC goes into the MP4 untouched; anything else (LPCM in a .mov, say) is re-encoded.
+        var audioFormats: [CMFormatDescription] = []
+        if audioTracks.count == 1 {
+            audioFormats = (try? await audioTracks[0].load(.formatDescriptions)) ?? []
+        }
+        let canPassThrough =
+            !audioFormats.isEmpty
+            && audioFormats.allSatisfy { CMFormatDescriptionGetMediaSubType($0) == kAudioFormatMPEG4AAC }
+        let strategy = audioStrategy(
+            trackCount: audioTracks.count, estimatedDataRate: nil, canPassThrough: canPassThrough)
 
         let videoOutput = AVAssetReaderTrackOutput(
             track: videoTrack,
@@ -129,8 +211,17 @@ public enum VideoTranscoder {
         videoOutput.alwaysCopiesSampleData = false
         guard reader.canAdd(videoOutput) else { throw TranscodeError.cannotRead }
         reader.add(videoOutput)
-        var audioOutput: AVAssetReaderAudioMixOutput?
-        if !audioTracks.isEmpty {
+        var audioOutput: AVAssetReaderOutput?
+        switch strategy {
+        case .none:
+            break
+        case .passthrough:
+            let copy = AVAssetReaderTrackOutput(track: audioTracks[0], outputSettings: nil)
+            copy.alwaysCopiesSampleData = false
+            guard reader.canAdd(copy) else { throw TranscodeError.cannotRead }
+            reader.add(copy)
+            audioOutput = copy
+        case .mix:
             let mix = AVAssetReaderAudioMixOutput(
                 audioTracks: audioTracks,
                 audioSettings: [
@@ -144,58 +235,86 @@ public enum VideoTranscoder {
             audioOutput = mix
         }
 
-        try? FileManager.default.removeItem(at: output)
-        guard let writer = try? AVAssetWriter(outputURL: output, fileType: .mp4) else {
-            throw TranscodeError.cannotWrite
-        }
-        writer.shouldOptimizeForNetworkUse = true
         // The plan is in display orientation; a rotated track is encoded in its natural orientation.
         let rotated = abs(transform.b) > 0.5 && abs(transform.c) > 0.5
         let compression = compressionProperties(bitrate: plan.videoBitrate, fps: Double(nominalFPS))
-        let videoInput = AVAssetWriterInput(
-            mediaType: .video,
-            outputSettings: [
+        /// A started writer with its inputs, or nil when the video encoder could not be set up (with
+        /// `hardware`, that means no hardware HEVC encoder).
+        func startWriter(hardware: Bool) throws -> (AVAssetWriter, AVAssetWriterInput, AVAssetWriterInput?)? {
+            try? FileManager.default.removeItem(at: output)
+            guard let writer = try? AVAssetWriter(outputURL: output, fileType: .mp4) else {
+                throw TranscodeError.cannotWrite
+            }
+            writer.shouldOptimizeForNetworkUse = true
+            var settings: [String: Any] = [
                 AVVideoCodecKey: AVVideoCodecType.hevc,
                 AVVideoWidthKey: rotated ? plan.height : plan.width,
                 AVVideoHeightKey: rotated ? plan.width : plan.height,
                 AVVideoScalingModeKey: AVVideoScalingModeResizeAspect,
                 AVVideoCompressionPropertiesKey: compression,
-            ])
-        videoInput.transform = transform
-        videoInput.expectsMediaDataInRealTime = false
-        guard writer.canAdd(videoInput) else { throw TranscodeError.cannotWrite }
-        writer.add(videoInput)
-        var audioInput: AVAssetWriterInput?
-        if audioOutput != nil {
-            let aac = AVAssetWriterInput(
-                mediaType: .audio,
-                outputSettings: [
-                    AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48_000, AVNumberOfChannelsKey: 2,
-                    AVEncoderBitRateKey: plan.audioBitrate,
-                ])
-            aac.expectsMediaDataInRealTime = false
-            guard writer.canAdd(aac) else { throw TranscodeError.cannotWrite }
-            writer.add(aac)
-            audioInput = aac
+            ]
+            if hardware { settings[AVVideoEncoderSpecificationKey] = encoderSpecification() }
+            let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+            videoInput.transform = transform
+            videoInput.expectsMediaDataInRealTime = false
+            guard writer.canAdd(videoInput) else { return nil }
+            writer.add(videoInput)
+            var audioInput: AVAssetWriterInput?
+            switch strategy {
+            case .none:
+                break
+            case .passthrough:
+                let copy = AVAssetWriterInput(
+                    mediaType: .audio, outputSettings: nil, sourceFormatHint: audioFormats.first)
+                copy.expectsMediaDataInRealTime = false
+                guard writer.canAdd(copy) else { throw TranscodeError.cannotWrite }
+                writer.add(copy)
+                audioInput = copy
+            case .mix:
+                let bitrate = min(
+                    max(plan.audioBitrate, aacBitrateRange.lowerBound), aacBitrateRange.upperBound)
+                let aac = AVAssetWriterInput(
+                    mediaType: .audio,
+                    outputSettings: [
+                        AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48_000,
+                        AVNumberOfChannelsKey: 2,
+                        AVEncoderBitRateKey: bitrate,
+                    ])
+                aac.expectsMediaDataInRealTime = false
+                guard writer.canAdd(aac) else { throw TranscodeError.cannotWrite }
+                writer.add(aac)
+                audioInput = aac
+            }
+            guard writer.startWriting() else {
+                writer.cancelWriting()
+                try? FileManager.default.removeItem(at: output)
+                return nil
+            }
+            return (writer, videoInput, audioInput)
         }
 
-        guard reader.startReading() else { throw TranscodeError.cannotRead }
-        guard writer.startWriting() else {
-            reader.cancelReading()
-            throw TranscodeError.cannotWrite
+        var started = try startWriter(hardware: true)
+        if started == nil {
+            log?("hardware HEVC encoder unavailable, using software")
+            started = try startWriter(hardware: false)
+        }
+        guard let (writer, videoInput, audioInput) = started else { throw TranscodeError.cannotWrite }
+        guard reader.startReading() else {
+            writer.cancelWriting()
+            try? FileManager.default.removeItem(at: output)
+            throw TranscodeError.cannotRead
         }
         writer.startSession(atSourceTime: .zero)
 
         let total = duration.seconds
         let writerBox = Unchecked(writer)
-        var pumps = [
-            Pump(
-                output: videoOutput, input: videoInput, writer: writerBox, label: "video",
-                onSample: { seconds in
-                    guard total.isFinite, total > 0 else { return }
-                    progress(min(0.99, max(0, seconds / total)))
-                })
-        ]
+        let videoPump = Pump(
+            output: videoOutput, input: videoInput, writer: writerBox, label: "video",
+            onSample: { seconds in
+                guard total.isFinite, total > 0 else { return }
+                progress(min(0.99, max(0, seconds / total)))
+            })
+        var pumps = [videoPump]
         if let audioOutput, let audioInput {
             pumps.append(
                 Pump(
@@ -244,6 +363,9 @@ public enum VideoTranscoder {
             throw TranscodeError.failed(reason)
         }
         progress(1)
+        let elapsed = start.duration(to: clock.now)
+        let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+        log?(throughputLine(frames: videoPump.framesWritten, seconds: seconds))
         return output
     }
 
@@ -263,6 +385,10 @@ public enum VideoTranscoder {
         /// Touched only on `queue`.
         private var finished = false
         private var continuation: CheckedContinuation<Void, Never>?
+        /// Touched only on `queue`.
+        private var appended = 0
+        /// Samples appended so far.
+        var framesWritten: Int { queue.sync { appended } }
 
         init(
             output: AVAssetReaderOutput, input: AVAssetWriterInput, writer: Unchecked<AVAssetWriter>,
@@ -309,6 +435,7 @@ public enum VideoTranscoder {
                     onFailure()
                     return
                 }
+                appended += 1
                 onSample(CMSampleBufferGetPresentationTimeStamp(sample).seconds)
             }
             if writer.value.status != .writing {

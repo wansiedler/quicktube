@@ -303,8 +303,61 @@ extension NetworkSuite {
                 _ = try await uploader.upload(file: file, title: "T") { _ in }
             }
             #expect(StubURLProtocol.requests.isEmpty)
+            #expect(calls.all.count == 2)
             let output = try #require(calls.all.first?.output)
             #expect(!FileManager.default.fileExists(atPath: output.path))
+        }
+
+        @Test func oversizedTranscodeIsRetriedOnceAtALowerBitrate() async throws {
+            let calls = TranscodeCalls()
+            let info = VideoInfo(width: 6016, height: 3384, fps: 60, duration: 10)
+            let statuses = AskedStrings()
+            let seen = ProgressLog()
+            let limit = 10 << 20
+            let uploader = makeUploader(
+                limitBytes: limit, videoInfo: { _ in info },
+                transcode: { input, plan, output, progress in
+                    calls.add(input: input, plan: plan, output: output)
+                    let bytes = calls.all.count == 1 ? 13 << 20 : 9 << 20
+                    try Data(repeating: 0xEE, count: bytes).write(to: output)
+                    progress(1)
+                    return output
+                })
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 20 << 20)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+
+            _ = try await uploader.upload(
+                file: file, title: "T", context: UploadContext(onStatus: { statuses.add($0) })
+            ) { seen.add($0) }
+
+            let all = calls.all
+            #expect(all.count == 2)
+            let first = all[0].plan
+            let second = all[1].plan
+            #expect(second.videoBitrate < first.videoBitrate)
+            #expect(
+                second == TelegramUploader.retryPlan(after: first, actualBytes: 13 << 20, limitBytes: limit))
+            #expect(second.width == first.width && second.audioBitrate == first.audioBitrate)
+            #expect(statuses.all.count == 3)
+            #expect(statuses.all[0].hasPrefix("Compressing · "))
+            #expect(statuses.all[1].hasPrefix("Compressing again · "))
+            #expect(statuses.all.last == "Uploading")
+            #expect(seen.values.prefix(4) == [0, 1, 0, 1])
+            #expect(StubURLProtocol.requests.count == 1)
+        }
+
+        @Test func retryPlanScalesTheVideoBitrateAndKeepsTheFloor() {
+            let plan = TranscodePlan(
+                width: 6016, height: 3384, videoBitrate: 2_690_000, audioBitrate: 160_000)
+            let retry = TelegramUploader.retryPlan(after: plan, actualBytes: 66 << 20, limitBytes: 50 << 20)
+            #expect(retry.videoBitrate == Int(2_690_000.0 * 50 / 66 * 0.9))
+            #expect(retry.width == 6016 && retry.height == 3384 && retry.audioBitrate == 160_000)
+            let tiny = TranscodePlan(width: 640, height: 360, videoBitrate: 160_000, audioBitrate: 0)
+            #expect(
+                TelegramUploader.retryPlan(after: tiny, actualBytes: 1000, limitBytes: 100).videoBitrate
+                    == VideoTranscoder.minimumVideoBitrate)
         }
 
         @Test func oversizedUnreadableVideoCannotBeTranscoded() async throws {
