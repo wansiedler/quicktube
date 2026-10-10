@@ -42,20 +42,17 @@ public final class AppState {
     private let recorder: ScreenRecorder
     private let uploader: VideoUploader
     private let notifier: Notifier
-    private let now: @Sendable () -> Date
     /// Set while a transition is in flight, so a second hotkey press cannot re-enter it.
     private var busy = false
 
     public init(
         recorder: ScreenRecorder,
         uploader: VideoUploader,
-        notifier: Notifier,
-        now: @escaping @Sendable () -> Date = { Date() }
+        notifier: Notifier
     ) {
         self.recorder = recorder
         self.uploader = uploader
         self.notifier = notifier
-        self.now = now
     }
 
     /// The hotkey action.
@@ -106,8 +103,10 @@ public final class AppState {
 
     private func upload(_ file: URL) async {
         phase = .uploading(progress: 0)
+        // The Recorder names files after the start time, so the stem is the recording's timestamp.
+        let title = file.deletingPathExtension().lastPathComponent
         do {
-            let result = try await uploader.upload(file: file, title: RecordingNaming.title(for: now())) {
+            let result = try await uploader.upload(file: file, title: title) {
                 value in
                 Task { @MainActor in self.setProgress(value) }
             }

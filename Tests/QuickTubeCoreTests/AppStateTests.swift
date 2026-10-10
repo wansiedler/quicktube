@@ -69,7 +69,7 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
     let now = Date(timeIntervalSince1970: 1_791_624_600)
 
     func makeState() -> AppState {
-        AppState(recorder: recorder, uploader: uploader, notifier: notifier, now: { now })
+        AppState(recorder: recorder, uploader: uploader, notifier: notifier)
     }
 
     @Test func toggleStartsRecording() async {
@@ -80,6 +80,7 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
     }
 
     @Test func secondToggleStopsUploadsAndPublishesLink() async {
+        recorder.file = URL(fileURLWithPath: "/tmp").appending(path: RecordingNaming.fileName(for: now))
         let state = makeState()
         await state.toggle()
         await state.toggle()
@@ -88,6 +89,8 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         #expect(state.lastLink == link)
         #expect(uploader.uploads.count == 1)
         #expect(uploader.uploads[0].0 == recorder.file)
+        // Title is the file's own stem, i.e. the recording's start timestamp.
+        #expect(uploader.uploads[0].1 == recorder.file.deletingPathExtension().lastPathComponent)
         #expect(uploader.uploads[0].1 == RecordingNaming.title(for: now))
         #expect(notifier.links.count == 1)
         #expect(notifier.links[0].1 == true)
