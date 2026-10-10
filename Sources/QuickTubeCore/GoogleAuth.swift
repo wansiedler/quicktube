@@ -33,6 +33,7 @@ public enum AuthError: Error, Equatable {
     case notSignedIn
     case tokenRevoked
     case cancelled
+    case timedOut
     case badCallback
     case badResponse(Int)
 }
@@ -88,18 +89,46 @@ public actor GoogleAuth: TokenProvider {
     }
 
     /// Full installed-app flow: loopback listener, browser, code exchange.
-    public func signIn(openBrowser: @escaping @Sendable (URL) -> Void) async throws {
+    /// Gives up with `AuthError.timedOut` after `timeout`; cancelling the calling task
+    /// throws `CancellationError`. The listener is stopped before this returns either way.
+    public func signIn(
+        timeout: Duration = .seconds(300),
+        openBrowser: @escaping @Sendable (URL) -> Void
+    ) async throws {
         let server = try LoopbackServer()
         let port = try await server.start()
-        defer { Task { await server.stop() } }
-        let redirectURI = "http://127.0.0.1:\(port)"
-        let pkce = PKCE.random()
-        let state = UUID().uuidString
-        openBrowser(try authorizationURL(pkce: pkce, redirectURI: redirectURI, state: state))
-        let callback = try await server.waitForCallback()
-        guard callback.error == nil else { throw AuthError.cancelled }
-        guard callback.state == state, let code = callback.code else { throw AuthError.badCallback }
-        try await exchange(code: code, pkce: pkce, redirectURI: redirectURI)
+        do {
+            let redirectURI = "http://127.0.0.1:\(port)"
+            let pkce = PKCE.random()
+            let state = UUID().uuidString
+            openBrowser(try authorizationURL(pkce: pkce, redirectURI: redirectURI, state: state))
+            let callback = try await Self.callback(from: server, timeout: timeout)
+            await server.stop()
+            guard callback.error == nil else { throw AuthError.cancelled }
+            guard callback.state == state, let code = callback.code else { throw AuthError.badCallback }
+            try await exchange(code: code, pkce: pkce, redirectURI: redirectURI)
+        } catch {
+            await server.stop()
+            throw error
+        }
+    }
+
+    /// Races the browser callback against `timeout`.
+    private static func callback(
+        from server: LoopbackServer, timeout: Duration
+    ) async throws -> LoopbackServer.Callback {
+        try await withThrowingTaskGroup(of: LoopbackServer.Callback?.self) { group in
+            group.addTask { try await server.waitForCallback() }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                return nil
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next(), let callback = first else {
+                throw AuthError.timedOut
+            }
+            return callback
+        }
     }
 
     public func authorizationURL(pkce: PKCE, redirectURI: String, state: String) throws -> URL {

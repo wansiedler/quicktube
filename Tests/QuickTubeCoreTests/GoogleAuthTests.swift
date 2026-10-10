@@ -16,6 +16,44 @@ final class TestClock: @unchecked Sendable {
     }
 }
 
+/// Captures the authorization URL a sign-in would open, without navigating.
+final class OpenedURL: @unchecked Sendable {
+    private let lock = NSLock()
+    private var url: URL?
+
+    var value: URL? { lock.withLock { url } }
+
+    func set(_ url: URL) { lock.withLock { self.url = url } }
+
+    /// The loopback redirect the flow is listening on.
+    var redirectURI: URL? {
+        value.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems }?
+            .first { $0.name == "redirect_uri" }?.value.flatMap(URL.init(string:))
+    }
+
+    func waitUntilOpened() async throws {
+        for _ in 0..<200 where value == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+}
+
+/// True once nothing accepts connections on `url` (retries briefly while the listener winds down).
+func isClosed(_ url: URL) async -> Bool {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.timeoutIntervalForRequest = 2
+    let session = URLSession(configuration: configuration)
+    for _ in 0..<20 {
+        do {
+            _ = try await session.data(from: url)
+        } catch {
+            return true
+        }
+        try? await Task.sleep(for: .milliseconds(50))
+    }
+    return false
+}
+
 extension NetworkSuite {
     @Suite struct GoogleAuthTests {
         let store = InMemorySecretStore()
@@ -164,6 +202,33 @@ extension NetworkSuite {
             let tokens = try await [first, second]
             #expect(tokens == ["shared", "shared"])
             #expect(StubURLProtocol.requests.count == 1)
+        }
+
+        @Test func cancelledSignInThrowsCancellationAndStopsServer() async throws {
+            let auth = makeAuth()
+            try await auth.setClient(OAuthClient(id: "cid", secret: "sec"))
+            let opened = OpenedURL()
+            let flow = Task { try await auth.signIn { opened.set($0) } }
+            try await opened.waitUntilOpened()
+            let redirect = try #require(opened.redirectURI)
+            // Listening before the cancel: an unrelated request gets a 404, not a refusal.
+            let (_, probe) = try await URLSession.shared.data(from: redirect)
+            #expect((probe as? HTTPURLResponse)?.statusCode == 404)
+            flow.cancel()
+            await #expect(throws: CancellationError.self) { try await flow.value }
+            #expect(await isClosed(redirect))
+            #expect(try await auth.isSignedIn() == false)
+        }
+
+        @Test func signInTimesOut() async throws {
+            let auth = makeAuth()
+            try await auth.setClient(OAuthClient(id: "cid", secret: "sec"))
+            let opened = OpenedURL()
+            await #expect(throws: AuthError.timedOut) {
+                try await auth.signIn(timeout: .milliseconds(100)) { opened.set($0) }
+            }
+            let redirect = try #require(opened.redirectURI)
+            #expect(await isClosed(redirect))
         }
 
         @Test func exchangeWithoutRefreshTokenFails() async throws {

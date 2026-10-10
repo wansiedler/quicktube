@@ -298,6 +298,8 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
             AppState.message(for: AuthError.missingClient)
                 == "Enter and save the OAuth client ID and secret in Settings.")
         #expect(AppState.message(for: AuthError.cancelled, stage: .signIn) == "Sign-in cancelled.")
+        #expect(AppState.message(for: CancellationError(), stage: .signIn) == "Sign-in cancelled.")
+        #expect(AppState.message(for: AuthError.timedOut, stage: .signIn) == "Sign-in timed out. Try again.")
         #expect(
             AppState.message(for: AuthError.badCallback, stage: .signIn)
                 == "Sign-in failed: the browser returned an unexpected response.")

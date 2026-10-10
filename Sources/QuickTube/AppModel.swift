@@ -19,6 +19,7 @@ final class AppModel {
     var signedIn = false
     var signingIn = false
     var authMessage: String?
+    private var signInTask: Task<Void, Never>?
 
     init() {
         let auth = GoogleAuth(store: KeychainStore())
@@ -109,8 +110,11 @@ final class AppModel {
         signingIn = true
         authMessage = "Waiting for the browser…"
         let client = enteredClient
-        Task {
-            defer { signingIn = false }
+        signInTask = Task {
+            defer {
+                signingIn = false
+                signInTask = nil
+            }
             do {
                 // Sign in with what is in the fields, even if "Save client" was never pressed.
                 guard !client.id.isEmpty, !client.secret.isEmpty else { throw AuthError.missingClient }
@@ -124,6 +128,11 @@ final class AppModel {
                 authMessage = AppState.message(for: error, stage: .signIn)
             }
         }
+    }
+
+    /// Stops a pending sign-in; the flow ends with "Sign-in cancelled."
+    func cancelSignIn() {
+        signInTask?.cancel()
     }
 
     func signOut() {

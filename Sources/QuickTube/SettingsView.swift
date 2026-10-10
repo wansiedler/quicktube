@@ -17,9 +17,10 @@ struct SettingsView: View {
                     if model.signedIn {
                         Text("Signed in").foregroundStyle(.secondary)
                         Button("Sign out") { model.signOut() }
+                    } else if model.signingIn {
+                        Button("Cancel sign-in") { model.cancelSignIn() }
                     } else {
                         Button("Sign in with Google") { model.signIn() }
-                            .disabled(model.signingIn)
                     }
                 }
                 if let message = model.authMessage {

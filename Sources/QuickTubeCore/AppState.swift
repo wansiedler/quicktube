@@ -166,6 +166,10 @@ public final class AppState {
             return "Google sign-in expired. Sign in again in Settings."
         case AuthError.cancelled:
             return "Sign-in cancelled."
+        case is CancellationError where stage == .signIn:
+            return "Sign-in cancelled."
+        case AuthError.timedOut:
+            return "Sign-in timed out. Try again."
         case AuthError.badCallback:
             return "Sign-in failed: the browser returned an unexpected response."
         case UploadError.quotaExceeded:
