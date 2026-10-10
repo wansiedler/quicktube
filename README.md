@@ -33,7 +33,9 @@ controls are disabled until a release key is set; see
 `make dmg` builds `build/QuickTube-<version>.dmg` (the app plus an
 Applications link) with the same signing identity. Releases are signed with
 an Apple Development certificate and not notarised, so on another Mac
-Gatekeeper warns on first launch (right-click → Open). How to cut a release:
+Gatekeeper blocks the first launch: open it once, then allow it under System
+Settings → Privacy & Security → Open Anyway (on macOS 15 right-click → Open
+no longer bypasses Gatekeeper). How to cut a release:
 [docs/releasing.md](docs/releasing.md).
 
 ## Google setup (once)

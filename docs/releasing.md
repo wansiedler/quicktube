@@ -7,8 +7,9 @@ a GitHub Release with it, and adds the release to the Sparkle feed
 `https://wansiedler.github.io/quicktube/appcast.xml`.
 
 Builds are signed with an Apple Development certificate and are **not
-notarised**: on a Mac other than yours Gatekeeper warns on first launch
-(right-click → Open, or System Settings → Privacy & Security → Open Anyway).
+notarised**: on a Mac other than yours Gatekeeper blocks the first launch;
+allow it under System Settings → Privacy & Security → Open Anyway (since
+macOS 15, right-click → Open no longer bypasses Gatekeeper).
 Sparkle updates install without that prompt once the app has been opened.
 
 ## One-time setup
