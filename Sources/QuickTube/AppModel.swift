@@ -80,10 +80,14 @@ final class AppModel {
         }
     }
 
-    func saveClient() {
-        let client = OAuthClient(
+    private var enteredClient: OAuthClient {
+        OAuthClient(
             id: clientID.trimmingCharacters(in: .whitespacesAndNewlines),
             secret: clientSecret.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    func saveClient() {
+        let client = enteredClient
         Task {
             do {
                 try await auth.setClient(client)
@@ -98,16 +102,20 @@ final class AppModel {
         guard !signingIn else { return }
         signingIn = true
         authMessage = "Waiting for the browser…"
+        let client = enteredClient
         Task {
             defer { signingIn = false }
             do {
+                // Sign in with what is in the fields, even if "Save client" was never pressed.
+                guard !client.id.isEmpty, !client.secret.isEmpty else { throw AuthError.missingClient }
+                try await auth.setClient(client)
                 try await auth.signIn { url in
                     Task { @MainActor in NSWorkspace.shared.open(url) }
                 }
                 signedIn = true
                 authMessage = "Signed in."
             } catch {
-                authMessage = AppState.message(for: error)
+                authMessage = AppState.message(for: error, stage: .signIn)
             }
         }
     }

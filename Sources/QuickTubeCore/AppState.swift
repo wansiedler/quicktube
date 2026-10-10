@@ -24,6 +24,11 @@ public protocol Notifier: AnyObject {
     func failed(_ message: String)
 }
 
+/// Which step of the cycle an error came from; names it in the fallback message.
+public enum Stage: Sendable {
+    case recording, upload, signIn
+}
+
 public enum Phase: Equatable, Sendable {
     case idle
     case recording
@@ -83,7 +88,7 @@ public final class AppState {
             try await recorder.start()
             phase = .recording
         } catch {
-            fail(error, file: nil)
+            fail(error, file: nil, stage: .recording)
         }
     }
 
@@ -92,10 +97,10 @@ public final class AppState {
         do {
             file = try await recorder.stop()
         } catch RecorderError.stopTimedOut(let kept) {
-            fail(RecorderError.stopTimedOut(file: kept), file: kept)
+            fail(RecorderError.stopTimedOut(file: kept), file: kept, stage: .recording)
             return
         } catch {
-            fail(error, file: nil)
+            fail(error, file: nil, stage: .recording)
             return
         }
         await upload(file)
@@ -115,7 +120,7 @@ public final class AppState {
             phase = .done(link: link)
             notifier.linkReady(link, isUnlisted: result.isUnlisted)
         } catch {
-            fail(error, file: file)
+            fail(error, file: file, stage: .upload)
         }
     }
 
@@ -124,18 +129,24 @@ public final class AppState {
         phase = .uploading(progress: value)
     }
 
-    private func fail(_ error: Error, file: URL?) {
-        let message = Self.message(for: error)
+    private func fail(_ error: Error, file: URL?, stage: Stage) {
+        let message = Self.message(for: error, stage: stage)
         phase = .failed(message: message, file: file)
         notifier.failed(message)
     }
 
-    public static func message(for error: Error) -> String {
+    public static func message(for error: Error, stage: Stage = .upload) -> String {
         switch error {
-        case AuthError.notSignedIn, AuthError.missingClient, UploadError.unauthorized:
+        case AuthError.notSignedIn, UploadError.unauthorized:
             return "Sign in to Google in Settings, then retry the upload."
+        case AuthError.missingClient:
+            return "Enter and save the OAuth client ID and secret in Settings."
         case AuthError.tokenRevoked:
             return "Google sign-in expired. Sign in again in Settings."
+        case AuthError.cancelled:
+            return "Sign-in cancelled."
+        case AuthError.badCallback:
+            return "Sign-in failed: the browser returned an unexpected response."
         case UploadError.quotaExceeded:
             return "YouTube API quota exhausted for today. Retry tomorrow."
         case UploadError.sessionExpired:
@@ -147,7 +158,11 @@ public final class AppState {
         case RecorderError.stopTimedOut:
             return "Recording did not finalize in time; the file was kept. Try Retry Upload."
         default:
-            return "Upload failed: \(error)"
+            switch stage {
+            case .recording: return "Recording failed: \(error)"
+            case .upload: return "Upload failed: \(error)"
+            case .signIn: return "Sign-in failed: \(error)"
+            }
         }
     }
 }

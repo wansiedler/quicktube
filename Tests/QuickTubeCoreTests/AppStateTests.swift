@@ -135,7 +135,8 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         #expect(
             state.phase
                 == .failed(
-                    message: AppState.message(for: RecorderError.screenPermissionDenied), file: nil))
+                    message: AppState.message(for: RecorderError.screenPermissionDenied, stage: .recording),
+                    file: nil))
         #expect(notifier.failures.count == 1)
     }
 
@@ -147,7 +148,7 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         #expect(
             state.phase
                 == .failed(
-                    message: AppState.message(for: UploadError.exhaustedRetries), file: recorder.file))
+                    message: "Upload failed: exhaustedRetries", file: recorder.file))
 
         uploader.error = nil
         await state.retry()
@@ -181,7 +182,7 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         await state.toggle()
         #expect(
             state.phase
-                == .failed(message: AppState.message(for: RecorderError.notRecording), file: nil))
+                == .failed(message: "Recording failed: notRecording", file: nil))
         #expect(uploader.uploads.isEmpty)
         #expect(notifier.failures.count == 1)
     }
@@ -260,6 +261,26 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         #expect(
             AppState.message(for: RecorderError.microphonePermissionDenied)
                 == "Allow Microphone for QuickTube in System Settings → Privacy & Security.")
+        #expect(
+            AppState.message(for: AuthError.missingClient)
+                == "Enter and save the OAuth client ID and secret in Settings.")
+        #expect(AppState.message(for: AuthError.cancelled, stage: .signIn) == "Sign-in cancelled.")
+        #expect(
+            AppState.message(for: AuthError.badCallback, stage: .signIn)
+                == "Sign-in failed: the browser returned an unexpected response.")
+        #expect(
+            AppState.message(for: RecorderError.stopTimedOut(file: URL(fileURLWithPath: "/tmp/x.mp4")))
+                == "Recording did not finalize in time; the file was kept. Try Retry Upload.")
+        // Fallback names the stage; upload is the default.
         #expect(AppState.message(for: UploadError.badResponse(500)) == "Upload failed: badResponse(500)")
+        #expect(
+            AppState.message(for: UploadError.badResponse(500), stage: .upload)
+                == "Upload failed: badResponse(500)")
+        #expect(
+            AppState.message(for: RecorderError.noDisplay, stage: .recording) == "Recording failed: noDisplay"
+        )
+        #expect(
+            AppState.message(for: AuthError.badResponse(503), stage: .signIn)
+                == "Sign-in failed: badResponse(503)")
     }
 }
