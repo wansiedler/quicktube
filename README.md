@@ -45,6 +45,25 @@ channel instead of YouTube; the message link goes on the clipboard.
 Bots accept files up to 50 MB (roughly 1–2 minutes of HEVC screen video);
 larger recordings fail with a clear message and stay on disk.
 
+## Google Drive (optional)
+
+`⌃⌥⌘D` stops the recording and uploads it to a "QuickTube" folder in your
+Drive, shared as "anyone with the link"; the Drive link goes on the
+clipboard. It uses the same Google sign-in (scope `drive.file`, which needs
+no app verification). If you signed in before Drive support existed, sign out
+and in again once. Free Drive storage is 15 GB.
+
+## Slack (optional)
+
+`⌃⌥⌘S` stops the recording and posts it to a Slack channel; the file's
+permalink goes on the clipboard (visible to workspace members).
+
+1. api.slack.com/apps → Create New App → OAuth & Permissions → Bot Token
+   Scopes: `files:write` → Install to Workspace → copy the `xoxb-…` token.
+2. Invite the bot to the channel (`/invite @yourbot`) and copy the channel ID
+   (channel details → bottom of the About tab).
+3. QuickTube → Settings → Slack: token + channel ID → Save.
+
 ## Use
 
 | Action | How |
@@ -52,7 +71,9 @@ larger recordings fail with a clear message and stay on disk.
 | Grant permissions | asked at first launch; status under Settings → Permissions |
 | Start recording | `⌃⌥⌘R` (change in Settings) |
 | Stop and upload to YouTube | `⌃⌥⌘R` again |
-| Stop and send to Telegram | `⌃⌥⌘T` (either shortcut starts a recording) |
+| Stop and send to Telegram | `⌃⌥⌘T` |
+| Stop and upload to Google Drive | `⌃⌥⌘D` |
+| Stop and send to Slack | `⌃⌥⌘S` (any shortcut starts a recording; the one that stops it picks the destination) |
 | Pick quality | Settings → Recording: Native / 4K / 1080p and 30 / 60 fps (applies to the next recording) |
 | Watch progress | a small pill at the bottom of the screen: recording timer → upload % → link (click opens it); it is excluded from the recording |
 | Retry a failed upload | menu → Retry Upload |

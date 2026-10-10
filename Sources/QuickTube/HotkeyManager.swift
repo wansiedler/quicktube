@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import QuickTubeCore
 
 /// One global hotkey through Carbon; no Accessibility permission needed.
 @MainActor
@@ -17,6 +18,23 @@ final class HotkeyManager {
             keyCode: UInt32(kVK_ANSI_T),
             modifiers: UInt32(controlKey | optionKey | cmdKey),
             label: "⌃⌥⌘T")
+        static let driveDefault = Combo(
+            keyCode: UInt32(kVK_ANSI_D),
+            modifiers: UInt32(controlKey | optionKey | cmdKey),
+            label: "⌃⌥⌘D")
+        static let slackDefault = Combo(
+            keyCode: UInt32(kVK_ANSI_S),
+            modifiers: UInt32(controlKey | optionKey | cmdKey),
+            label: "⌃⌥⌘S")
+
+        static func fallback(for destination: Destination) -> Combo {
+            switch destination {
+            case .youtube: .default
+            case .telegram: .telegramDefault
+            case .drive: .driveDefault
+            case .slack: .slackDefault
+            }
+        }
 
         init(keyCode: UInt32, modifiers: UInt32, label: String) {
             self.keyCode = keyCode

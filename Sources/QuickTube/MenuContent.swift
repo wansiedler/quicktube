@@ -13,6 +13,10 @@ struct MenuContent: View {
         case .recording:
             Button("Stop and Upload to YouTube") { Task { await model.state.toggle(destination: .youtube) } }
             Button("Stop and Send to Telegram") { Task { await model.state.toggle(destination: .telegram) } }
+            Button("Stop and Upload to Google Drive") {
+                Task { await model.state.toggle(destination: .drive) }
+            }
+            Button("Stop and Send to Slack") { Task { await model.state.toggle(destination: .slack) } }
         case .uploading:
             Button("Uploading…") {}.disabled(true)
         default:
@@ -50,12 +54,14 @@ struct MenuContent: View {
         }
     }
 
+    private var shortcutSummary: String {
+        Destination.allCases.map { "\(model.combo(for: $0).label) \($0.label)" }.joined(separator: " · ")
+    }
+
     private var statusText: String {
         switch model.state.phase {
-        case .idle:
-            "Ready — \(model.combo(for: .youtube).label) YouTube · \(model.combo(for: .telegram).label) Telegram"
-        case .recording:
-            "Recording… \(model.combo(for: .youtube).label) → YouTube, \(model.combo(for: .telegram).label) → Telegram"
+        case .idle: "Ready — " + shortcutSummary
+        case .recording: "Recording… stop with " + shortcutSummary
         case .uploading(let progress): "Uploading \(Int(progress * 100))%"
         case .done(let link): "Uploaded: \(link.absoluteString)"
         case .failed(let message, _): "Failed: \(message)"

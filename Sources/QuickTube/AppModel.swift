@@ -14,8 +14,9 @@ final class AppModel {
     private var hud: HUDController?
     private static let comboKeys: [Destination: String] = [
         .youtube: "hotkey.combo", .telegram: "hotkey.telegramCombo",
+        .drive: "hotkey.driveCombo", .slack: "hotkey.slackCombo",
     ]
-    private static let slots: [Destination: UInt32] = [.youtube: 1, .telegram: 2]
+    private static let slots: [Destination: UInt32] = [.youtube: 1, .telegram: 2, .drive: 3, .slack: 4]
 
     private(set) var combos: [Destination: HotkeyManager.Combo] = [:]
     var hotkeyMessage: String?
@@ -23,6 +24,11 @@ final class AppModel {
     var telegramChat = ""
     var telegramConfigured = false
     var telegramMessage: String?
+    let slack: SlackUploader
+    var slackToken = ""
+    var slackChannel = ""
+    var slackConfigured = false
+    var slackMessage: String?
     var clientID = ""
     var clientSecret = ""
     var signedIn = false
@@ -54,6 +60,8 @@ final class AppModel {
         self.auth = auth
         let telegram = TelegramUploader(store: store, log: { DiagnosticsLog.append($0) })
         self.telegram = telegram
+        let slack = SlackUploader(store: store, log: { DiagnosticsLog.append($0) })
+        self.slack = slack
         let notifier = AppNotifier()
         self.notifier = notifier
         self.state = AppState(
@@ -64,10 +72,12 @@ final class AppModel {
             uploaders: [
                 .youtube: YouTubeUploader(tokens: auth, log: { DiagnosticsLog.append($0) }),
                 .telegram: telegram,
+                .drive: GoogleDriveUploader(tokens: auth, log: { DiagnosticsLog.append($0) }),
+                .slack: slack,
             ],
             notifier: notifier)
         for destination in Destination.allCases {
-            let fallback: HotkeyManager.Combo = destination == .youtube ? .default : .telegramDefault
+            let fallback = HotkeyManager.Combo.fallback(for: destination)
             combos[destination] =
                 UserDefaults.standard.data(forKey: Self.comboKeys[destination]!)
                 .flatMap { try? JSONDecoder().decode(HotkeyManager.Combo.self, from: $0) } ?? fallback
@@ -94,6 +104,7 @@ final class AppModel {
         notifier.requestPermission()
         refreshAuth()
         refreshTelegram()
+        refreshSlack()
         // Ask for the recording grants now, so the first hotkey press records instead of prompting.
         if Bundle.main.bundleIdentifier != nil {
             Task {
@@ -119,7 +130,7 @@ final class AppModel {
     }
 
     func combo(for destination: Destination) -> HotkeyManager.Combo {
-        combos[destination] ?? (destination == .youtube ? .default : .telegramDefault)
+        combos[destination] ?? .fallback(for: destination)
     }
 
     /// Registers `newCombo` for `destination` and persists it; on failure keeps the previous shortcut.
@@ -139,6 +150,43 @@ final class AppModel {
         } else {
             hotkey.register(previous, slot: slot)
             hotkeyMessage = "\(newCombo.label) is already in use by another app. Kept \(previous.label)."
+        }
+    }
+
+    func refreshSlack() {
+        Task {
+            do {
+                if let configuration = try await slack.configuration() {
+                    slackToken = configuration.token
+                    slackChannel = configuration.channel
+                    slackConfigured = true
+                } else {
+                    slackConfigured = false
+                }
+            } catch {
+                slackMessage = "Keychain error: \(error)"
+            }
+        }
+    }
+
+    func saveSlack() {
+        let configuration = SlackConfiguration(
+            token: slackToken.trimmingCharacters(in: .whitespacesAndNewlines),
+            channel: slackChannel.trimmingCharacters(in: .whitespacesAndNewlines))
+        Task {
+            do {
+                if configuration.token.isEmpty || configuration.channel.isEmpty {
+                    try await slack.clearConfiguration()
+                    slackConfigured = false
+                    slackMessage = "Slack cleared."
+                } else {
+                    try await slack.setConfiguration(configuration)
+                    slackConfigured = true
+                    slackMessage = "Slack saved."
+                }
+            } catch {
+                slackMessage = "Could not save to Keychain: \(error)"
+            }
         }
     }
 

@@ -158,7 +158,7 @@ public actor TelegramUploader: VideoUploader {
 }
 
 /// Forwards URLSession's byte counts to the upload progress callback.
-private final class ProgressDelegate: NSObject, URLSessionTaskDelegate {
+final class ProgressDelegate: NSObject, URLSessionTaskDelegate {
     private let progress: @Sendable (Double) -> Void
 
     init(_ progress: @escaping @Sendable (Double) -> Void) {

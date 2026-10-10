@@ -79,9 +79,34 @@ struct SettingsView: View {
                     Text(message).font(.callout).foregroundStyle(.secondary)
                 }
             }
+            Section("Google Drive") {
+                Text(
+                    "Uses the Google sign-in above. Files go to a \"QuickTube\" folder and are shared as "
+                        + "\"anyone with the link\". If you signed in before Drive support, sign out and in again."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+            }
+            Section("Slack") {
+                SecureField("Bot token (xoxb-…)", text: $model.slackToken)
+                TextField("Channel ID (C…)", text: $model.slackChannel)
+                HStack {
+                    Button("Save Slack") { model.saveSlack() }
+                    Spacer()
+                    Text(model.slackConfigured ? "Configured" : "Not set up").foregroundStyle(.secondary)
+                }
+                Text(
+                    "Create a Slack app with the files:write scope, install it, invite the bot to the channel."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+                if let message = model.slackMessage {
+                    Text(message).font(.callout).foregroundStyle(.secondary)
+                }
+            }
             Section("Shortcuts") {
                 shortcutRow("Record → YouTube", destination: .youtube)
                 shortcutRow("Record → Telegram", destination: .telegram)
+                shortcutRow("Record → Google Drive", destination: .drive)
+                shortcutRow("Record → Slack", destination: .slack)
                 Text(
                     "Hold ⌘ or ⌃ (plus any other modifiers). Either shortcut starts a recording; the one you press to stop picks the destination."
                 )
@@ -96,6 +121,7 @@ struct SettingsView: View {
         .onAppear {
             model.refreshAuth()
             model.refreshTelegram()
+            model.refreshSlack()
             model.refreshLaunchAtLogin()
             model.refreshPermissions()
         }

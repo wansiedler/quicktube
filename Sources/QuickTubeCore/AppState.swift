@@ -51,11 +51,15 @@ public enum FailureKind: Equatable, Sendable {
 public enum Destination: String, Sendable, CaseIterable, Codable {
     case youtube
     case telegram
+    case drive
+    case slack
 
     public var label: String {
         switch self {
         case .youtube: "YouTube"
         case .telegram: "Telegram"
+        case .drive: "Google Drive"
+        case .slack: "Slack"
         }
     }
 }
@@ -201,6 +205,12 @@ public final class AppState {
             return "File is \(actual / (1 << 20)) MB; Telegram bots accept at most \(limit / (1 << 20)) MB."
         case TelegramError.apiError(let description):
             return "Telegram refused the upload: \(description)"
+        case DriveError.insufficientScope:
+            return "Google Drive access was not granted. Sign out and sign in again in Settings."
+        case SlackError.notConfigured:
+            return "Slack is not set up: add the bot token and channel ID in Settings."
+        case SlackError.apiError(let code):
+            return "Slack refused the upload: \(code)"
         case UploadError.apiError(let status, let message):
             if message.contains("exceeded the number of videos") {
                 return "YouTube's daily upload limit for this channel is reached; "

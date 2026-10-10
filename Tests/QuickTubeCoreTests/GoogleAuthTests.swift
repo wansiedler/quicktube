@@ -87,7 +87,10 @@ extension NetworkSuite {
             #expect(value("client_id") == "cid")
             #expect(value("redirect_uri") == "http://127.0.0.1:4242")
             #expect(value("response_type") == "code")
-            #expect(value("scope") == "https://www.googleapis.com/auth/youtube.upload")
+            #expect(
+                value("scope")
+                    == "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/drive.file"
+            )
             #expect(value("code_challenge") == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
             #expect(value("code_challenge_method") == "S256")
             #expect(value("state") == "xyz")
