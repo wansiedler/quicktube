@@ -4,6 +4,7 @@ import SwiftUI
 
 struct MenuContent: View {
     let model: AppModel
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         Text(statusText)
@@ -29,7 +30,11 @@ struct MenuContent: View {
         }
         Button("Open Recordings Folder") { model.openRecordingsFolder() }
         Divider()
-        SettingsLink { Text("Settings…") }
+        Button("Settings…") {
+            // A menu bar app is never active, so the window would open behind others.
+            NSApp.activate(ignoringOtherApps: true)
+            openSettings()
+        }
         Button("Quit QuickTube") { NSApplication.shared.terminate(nil) }
     }
 
