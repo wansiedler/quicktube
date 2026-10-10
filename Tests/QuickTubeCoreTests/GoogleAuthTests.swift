@@ -2,6 +2,20 @@ import Foundation
 import QuickTubeCore
 import Testing
 
+/// Lock-guarded clock the tests can advance.
+final class TestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: Date
+
+    init(_ start: Date = Date(timeIntervalSince1970: 1_000_000)) { current = start }
+
+    var now: Date { lock.withLock { current } }
+
+    func advance(by seconds: TimeInterval) {
+        lock.withLock { current = current.addingTimeInterval(seconds) }
+    }
+}
+
 extension NetworkSuite {
     @Suite struct GoogleAuthTests {
         let store = InMemorySecretStore()
@@ -9,11 +23,11 @@ extension NetworkSuite {
             authorization: URL(string: "https://auth.example/authorize")!,
             token: URL(string: "https://auth.example/token")!)
 
-        func makeAuth(now: Date = Date(timeIntervalSince1970: 1_000_000)) -> GoogleAuth {
+        func makeAuth(clock: TestClock = TestClock()) -> GoogleAuth {
             StubURLProtocol.reset()
             return GoogleAuth(
                 store: store, session: StubURLProtocol.makeSession(), endpoints: endpoints,
-                now: { now })
+                now: { clock.now })
         }
 
         func tokenJSON(refresh: String? = "r1", access: String = "a1", expires: Int = 3600) -> Data {
@@ -114,6 +128,52 @@ extension NetworkSuite {
             let auth = makeAuth()
             try store.set("r", for: "oauth.refresh_token")
             try await auth.signOut()
+            #expect(try await auth.isSignedIn() == false)
+        }
+
+        @Test func cachedTokenIsReusedOutsideSkew() async throws {
+            let clock = TestClock()
+            let auth = makeAuth(clock: clock)
+            try await auth.setClient(OAuthClient(id: "cid", secret: "sec"))
+            StubURLProtocol.enqueue(.init(status: 200, body: tokenJSON()))
+            try await auth.exchange(code: "c", pkce: PKCE(verifier: "v"), redirectURI: "http://127.0.0.1:1")
+            clock.advance(by: 3000)
+            #expect(try await auth.accessToken() == "a1")
+            #expect(StubURLProtocol.requests.count == 1)
+        }
+
+        @Test func tokenInsideSkewIsRefreshed() async throws {
+            let clock = TestClock()
+            let auth = makeAuth(clock: clock)
+            try await auth.setClient(OAuthClient(id: "cid", secret: "sec"))
+            StubURLProtocol.enqueue(.init(status: 200, body: tokenJSON()))
+            try await auth.exchange(code: "c", pkce: PKCE(verifier: "v"), redirectURI: "http://127.0.0.1:1")
+            StubURLProtocol.enqueue(.init(status: 200, body: tokenJSON(refresh: nil, access: "a2")))
+            clock.advance(by: 3550)
+            #expect(try await auth.accessToken() == "a2")
+            #expect(StubURLProtocol.requests.count == 2)
+        }
+
+        @Test func concurrentCallsShareOneRefresh() async throws {
+            let auth = makeAuth()
+            try await auth.setClient(OAuthClient(id: "cid", secret: "sec"))
+            try store.set("r", for: "oauth.refresh_token")
+            StubURLProtocol.enqueue(.init(status: 200, body: tokenJSON(refresh: nil, access: "shared")))
+            async let first = auth.accessToken()
+            async let second = auth.accessToken()
+            let tokens = try await [first, second]
+            #expect(tokens == ["shared", "shared"])
+            #expect(StubURLProtocol.requests.count == 1)
+        }
+
+        @Test func exchangeWithoutRefreshTokenFails() async throws {
+            let auth = makeAuth()
+            try await auth.setClient(OAuthClient(id: "cid", secret: "sec"))
+            StubURLProtocol.enqueue(.init(status: 200, body: tokenJSON(refresh: nil)))
+            await #expect(throws: AuthError.badResponse(200)) {
+                try await auth.exchange(
+                    code: "c", pkce: PKCE(verifier: "v"), redirectURI: "http://127.0.0.1:1")
+            }
             #expect(try await auth.isSignedIn() == false)
         }
     }

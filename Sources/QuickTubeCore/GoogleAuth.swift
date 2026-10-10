@@ -52,6 +52,7 @@ public actor GoogleAuth: TokenProvider {
     private let endpoints: OAuthEndpoints
     private let now: @Sendable () -> Date
     private var cached: (token: String, expiry: Date)?
+    private var refreshing: Task<String, Error>?
 
     public init(
         store: SecretStore,
@@ -122,6 +123,16 @@ public actor GoogleAuth: TokenProvider {
         if let cached, cached.expiry.timeIntervalSince(now()) > 60 {
             return cached.token
         }
+        if let refreshing {
+            return try await refreshing.value
+        }
+        let task = Task { try await refreshAccessToken() }
+        refreshing = task
+        defer { refreshing = nil }
+        return try await task.value
+    }
+
+    private func refreshAccessToken() async throws -> String {
         guard let client = try client() else { throw AuthError.missingClient }
         guard let refresh = try store.get(Key.refreshToken) else { throw AuthError.notSignedIn }
         let token = try await tokenRequest([
