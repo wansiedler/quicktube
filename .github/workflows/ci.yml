@@ -113,7 +113,15 @@ jobs:
           python3 - "$CODECOV_JSON" <<'EOF'
           import json, os, sys
 
-          floors = {"ShareLink.swift": 100.0}
+          floors = {
+              "AppState.swift": 97.0,
+              "GoogleAuth.swift": 87.0,
+              "LoopbackServer.swift": 91.0,
+              "PKCE.swift": 100.0,
+              "RecordingNaming.swift": 100.0,
+              "ShareLink.swift": 100.0,
+              "YouTubeUploader.swift": 95.0,
+          }
 
           with open(sys.argv[1]) as fh:
               export = json.load(fh)
