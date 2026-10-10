@@ -40,9 +40,17 @@ public enum UploadError: Error, Equatable {
 public struct UploadContext: Sendable, Equatable {
     /// Name of the screen that was recorded.
     public var display: String?
+    /// Reports a stage change ("Compressing · details", "Uploading"); may be called from any thread.
+    public var onStatus: @Sendable (String) -> Void
 
-    public init(display: String? = nil) {
+    public init(display: String? = nil, onStatus: @escaping @Sendable (String) -> Void = { _ in }) {
         self.display = display
+        self.onStatus = onStatus
+    }
+
+    /// The callback is not comparable; contexts are equal when their data is.
+    public static func == (lhs: UploadContext, rhs: UploadContext) -> Bool {
+        lhs.display == rhs.display
     }
 }
 
@@ -95,6 +103,7 @@ public actor YouTubeUploader: VideoUploader {
         file: URL, title: String, context: UploadContext = UploadContext(),
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> UploadResult {
+        context.onStatus("Uploading")
         let size: Int
         let handle: FileHandle
         do {

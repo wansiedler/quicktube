@@ -207,6 +207,41 @@ extension NetworkSuite {
             #expect(asked.all == [file])
         }
 
+        @Test func transcodingReportsCompressingThenUploading() async throws {
+            let statuses = AskedStrings()
+            let uploader = makeUploader(
+                limitBytes: 100 << 20,
+                videoInfo: { _ in VideoInfo(width: 2560, height: 1440, fps: 60, duration: 60) },
+                transcode: fakeTranscode(bytes: 60, calls: TranscodeCalls()))
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 200 << 20)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+
+            _ = try await uploader.upload(
+                file: file, title: "T", context: UploadContext(onStatus: { statuses.add($0) })
+            ) { _ in }
+
+            let all = statuses.all
+            #expect(all.count == 3)
+            #expect(all.first == "Uploading")
+            #expect(all[1].hasPrefix("Compressing · 2560×1440 60 fps 200 MB → "))
+            #expect(all[1].hasSuffix(" fps ~100 MB"))
+            #expect(all.last == "Uploading")
+        }
+
+        @Test func plainUploadReportsOnlyUploading() async throws {
+            let statuses = AskedStrings()
+            let uploader = makeUploader()
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 4)
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            _ = try await uploader.upload(
+                file: file, title: "T", context: UploadContext(onStatus: { statuses.add($0) })
+            ) { _ in }
+            #expect(statuses.all == ["Uploading"])
+        }
+
         @Test func transcodedUploadSendsDimensionsOfTheTranscodedCopy() async throws {
             let asked = AskedURLs()
             let calls = TranscodeCalls()
@@ -326,4 +361,11 @@ final class AskedURLs: @unchecked Sendable {
     private var stored: [URL] = []
     var all: [URL] { lock.withLock { stored } }
     func add(_ url: URL) { lock.withLock { stored.append(url) } }
+}
+
+final class AskedStrings: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+    func add(_ value: String) { lock.withLock { stored.append(value) } }
+    var all: [String] { lock.withLock { stored } }
 }

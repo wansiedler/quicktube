@@ -59,4 +59,21 @@ public enum RecordingNaming {
         if let fps = info.fps { parts.append("\(Int(fps.rounded())) fps") }
         return parts.joined(separator: " · ")
     }
+
+    /// "Compressing · 6016×3384 60 fps 120 MB → 6016×3384 60 fps ~48 MB"; the after size is the target.
+    public static func compressionLine(
+        from info: VideoInfo, sizeBytes: Int, to plan: TranscodePlan, targetBytes: Int
+    ) -> String {
+        func format(width: Int, height: Int, fps: Double?, bytes: Int, approximate: Bool) -> String {
+            var text = "\(width)×\(height)"
+            if let fps { text += " \(Int(fps.rounded())) fps" }
+            let megabytes = Int((Double(bytes) / 1_048_576).rounded())
+            return text + " \(approximate ? "~" : "")\(megabytes) MB"
+        }
+        let before = format(
+            width: info.width, height: info.height, fps: info.fps, bytes: sizeBytes, approximate: false)
+        let after = format(
+            width: plan.width, height: plan.height, fps: info.fps, bytes: targetBytes, approximate: true)
+        return "Compressing · \(before) → \(after)"
+    }
 }

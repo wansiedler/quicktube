@@ -58,6 +58,29 @@ import Testing
         #expect(RecordingNaming.metadataLine(display: nil, info: slow) == "3840×2160 · 59 fps")
     }
 
+    @Test func compressionLineShowsBeforeAndAfter() {
+        let info = VideoInfo(width: 6016, height: 3384, fps: 59.97, duration: 30)
+        let plan = TranscodePlan(width: 3008, height: 1692, videoBitrate: 1, audioBitrate: 1)
+        #expect(
+            RecordingNaming.compressionLine(
+                from: info, sizeBytes: 120 << 20, to: plan, targetBytes: 48 << 20)
+                == "Compressing · 6016×3384 60 fps 120 MB → 3008×1692 60 fps ~48 MB")
+        // 120.4 MB rounds down, 47.6 MB rounds up.
+        #expect(
+            RecordingNaming.compressionLine(
+                from: info, sizeBytes: 126_250_000, to: plan, targetBytes: 49_900_000)
+                == "Compressing · 6016×3384 60 fps 120 MB → 3008×1692 60 fps ~48 MB")
+    }
+
+    @Test func compressionLineOmitsUnknownFps() {
+        let info = VideoInfo(width: 1280, height: 720, fps: nil, duration: 2)
+        let plan = TranscodePlan(width: 1280, height: 720, videoBitrate: 1, audioBitrate: 1)
+        #expect(
+            RecordingNaming.compressionLine(
+                from: info, sizeBytes: 60 << 20, to: plan, targetBytes: 50 << 20)
+                == "Compressing · 1280×720 60 MB → 1280×720 ~50 MB")
+    }
+
     @Test func metadataLineSkipsUnknownFps() {
         let info = VideoInfo(width: 1280, height: 720, fps: nil, duration: 2)
         #expect(RecordingNaming.metadataLine(display: "Display", info: info) == "Display · 1280×720")

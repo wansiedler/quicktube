@@ -35,6 +35,7 @@ public actor GoogleDriveUploader: VideoUploader {
         file: URL, title: String, context: UploadContext = UploadContext(),
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> UploadResult {
+        context.onStatus("Uploading")
         let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int) ?? 0
         guard size > 0 else { throw UploadError.fileUnreadable }
         let folder = try await ensureFolder()

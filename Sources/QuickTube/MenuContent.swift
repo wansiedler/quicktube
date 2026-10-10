@@ -84,7 +84,7 @@ struct MenuContent: View {
         case .idle: "Ready — " + shortcutSummary
         case .recording: "Recording… stop with " + shortcutSummary
         case .paused: "Paused — resume with \(AppModel.pauseCombo.label), stop with " + shortcutSummary
-        case .uploading(let progress): "Uploading \(Int(progress * 100))%"
+        case .uploading(let progress): AppState.uploadText(stage: model.state.uploadStage, progress: progress)
         case .done(let link): "Uploaded: \(link.absoluteString)"
         case .failed(let message, _): "Failed: \(message)"
         }

@@ -85,6 +85,9 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
     /// Called on the main actor after each progress value has had time to land.
     var onProgress: (@MainActor @Sendable (Double) -> Void)?
     var lastProgress: (@Sendable (Double) -> Void)?
+    /// Stages reported through the context, each followed by `onStage`.
+    var stages: [String] = []
+    var onStage: (@MainActor @Sendable (String) -> Void)?
 
     func upload(
         file: URL, title: String, context: UploadContext,
@@ -93,6 +96,11 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         uploads.append((file, title))
         contexts.append(context)
         lastProgress = progress
+        for stage in stages {
+            context.onStatus(stage)
+            for _ in 0..<5 { await Task.yield() }
+            await onStage?(stage)
+        }
         for value in progressValues {
             progress(value)
             for _ in 0..<5 { await Task.yield() }
@@ -109,6 +117,10 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
 
     func linkReady(_ url: URL, isUnlisted: Bool) { links.append((url, isUnlisted)) }
     func failed(_ message: String) { failures.append(message) }
+}
+
+@MainActor final class StageLog {
+    var values: [String] = []
 }
 
 @MainActor final class PhaseLog {
@@ -169,6 +181,23 @@ final class LogLines: @unchecked Sendable {
         #expect(FileManager.default.fileExists(atPath: renamed.path))
         #expect(notifier.links.count == 1)
         #expect(notifier.links[0].1 == true)
+    }
+
+    @Test func uploadStageFollowsTheUploaderAndResets() async throws {
+        let file = FileManager.default.temporaryDirectory.appending(path: "qt-\(UUID().uuidString).mp4")
+        try Data([1]).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        recorder.file = file
+        uploader.stages = ["Compressing · x", "Uploading"]
+        let state = AppState(recorder: recorder, uploader: uploader, notifier: notifier)
+        let stagesSeen = StageLog()
+        uploader.onStage = { _ in stagesSeen.values.append(state.uploadStage) }
+        #expect(state.uploadStage == "Uploading")
+        await state.toggle()
+        await state.toggle()
+        #expect(stagesSeen.values == ["Compressing · x", "Uploading"])
+        #expect(AppState.uploadText(stage: "Compressing · x", progress: 0.21) == "Compressing 21% · x")
+        #expect(AppState.uploadText(stage: "Uploading", progress: 0.6) == "Uploading 60%")
     }
 
     @Test func renderedTitleNamesTheFileAndTheUpload() async throws {

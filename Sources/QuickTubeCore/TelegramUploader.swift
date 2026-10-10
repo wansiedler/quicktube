@@ -90,6 +90,7 @@ public actor TelegramUploader: VideoUploader {
         file: URL, title: String, context: UploadContext = UploadContext(),
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> UploadResult {
+        context.onStatus("Uploading")
         guard let configuration = try configuration() else { throw TelegramError.notConfigured }
         let size = Self.fileSize(file)
         guard size > 0 else { throw UploadError.fileUnreadable }
@@ -120,6 +121,8 @@ public actor TelegramUploader: VideoUploader {
             let plan = VideoTranscoder.plan(info: info, limitBytes: limit, allowDownscale: allowDownscale())
             let output = Self.transcodeURL(for: file)
             transcoded = output
+            context.onStatus(
+                RecordingNaming.compressionLine(from: info, sizeBytes: size, to: plan, targetBytes: limit))
             log("Telegram: \(size) bytes over the \(limit)-byte limit, transcoding with \(plan)")
             progress(0)
             sending = try await transcode(file, plan, output) { progress($0 * 0.5) }
@@ -128,6 +131,7 @@ public actor TelegramUploader: VideoUploader {
             guard newSize > 0 else { throw UploadError.fileUnreadable }
             guard newSize <= limit else { throw TelegramError.fileTooLarge(limit: limit, actual: newSize) }
             sendProgress = { progress(0.5 + $0 * 0.5) }
+            context.onStatus("Uploading")
             // The player proportions must match the file that is sent, not the recording.
             do {
                 sendingInfo = try await videoInfo(sending)

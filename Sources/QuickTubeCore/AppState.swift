@@ -98,6 +98,8 @@ public final class AppState {
 
     /// Where the last (or current) upload went; `retry()` reuses it.
     public private(set) var destination: Destination = .youtube
+    /// Current upload stage text: "Uploading", or "Compressing · details" while a copy is made.
+    public private(set) var uploadStage: String = "Uploading"
 
     private let recorder: ScreenRecorder
     private let uploaders: [Destination: VideoUploader]
@@ -332,6 +334,7 @@ public final class AppState {
 
     private func upload(_ file: URL, to destination: Destination) async {
         self.destination = destination
+        uploadStage = "Uploading"
         phase = .uploading(progress: 0)
         guard let uploader = uploaders[destination] else {
             fail(DestinationError.unavailable(destination), file: file, stage: .upload)
@@ -339,8 +342,12 @@ public final class AppState {
         }
         let title = pendingTitle ?? file.deletingPathExtension().lastPathComponent
         do {
+            var context = pendingUploadContext
+            context.onStatus = { stage in
+                Task { @MainActor in self.setStage(stage) }
+            }
             let result = try await uploader.upload(
-                file: file, title: title, context: pendingUploadContext
+                file: file, title: title, context: context
             ) {
                 value in
                 Task { @MainActor in self.setProgress(value) }
@@ -352,6 +359,18 @@ public final class AppState {
         } catch {
             fail(error, file: file, stage: .upload)
         }
+    }
+
+    /// "Compressing · details" at 21% → "Compressing 21% · details"; a plain stage → "Uploading 60%".
+    public static func uploadText(stage: String, progress: Double) -> String {
+        let percent = "\(Int(progress * 100))%"
+        guard let split = stage.range(of: " · ") else { return "\(stage) \(percent)" }
+        return "\(stage[..<split.lowerBound]) \(percent) · \(stage[split.upperBound...])"
+    }
+
+    private func setStage(_ stage: String) {
+        guard case .uploading = phase else { return }
+        uploadStage = stage
     }
 
     private func setProgress(_ value: Double) {

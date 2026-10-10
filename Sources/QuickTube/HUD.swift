@@ -35,6 +35,7 @@ final class HUDController {
     private func observe() {
         withObservationTracking {
             _ = state.phase
+            _ = state.uploadStage
         } onChange: { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
@@ -68,7 +69,14 @@ final class HUDController {
         let visible = screen.visibleFrame
         // Errors get the whole screen width so the server's message is readable.
         let maxWidth: CGFloat
-        if case .failed = state.phase { maxWidth = visible.width - 48 } else { maxWidth = 480 }
+        if case .failed = state.phase {
+            maxWidth = visible.width - 48
+        } else if case .uploading = state.phase, state.uploadStage.contains(" · ") {
+            // Compression details (before → after) need room.
+            maxWidth = visible.width - 48
+        } else {
+            maxWidth = 480
+        }
         hosting.rootView = HUDView(state: state, maxWidth: maxWidth)
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
@@ -106,7 +114,7 @@ struct HUDView: View {
                 Text("Paused ⏸ \(clock(state.recordedDuration(at: Date())))").monospacedDigit()
             case .uploading(let progress):
                 ProgressView(value: progress).frame(width: 120)
-                Text("Uploading \(Int(progress * 100))%").monospacedDigit()
+                Text(AppState.uploadText(stage: state.uploadStage, progress: progress)).monospacedDigit()
             case .done(let link):
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                 Text("Link copied · \(link.host ?? "")\(link.path)")
