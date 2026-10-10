@@ -16,6 +16,9 @@ final class AppModel {
     private let camera = CameraPanel()
     /// The windows the recorder leaves out; filled in once the HUD exists.
     private let exclusions = WindowExclusions()
+    /// Whether the camera session was last told to run; it stays warm while the bubble is enabled.
+    @ObservationIgnored private var cameraRunning = false
+    @ObservationIgnored private var activationObserver: NSObjectProtocol?
     private static let comboKeys: [Destination: String] = [
         .youtube: "hotkey.combo", .telegram: "hotkey.telegramCombo",
         .drive: "hotkey.driveCombo", .slack: "hotkey.slackCombo",
@@ -87,7 +90,7 @@ final class AppModel {
                     return RecorderOptions(
                         quality: settings.quality, systemAudio: settings.systemAudioEnabled,
                         microphone: settings.microphoneEnabled)
-                }, excludedWindows: { exclusions.windows() }),
+                }, excludedWindows: { exclusions.windows() }, log: { DiagnosticsLog.append($0) }),
             uploaders: [
                 .youtube: YouTubeUploader(tokens: auth, log: { DiagnosticsLog.append($0) }),
                 .telegram: telegram,
@@ -143,7 +146,15 @@ final class AppModel {
         exclusions.windows = { [weak hud, selectionOverlay] in
             [hud?.windowNumber, selectionOverlay.windowNumber].compactMap { $0 }
         }
+        // Show the bubble before the recorder starts, so it is in the first frame.
+        state.onRecordingWillStart = { [weak self] _ in self?.updateCamera() }
         observeCamera()
+        // Grants changed in System Settings take effect when QuickTube is next activated.
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshPermissions() }
+        }
         notifier.requestPermission()
         refreshAuth()
         refreshTelegram()
@@ -166,7 +177,6 @@ final class AppModel {
     func requestCamera() {
         Task {
             cameraStatus = await Permissions.requestCamera()
-            updateCamera()
         }
     }
 
@@ -187,21 +197,42 @@ final class AppModel {
         }
     }
 
-    /// Shown while recording (or paused) when the camera is on, always when it is also "always on";
-    /// never without the camera grant.
+    /// The camera runs while the bubble is enabled and granted. The bubble shows while a recording starts,
+    /// runs or is paused, placed in the captured area, and always (on the screen under the cursor) when
+    /// "always on" is set too. Reads only observable state, so a grant or settings change re-runs it.
     private func updateCamera() {
         let settings = settings
+        let enabled = settings.cameraEnabled && cameraStatus == .granted
+        if enabled != cameraRunning {
+            cameraRunning = enabled
+            if enabled { camera.startCamera() } else { camera.stopCamera() }
+        }
         let recording: Bool
         switch state.phase {
         case .recording, .paused: recording = true
-        default: recording = false
+        default: recording = state.isStarting
         }
-        let wanted = settings.cameraEnabled && (settings.cameraAlwaysOn || recording)
-        guard wanted, Permissions.camera == .granted else {
+        guard enabled, settings.cameraAlwaysOn || recording else {
             camera.hide()
             return
         }
-        camera.show(size: settings.cameraSize.points, corner: settings.cameraCorner)
+        camera.show(
+            size: settings.cameraSize.points, corner: settings.cameraCorner,
+            in: recording ? Self.cameraArea(for: state.recordingTarget) : nil)
+    }
+
+    /// Where the bubble goes for `target`, in AppKit coordinates: the display's visible frame, or the
+    /// region itself. Nil (the screen under the cursor) for window captures, which cannot contain it.
+    private static func cameraArea(for target: CaptureTarget?) -> CGRect? {
+        func screen(_ id: CGDirectDisplayID) -> NSScreen? {
+            NSScreen.screens.first { $0.displayID == id }
+        }
+        switch target {
+        case .display(let id): return screen(id)?.visibleFrame
+        case .region(let id, let rect):
+            return screen(id).map { CameraLayout.appKitRect(region: rect, onScreen: $0.frame) }
+        case .window, nil: return nil
+        }
     }
 
     func requestMicrophone() {

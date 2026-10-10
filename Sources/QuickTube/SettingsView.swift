@@ -81,7 +81,9 @@ struct SettingsView: View {
                 }
                 Text(
                     "A round camera view shown while recording, or all the time with Always on. "
-                        + "It is part of the recording; drag it anywhere."
+                        + "It is part of the recording, in the chosen corner of the display or selected area; "
+                        + "drag it anywhere. Window recordings capture only that window, so they never "
+                        + "contain the bubble. The camera stays on while the bubble is enabled."
                 )
                 .font(.callout).foregroundStyle(.secondary)
             }

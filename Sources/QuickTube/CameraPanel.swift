@@ -4,20 +4,19 @@ import QuickTubeCore
 
 /// A round, always-on-top bubble showing the default camera, mirrored. It is an ordinary window to
 /// ScreenCaptureKit, so it is recorded with the screen. Drag it anywhere; it never takes focus.
+/// The camera runs (`startCamera`) independently of the bubble being shown, so the bubble can appear
+/// with a live picture the moment a recording starts.
 @MainActor
 final class CameraPanel {
     private let panel: NSPanel
     private let bubble = BubbleView()
-    private let session = AVCaptureSession()
+    private let camera = CameraSession()
     private let previewLayer: AVCaptureVideoPreviewLayer
-    /// Starting and stopping a capture session blocks; never do it on the main thread.
-    private let sessionQueue = DispatchQueue(label: "QuickTube.camera")
-    private var configured = false
-    /// Size and corner of the last placement, so unrelated settings changes leave a dragged bubble alone.
-    private var placement: (size: CGFloat, corner: Corner)?
+    /// The last placement, so unrelated settings changes leave a dragged bubble alone.
+    private var placement: (size: CGFloat, corner: Corner, area: CGRect)?
 
     init() {
-        previewLayer = AVCaptureVideoPreviewLayer(session: session)
+        previewLayer = AVCaptureVideoPreviewLayer(session: camera.session)
         previewLayer.videoGravity = .resizeAspectFill
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 220, height: 220),
@@ -38,50 +37,86 @@ final class CameraPanel {
         panel.contentView = bubble
     }
 
-    var isVisible: Bool { panel.isVisible }
-
-    /// Shows the bubble (starting the camera) or, if it is up, moves it when `size` or `corner` changed.
-    /// Placed on the screen under the cursor. Returns false when there is no camera.
-    @discardableResult
-    func show(size: CGFloat, corner: Corner) -> Bool {
-        guard configureIfNeeded() else { return false }
-        let alreadyVisible = panel.isVisible
-        if !alreadyVisible || placement?.size != size || placement?.corner != corner {
-            place(size: size, corner: corner)
-        }
-        guard !alreadyVisible else { return true }
-        panel.orderFrontRegardless()
-        let session = Unchecked(value: session)
-        sessionQueue.async {
-            if !session.value.isRunning { session.value.startRunning() }
-        }
-        return true
+    /// Configures (first time) and starts the camera on the session queue; the camera light turns on.
+    func startCamera() {
+        camera.start { [weak self] in self?.mirror() }
     }
 
-    /// Hides the bubble and stops the camera (its light goes off).
+    /// Stops the camera on the session queue; the camera light goes off.
+    func stopCamera() {
+        camera.stop()
+    }
+
+    /// Orders the bubble in, at `corner` of `area` (AppKit coordinates), or of the visible frame of the
+    /// screen under the cursor when `area` is nil. A visible bubble moves only when the size, the corner
+    /// or a given `area` changed.
+    func show(size: CGFloat, corner: Corner, in area: CGRect?) {
+        let visible = panel.isVisible
+        if let placement, visible, placement.size == size, placement.corner == corner,
+            area == nil || area == placement.area
+        {
+            return
+        }
+        guard let target = area ?? Self.screenUnderCursor() else { return }
+        place(size: size, corner: corner, in: target)
+        if !visible { panel.orderFrontRegardless() }
+    }
+
     func hide() {
         guard panel.isVisible else { return }
         panel.orderOut(nil)
         placement = nil
-        let session = Unchecked(value: session)
-        sessionQueue.async {
-            if session.value.isRunning { session.value.stopRunning() }
+    }
+
+    private static func screenUnderCursor() -> CGRect? {
+        let mouse = NSEvent.mouseLocation
+        let underCursor = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
+        return (underCursor ?? NSScreen.main)?.visibleFrame
+    }
+
+    private func place(size wanted: CGFloat, corner: Corner, in area: CGRect) {
+        let size = CameraLayout.fittedSize(wanted, in: area)
+        let origin = CameraLayout.origin(for: corner, size: size, in: area)
+        panel.setFrame(NSRect(origin: origin, size: NSSize(width: size, height: size)), display: true)
+        bubble.resize(diameter: size, preview: previewLayer)
+        placement = (wanted, corner, area)
+    }
+
+    /// The preview connection exists once the input is added; mirror it like a FaceTime preview.
+    private func mirror() {
+        guard let connection = previewLayer.connection, connection.isVideoMirroringSupported else { return }
+        connection.automaticallyAdjustsVideoMirroring = false
+        connection.isVideoMirrored = true
+    }
+}
+
+/// Owns the capture session. Configuring, starting and stopping block, so they all run on one serial
+/// queue, never on the main thread; `configured` is only touched there.
+private final class CameraSession: @unchecked Sendable {
+    let session = AVCaptureSession()
+    private let queue = DispatchQueue(label: "QuickTube.camera")
+    private var configured = false
+
+    /// `onConfigured` runs on the main actor after the first successful configuration.
+    func start(onConfigured: @escaping @MainActor @Sendable () -> Void) {
+        queue.async { [self] in
+            if !configured {
+                guard configure() else { return }
+                configured = true
+                Task { @MainActor in onConfigured() }
+            }
+            if !session.isRunning { session.startRunning() }
         }
     }
 
-    private func place(size: CGFloat, corner: Corner) {
-        let mouse = NSEvent.mouseLocation
-        let underCursor = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
-        guard let screen = underCursor ?? NSScreen.main else { return }
-        let origin = CameraLayout.origin(for: corner, size: size, in: screen.visibleFrame)
-        panel.setFrame(NSRect(origin: origin, size: NSSize(width: size, height: size)), display: true)
-        bubble.resize(diameter: size, preview: previewLayer)
-        placement = (size, corner)
+    func stop() {
+        queue.async { [self] in
+            if session.isRunning { session.stopRunning() }
+        }
     }
 
-    /// Adds the default video device once; fails (and retries next time) when there is none.
-    private func configureIfNeeded() -> Bool {
-        if configured { return true }
+    /// Adds the default video device; fails (and is retried on the next start) when there is none.
+    private func configure() -> Bool {
         guard let device = Self.defaultCamera() else {
             DiagnosticsLog.append("Camera bubble: no camera found")
             return false
@@ -95,17 +130,12 @@ final class CameraPanel {
                 return false
             }
             session.addInput(input)
-            session.sessionPreset = session.canSetSessionPreset(.high) ? .high : session.sessionPreset
+            if session.canSetSessionPreset(.high) { session.sessionPreset = .high }
+            return true
         } catch {
             DiagnosticsLog.append("Camera bubble: \(error)")
             return false
         }
-        if let connection = previewLayer.connection, connection.isVideoMirroringSupported {
-            connection.automaticallyAdjustsVideoMirroring = false
-            connection.isVideoMirrored = true
-        }
-        configured = true
-        return true
     }
 
     /// The system default camera (FaceTime or Continuity), else the first built-in or external one.
@@ -114,11 +144,6 @@ final class CameraPanel {
         return AVCaptureDevice.DiscoverySession(
             deviceTypes: [.builtInWideAngleCamera, .external], mediaType: .video, position: .unspecified
         ).devices.first
-    }
-
-    /// Lets the session cross to the session queue; it is only started and stopped there.
-    private struct Unchecked<Value>: @unchecked Sendable {
-        let value: Value
     }
 }
 

@@ -546,6 +546,47 @@ final class LogLines: @unchecked Sendable {
         #expect(state.phase == .recording)
     }
 
+    @Test func willStartHookRunsWithThePickedTargetBeforeTheRecorderStarts() async {
+        let picker = FakePicker()
+        let target = CaptureTarget.region(display: 3, rect: CGRect(x: 10, y: 20, width: 300, height: 200))
+        picker.results = [target]
+        let state = makePickingState(picker: picker, mode: .selectArea)
+        var seen: [(CaptureTarget, Int, Bool)] = []
+        state.onRecordingWillStart = { [recorder] target in
+            seen.append((target, recorder.starts, state.isStarting))
+        }
+        await state.toggle()
+        #expect(seen.count == 1)
+        #expect(seen.first?.0 == target)
+        #expect(seen.first?.1 == 0)
+        #expect(seen.first?.2 == true)
+        #expect(state.recordingTarget == target)
+        #expect(state.isStarting == false)
+        #expect(state.phase == .recording)
+    }
+
+    @Test func willStartHookIsSkippedWhenTheSelectionIsCancelled() async {
+        let picker = FakePicker()
+        picker.results = [nil]
+        let state = makePickingState(picker: picker, mode: .selectWindow)
+        var calls = 0
+        state.onRecordingWillStart = { _ in calls += 1 }
+        await state.toggle()
+        #expect(calls == 0)
+        #expect(state.phase == .idle)
+    }
+
+    @Test func failedStartStillEndsTheStartingState() async {
+        recorder.startError = RecorderError.noDisplay
+        let state = makeState()
+        var calls = 0
+        state.onRecordingWillStart = { _ in calls += 1 }
+        await state.toggle()
+        #expect(calls == 1)
+        #expect(state.isStarting == false)
+        if case .failed = state.phase {} else { Issue.record("expected .failed, got \(state.phase)") }
+    }
+
     @Test func cancelAfterAFinishedRecordingReturnsToIdle() async {
         let picker = FakePicker()
         picker.results = [.window(1), nil]

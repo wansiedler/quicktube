@@ -21,4 +21,25 @@ import Testing
             for: .bottomLeft, size: 160, in: CGRect(x: 0, y: 0, width: 1000, height: 800))
         #expect(origin == CGPoint(x: 24, y: 24))
     }
+
+    @Test func fittedSizeKeepsTheBubbleWhenThereIsRoom() {
+        #expect(CameraLayout.fittedSize(220, in: CGRect(x: 0, y: 0, width: 800, height: 600)) == 220)
+    }
+
+    @Test func fittedSizeShrinksToTheSmallerSideMinusInsets() {
+        // 300 - 2 × 24 = 252 < 300.
+        #expect(CameraLayout.fittedSize(300, in: CGRect(x: 50, y: 50, width: 900, height: 300)) == 252)
+    }
+
+    @Test func fittedSizeNeverGoesBelowTheMinimum() {
+        #expect(CameraLayout.fittedSize(160, in: CGRect(x: 0, y: 0, width: 40, height: 40)) == 48)
+    }
+
+    @Test func regionIsFlippedIntoGlobalAppKitCoordinates() {
+        // Display to the right of a primary screen, its top at AppKit y = 1100.
+        let screenFrame = CGRect(x: 1512, y: 200, width: 1920, height: 900)
+        let rect = CameraLayout.appKitRect(
+            region: CGRect(x: 100, y: 50, width: 400, height: 300), onScreen: screenFrame)
+        #expect(rect == CGRect(x: 1612, y: 750, width: 400, height: 300))
+    }
 }

@@ -54,6 +54,7 @@ public actor Recorder: ScreenRecorder {
     private let directory: URL
     private let options: @Sendable () -> RecorderOptions
     private let excludedWindows: @Sendable @MainActor () -> [CGWindowID]
+    private let log: @Sendable (String) -> Void
     private var state = State.idle
     private var take: Take?
 
@@ -64,11 +65,28 @@ public actor Recorder: ScreenRecorder {
     public init(
         directory: URL = Recorder.defaultDirectory,
         options: @escaping @Sendable () -> RecorderOptions = { RecorderOptions() },
-        excludedWindows: @escaping @Sendable @MainActor () -> [CGWindowID] = { [] }
+        excludedWindows: @escaping @Sendable @MainActor () -> [CGWindowID] = { [] },
+        log: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         self.directory = directory
         self.options = options
         self.excludedWindows = excludedWindows
+        self.log = log
+    }
+
+    /// Splits the `requested` exclusions into those ScreenCaptureKit lists (`available`) and those it
+    /// does not, which would end up in the recording. Order follows `requested`; duplicates are dropped.
+    public static func excludedWindowIDs(
+        requested: [CGWindowID], available: [CGWindowID]
+    ) -> (matched: [CGWindowID], missing: [CGWindowID]) {
+        let known = Set(available)
+        var seen: Set<CGWindowID> = []
+        var matched: [CGWindowID] = []
+        var missing: [CGWindowID] = []
+        for id in requested where seen.insert(id).inserted {
+            if known.contains(id) { matched.append(id) } else { missing.append(id) }
+        }
+        return (matched, missing)
     }
 
     public func start(target: CaptureTarget) async throws {
@@ -132,12 +150,10 @@ public actor Recorder: ScreenRecorder {
     }
 
     /// Builds the content filter for `target`; for a region also returns its source rect (display points).
-    /// `excluded` are window IDs kept out of display and region recordings; IDs not in `content` are ignored.
+    /// `excludedWindows` are kept out of display and region recordings.
     private static func filter(
-        for target: CaptureTarget, in content: SCShareableContent, excluding excluded: [CGWindowID]
+        for target: CaptureTarget, in content: SCShareableContent, excluding excludedWindows: [SCWindow]
     ) throws -> (filter: SCContentFilter, sourceRect: CGRect?) {
-        let ids = Set(excluded)
-        let excludedWindows = content.windows.filter { ids.contains($0.windowID) }
         switch target {
         case .display(let displayID):
             guard
@@ -175,8 +191,15 @@ public actor Recorder: ScreenRecorder {
         } catch {
             throw RecorderError.screenPermissionDenied
         }
+        let requested = await excludedWindows()
+        let (matched, missing) = Self.excludedWindowIDs(
+            requested: requested, available: content.windows.map(\.windowID))
+        if !missing.isEmpty {
+            log("Recorder: windows \(missing) not in shareable content; they will not be excluded")
+        }
+        let ids = Set(matched)
         let (filter, sourceRect) = try Self.filter(
-            for: take.target, in: content, excluding: await excludedWindows())
+            for: take.target, in: content, excluding: content.windows.filter { ids.contains($0.windowID) })
         let scale = CGFloat(filter.pointPixelScale)
         let configuration = SCStreamConfiguration()
         let captured = sourceRect?.size ?? filter.contentRect.size

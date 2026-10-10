@@ -20,4 +20,21 @@ public enum CameraLayout {
         case .bottomRight: return CGPoint(x: right, y: bottom)
         }
     }
+
+    /// Smallest bubble shrunk to fit a small recording area.
+    public static let minimumSize: CGFloat = 48
+
+    /// `size`, shrunk so the bubble and its insets fit inside `area`, but never below `minimumSize`.
+    public static func fittedSize(_ size: CGFloat, in area: CGRect, inset: CGFloat = inset) -> CGFloat {
+        let room = min(area.width, area.height) - 2 * inset
+        return min(size, max(minimumSize, room))
+    }
+
+    /// A region of a display (`rect` in the display's points, origin top-left, as `CaptureTarget.region`
+    /// holds it) in AppKit global coordinates, given the display's `NSScreen.frame`.
+    public static func appKitRect(region rect: CGRect, onScreen screenFrame: CGRect) -> CGRect {
+        CGRect(
+            x: screenFrame.minX + rect.minX, y: screenFrame.maxY - rect.maxY,
+            width: rect.width, height: rect.height)
+    }
 }

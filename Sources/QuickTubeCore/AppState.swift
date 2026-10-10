@@ -100,6 +100,13 @@ public final class AppState {
     public private(set) var destination: Destination = .youtube
     /// Current upload stage text: "Uploading", or "Compressing · details" while a copy is made.
     public private(set) var uploadStage: String = "Uploading"
+    /// What the current (or last) recording captures; set just before the recorder starts.
+    public private(set) var recordingTarget: CaptureTarget?
+    /// True while the recorder is starting, after `onRecordingWillStart` ran and before `phase` settles.
+    public private(set) var isStarting = false
+    /// Called right before the recorder starts, once the target is known, so windows that belong in the
+    /// recording (the camera bubble) can already be on screen for its first frame.
+    @ObservationIgnored public var onRecordingWillStart: (@MainActor (CaptureTarget) -> Void)?
 
     private let recorder: ScreenRecorder
     private let uploaders: [Destination: VideoUploader]
@@ -267,6 +274,10 @@ public final class AppState {
         } else {
             target = captureTarget()
         }
+        recordingTarget = target
+        isStarting = true
+        onRecordingWillStart?(target)
+        defer { isStarting = false }
         do {
             try await recorder.start(target: target)
             titleContext = context
