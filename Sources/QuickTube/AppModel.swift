@@ -130,17 +130,18 @@ final class AppModel {
             })
         for destination in Destination.allCases {
             let fallback = HotkeyManager.Combo.fallback(for: destination)
-            let stored = UserDefaults.standard.data(forKey: Self.comboKeys[destination]!)
+            let key = Self.comboKeys[destination]!
+            var stored = UserDefaults.standard.data(forKey: key)
                 .flatMap { try? JSONDecoder().decode(HotkeyManager.Combo.self, from: $0) }
-            if destination == .youtube, stored != nil,
-                HotkeyManager.Combo.migratedYouTube(stored: stored) == nil
-            {
-                // The old default, ⌃⌥⌘R, now starts and saves; YouTube moves to its new fallback.
-                UserDefaults.standard.removeObject(forKey: Self.comboKeys[destination]!)
+            if destination == .youtube, !UserDefaults.standard.bool(forKey: Self.youtubeComboMigrationKey) {
+                // Once: the old default ⌃⌥⌘R now starts and saves; YouTube moves to its new fallback.
+                let migrated = HotkeyMigration.migratedYouTube(
+                    stored: stored, keyCode: \.keyCode, modifiers: \.modifiers)
+                if stored != nil, migrated == nil { UserDefaults.standard.removeObject(forKey: key) }
+                stored = migrated
+                UserDefaults.standard.set(true, forKey: Self.youtubeComboMigrationKey)
             }
-            combos[destination] =
-                (destination == .youtube ? HotkeyManager.Combo.migratedYouTube(stored: stored) : stored)
-                ?? fallback
+            combos[destination] = stored ?? fallback
         }
         hotkey.onPress = { [weak self] slot in
             guard let self else { return }
@@ -228,6 +229,7 @@ final class AppModel {
         }
     }
 
+    private static let youtubeComboMigrationKey = "migration.v2.youtubeCombo"
     private static let historyKey = "history.v2"
 
     /// Bad or missing data gives an empty history.

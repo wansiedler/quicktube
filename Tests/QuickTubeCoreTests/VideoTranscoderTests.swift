@@ -61,6 +61,18 @@ import VideoToolbox
         #expect(oddPlan.width == 1000 && oddPlan.height == 776)
     }
 
+    @Test func compressionPropertiesPreferSpeedAndSkipReordering() {
+        let properties = VideoTranscoder.compressionProperties(bitrate: 2_000_000, fps: 29.97)
+        #expect(properties[AVVideoAverageBitRateKey] as? Int == 2_000_000)
+        #expect(properties[AVVideoAllowFrameReorderingKey] as? Bool == false)
+        #expect(
+            properties[kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String] as? Bool
+                == true)
+        #expect(properties[AVVideoExpectedSourceFrameRateKey] as? Int == 30)
+        let unknownFPS = VideoTranscoder.compressionProperties(bitrate: 1, fps: 0)
+        #expect(unknownFPS[AVVideoExpectedSourceFrameRateKey] == nil)
+    }
+
     @Test func clampsTheMinimumVideoBitrate() {
         let info = VideoInfo(width: 1920, height: 1080, fps: 30, duration: 3600)
         let plan = VideoTranscoder.plan(info: info, limitBytes: 1 << 20)

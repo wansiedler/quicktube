@@ -50,15 +50,6 @@ final class HotkeyManager {
             }
         }
 
-        /// ⌃⌥⌘R used to be the YouTube default and now belongs to "Save only": a stored YouTube combo
-        /// equal to it is the old default, not a choice, and is dropped so YouTube takes ⌃⌥⌘Y.
-        /// Any other stored combo is kept.
-        static func migratedYouTube(stored: Combo?) -> Combo? {
-            guard let stored else { return nil }
-            let old = Combo.localDefault
-            return stored.keyCode == old.keyCode && stored.modifiers == old.modifiers ? nil : stored
-        }
-
         init(keyCode: UInt32, modifiers: UInt32, label: String) {
             self.keyCode = keyCode
             self.modifiers = modifiers
