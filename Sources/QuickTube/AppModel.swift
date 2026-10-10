@@ -51,6 +51,8 @@ final class AppModel {
     var authMessage: String?
     private var signInTask: Task<Void, Never>?
     let settingsStore: SettingsStore
+    /// Sparkle; inert in builds without an update key.
+    let updater: Updater
     var settings: AppSettings {
         get { settingsStore.settings }
         set { settingsStore.settings = newValue }
@@ -74,6 +76,7 @@ final class AppModel {
     init() {
         let store = KeychainStore()
         self.settingsStore = SettingsStore()
+        self.updater = Updater()
         let auth = GoogleAuth(store: store)
         self.auth = auth
         let telegram = TelegramUploader(
@@ -201,6 +204,7 @@ final class AppModel {
             MainActor.assumeIsolated { self?.refreshPermissions() }
         }
         notifier.requestPermission()
+        updater.automaticallyChecksForUpdates = settings.automaticUpdates
         trashOldRecordings()
         refreshAuth()
         refreshTelegram()
@@ -360,6 +364,18 @@ final class AppModel {
 
     func requestScreenRecording() {
         screenRecordingStatus = Permissions.requestScreenRecording()
+    }
+
+    /// Turns Sparkle's scheduled background checks on or off.
+    func setAutomaticUpdates(_ enabled: Bool) {
+        settings.automaticUpdates = enabled
+        updater.automaticallyChecksForUpdates = enabled
+    }
+
+    func checkForUpdates() {
+        // A menu bar app is never active, so Sparkle's window would open behind others.
+        NSApp.activate(ignoringOtherApps: true)
+        updater.checkForUpdates()
     }
 
     /// Turns pause/resume (menu item and hotkey) on or off.

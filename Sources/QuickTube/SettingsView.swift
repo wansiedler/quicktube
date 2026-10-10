@@ -20,6 +20,20 @@ struct SettingsView: View {
                 if let message = model.launchAtLoginMessage {
                     Text(message).font(.callout).foregroundStyle(.secondary)
                 }
+                HStack {
+                    Toggle(
+                        "Check for updates automatically",
+                        isOn: Binding(
+                            get: { model.settings.automaticUpdates },
+                            set: { model.setAutomaticUpdates($0) }))
+                    Spacer()
+                    Button("Check Now") { model.checkForUpdates() }
+                }
+                .disabled(!model.updater.isAvailable)
+                if !model.updater.isAvailable {
+                    Text("Updates are off in this build: it has no update signing key.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
             }
             Section("Recording") {
                 Picker("Capture", selection: $model.settings.captureMode) {
