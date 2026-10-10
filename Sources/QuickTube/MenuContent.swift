@@ -38,6 +38,18 @@ struct MenuContent: View {
         if model.state.lastLink != nil {
             Button("Copy Last Link") { model.copyLastLink() }
         }
+        if model.settings.historyEnabled {
+            Menu("Recent Links") {
+                ForEach(model.state.history) { item in
+                    Button("\(item.title) — \(item.destination.label)") {
+                        model.copyToPasteboard(item.link)
+                    }
+                }
+                if !model.state.history.isEmpty { Divider() }
+                Button("Clear History") { model.state.clearHistory() }
+                    .disabled(model.state.history.isEmpty)
+            }
+        }
         Divider()
         Picker("Capture: \(model.settings.captureMode.label)", selection: $model.settings.captureMode) {
             ForEach(CaptureMode.allCases, id: \.self) { Text($0.label).tag($0) }

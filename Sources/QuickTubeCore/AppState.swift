@@ -74,6 +74,23 @@ public enum Destination: String, Sendable, CaseIterable, Codable {
     }
 }
 
+/// One successful upload, as listed under "Recent Links".
+public struct HistoryItem: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID
+    public let link: URL
+    public let destination: Destination
+    public let date: Date
+    public let title: String
+
+    public init(id: UUID = UUID(), link: URL, destination: Destination, date: Date, title: String) {
+        self.id = id
+        self.link = link
+        self.destination = destination
+        self.date = date
+        self.title = title
+    }
+}
+
 public enum DestinationError: Error, Equatable {
     case unavailable(Destination)
 }
@@ -108,6 +125,10 @@ public final class AppState {
     /// recording (the camera bubble) can already be on screen for its first frame.
     @ObservationIgnored public var onRecordingWillStart: (@MainActor (CaptureTarget) -> Void)?
 
+    /// The last `Self.historyLimit` successful uploads, newest first.
+    public private(set) var history: [HistoryItem]
+    public static let historyLimit = 20
+
     private let recorder: ScreenRecorder
     private let uploaders: [Destination: VideoUploader]
     private let notifier: Notifier
@@ -122,6 +143,9 @@ public final class AppState {
     private let titleTemplate: @Sendable () -> String
     /// Diagnostics sink for failures that are not surfaced to the user.
     private let log: @Sendable (String) -> Void
+    private let historyEnabled: @Sendable () -> Bool
+    /// Called with the whole list after every change, so the app can persist it.
+    private let onHistoryChange: (@MainActor @Sendable ([HistoryItem]) -> Void)?
     /// Captured when a recording starts: the app and display it was made of.
     private var titleContext = TitleContext()
     /// Title and context of the file being uploaded; `retry()` reuses them.
@@ -164,8 +188,14 @@ public final class AppState {
         clock: @escaping @Sendable () -> Date = { Date() },
         titleProvider: @escaping @Sendable () -> TitleContext = { TitleContext() },
         titleTemplate: @escaping @Sendable () -> String = { "{date}" },
-        log: @escaping @Sendable (String) -> Void = { _ in }
+        log: @escaping @Sendable (String) -> Void = { _ in },
+        history: [HistoryItem] = [],
+        historyEnabled: @escaping @Sendable () -> Bool = { true },
+        onHistoryChange: (@MainActor @Sendable ([HistoryItem]) -> Void)? = nil
     ) {
+        self.history = Array(history.prefix(Self.historyLimit))
+        self.historyEnabled = historyEnabled
+        self.onHistoryChange = onHistoryChange
         self.recorder = recorder
         self.uploaders = uploaders
         self.notifier = notifier
@@ -366,10 +396,23 @@ public final class AppState {
             let link = result.link
             lastLink = link
             phase = .done(link: link)
+            record(link: link, destination: destination, title: title)
             notifier.linkReady(link, isUnlisted: result.isUnlisted)
         } catch {
             fail(error, file: file, stage: .upload)
         }
+    }
+
+    private func record(link: URL, destination: Destination, title: String) {
+        guard historyEnabled() else { return }
+        let item = HistoryItem(link: link, destination: destination, date: clock(), title: title)
+        history = Array(([item] + history).prefix(Self.historyLimit))
+        onHistoryChange?(history)
+    }
+
+    public func clearHistory() {
+        history = []
+        onHistoryChange?(history)
     }
 
     /// "Compressing · details" at 21% → "Compressing 21% · details"; a plain stage → "Uploading 60%".

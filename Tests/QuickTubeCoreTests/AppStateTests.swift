@@ -822,6 +822,80 @@ final class LogLines: @unchecked Sendable {
             AppState.message(for: AuthError.badResponse(503), stage: .signIn)
                 == "Sign-in failed: badResponse(503)")
     }
+
+    // MARK: link history
+
+    private func record(_ state: AppState, to destination: Destination = .youtube) async {
+        await state.toggle(destination: destination)
+        await state.toggle(destination: destination)
+    }
+
+    @Test func successAddsAHistoryEntryWithDestinationAndTitle() async {
+        let telegram = FakeUploader()
+        telegram.result = UploadResult(link: URL(string: "https://t.me/c/1/2")!)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader, .telegram: telegram], notifier: notifier,
+            titleProvider: { TitleContext() }, titleTemplate: { "Talk" })
+        await record(state, to: .telegram)
+        #expect(state.history.count == 1)
+        #expect(state.history[0].link == URL(string: "https://t.me/c/1/2")!)
+        #expect(state.history[0].destination == .telegram)
+        #expect(state.history[0].title == "Talk")
+    }
+
+    @Test func historyKeepsTheNewestTwentyFirst() async {
+        // The real finisher moves the recording, so a second round would find no file.
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            finisher: FakeFinisher())
+        for index in 0..<22 {
+            uploader.result = UploadResult(link: URL(string: "https://example.com/\(index)")!)
+            await record(state)
+        }
+        #expect(state.history.count == 20)
+        #expect(state.history.first?.link.absoluteString == "https://example.com/21")
+        #expect(state.history.last?.link.absoluteString == "https://example.com/2")
+    }
+
+    @Test func disabledHistoryRecordsNothing() async {
+        let changes = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            historyEnabled: { false }, onHistoryChange: { _ in changes.append("changed") })
+        await record(state)
+        #expect(state.history.isEmpty)
+        #expect(changes.all.isEmpty)
+    }
+
+    @Test func failedUploadAddsNoHistoryEntry() async {
+        uploader.error = UploadError.sessionExpired
+        let state = AppState(recorder: recorder, uploader: uploader, notifier: notifier)
+        await record(state)
+        #expect(state.history.isEmpty)
+    }
+
+    @Test func clearHistoryEmptiesItAndReports() async {
+        let reported = HistoryLog()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            onHistoryChange: { reported.append($0) })
+        await record(state)
+        #expect(reported.all.map(\.count) == [1])
+        state.clearHistory()
+        #expect(state.history.isEmpty)
+        #expect(reported.all.map(\.count) == [1, 0])
+    }
+
+    @Test func seededHistoryIsKeptAndExtended() async {
+        let old = HistoryItem(
+            id: UUID(), link: URL(string: "https://example.com/old")!, destination: .drive,
+            date: Date(timeIntervalSince1970: 1), title: "Old")
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, history: [old])
+        await record(state)
+        #expect(state.history.count == 2)
+        #expect(state.history[1] == old)
+    }
 }
 
 @Suite struct TranscodeMessageTests {
@@ -865,4 +939,12 @@ final class LogLines: @unchecked Sendable {
     @MainActor func messages(error: Error, expected: String) {
         #expect(AppState.message(for: error) == expected)
     }
+
+}
+
+final class HistoryLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [[HistoryItem]] = []
+    func append(_ items: [HistoryItem]) { lock.withLock { values.append(items) } }
+    var all: [[HistoryItem]] { lock.withLock { values } }
 }

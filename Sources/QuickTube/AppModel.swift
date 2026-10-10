@@ -104,7 +104,10 @@ final class AppModel {
             captureMode: { AppSettings.load(from: .standard).captureMode },
             titleProvider: { MainActor.assumeIsolated { Self.currentTitleContext() } },
             titleTemplate: { AppSettings.load(from: .standard).titleTemplate },
-            log: { DiagnosticsLog.append($0) })
+            log: { DiagnosticsLog.append($0) },
+            history: Self.loadHistory(),
+            historyEnabled: { AppSettings.load(from: .standard).historyEnabled },
+            onHistoryChange: { Self.saveHistory($0) })
         for destination in Destination.allCases {
             let fallback = HotkeyManager.Combo.fallback(for: destination)
             combos[destination] =
@@ -166,6 +169,25 @@ final class AppModel {
         }
     }
 
+    private static let historyKey = "history.v2"
+
+    /// Bad or missing data gives an empty history.
+    private static func loadHistory() -> [HistoryItem] {
+        UserDefaults.standard.data(forKey: historyKey)
+            .flatMap { try? JSONDecoder().decode([HistoryItem].self, from: $0) } ?? []
+    }
+
+    private static func saveHistory(_ items: [HistoryItem]) {
+        if let data = try? JSONEncoder().encode(items) {
+            UserDefaults.standard.set(data, forKey: historyKey)
+        }
+    }
+
+    func copyToPasteboard(_ link: URL) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(link.absoluteString, forType: .string)
+    }
+
     func refreshPermissions() {
         microphoneStatus = Permissions.microphone
         screenRecordingStatus = Permissions.screenRecording
@@ -207,7 +229,10 @@ final class AppModel {
         case .recording, .paused: recording = true
         default: recording = state.isStarting
         }
-        guard enabled, settings.cameraAlwaysOn || recording else {
+        // Window captures can never contain the bubble, so it is only worth showing on its own ("Always on").
+        let windowCapture: Bool
+        if case .window = state.recordingTarget { windowCapture = true } else { windowCapture = false }
+        guard enabled, settings.cameraAlwaysOn || (recording && !windowCapture) else {
             camera.hide()
             return
         }
@@ -455,8 +480,7 @@ final class AppModel {
 
     func copyLastLink() {
         guard let link = state.lastLink else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(link.absoluteString, forType: .string)
+        copyToPasteboard(link)
     }
 
     func openRecordingsFolder() {
