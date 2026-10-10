@@ -53,6 +53,7 @@ larger recordings fail with a clear message and stay on disk.
 | Start recording | `⌃⌥⌘R` (change in Settings) |
 | Stop and upload to YouTube | `⌃⌥⌘R` again |
 | Stop and send to Telegram | `⌃⌥⌘T` (either shortcut starts a recording) |
+| Pick quality | Settings → Recording: Native / 4K / 1080p and 30 / 60 fps (applies to the next recording) |
 | Watch progress | a small pill at the bottom of the screen: recording timer → upload % → link (click opens it); it is excluded from the recording |
 | Retry a failed upload | menu → Retry Upload |
 | Find the files | menu → Open Recordings Folder (`~/Movies/QuickTube`) |

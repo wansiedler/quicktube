@@ -21,6 +21,18 @@ struct SettingsView: View {
                     Text(message).font(.callout).foregroundStyle(.secondary)
                 }
             }
+            Section("Recording") {
+                Picker("Quality", selection: $model.quality.resolution) {
+                    ForEach(RecordingQuality.Resolution.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                Picker("Frame rate", selection: $model.quality.fps) {
+                    ForEach(RecordingQuality.frameRates, id: \.self) { Text("\($0) fps").tag($0) }
+                }
+                Text(
+                    "Applies to the next recording. 1080p at 30 fps is about 12 MB per minute; native 6K at 60 fps about 55 MB."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+            }
             Section("Permissions") {
                 permissionRow(
                     "Microphone", status: model.microphoneStatus, pane: Permissions.microphonePane,

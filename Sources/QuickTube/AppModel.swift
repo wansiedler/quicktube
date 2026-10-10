@@ -29,6 +29,14 @@ final class AppModel {
     var signingIn = false
     var authMessage: String?
     private var signInTask: Task<Void, Never>?
+    private static let qualityKey = "recording.quality"
+    var quality: RecordingQuality {
+        didSet {
+            if let data = try? JSONEncoder().encode(quality) {
+                UserDefaults.standard.set(data, forKey: Self.qualityKey)
+            }
+        }
+    }
     private(set) var launchAtLogin = false
     var launchAtLoginMessage: String?
     private(set) var microphoneStatus = Permissions.microphone
@@ -36,6 +44,12 @@ final class AppModel {
 
     init() {
         let store = KeychainStore()
+        let storedQuality =
+            UserDefaults.standard.data(forKey: Self.qualityKey)
+            .flatMap { try? JSONDecoder().decode(RecordingQuality.self, from: $0) } ?? .default
+        self.quality = storedQuality
+        // The recorder reads the preset at every start; UserDefaults is the handoff.
+        let qualityKey = Self.qualityKey
         let auth = GoogleAuth(store: store)
         self.auth = auth
         let telegram = TelegramUploader(store: store, log: { DiagnosticsLog.append($0) })
@@ -43,7 +57,10 @@ final class AppModel {
         let notifier = AppNotifier()
         self.notifier = notifier
         self.state = AppState(
-            recorder: Recorder(),
+            recorder: Recorder(quality: {
+                UserDefaults.standard.data(forKey: qualityKey)
+                    .flatMap { try? JSONDecoder().decode(RecordingQuality.self, from: $0) } ?? .default
+            }),
             uploaders: [
                 .youtube: YouTubeUploader(tokens: auth, log: { DiagnosticsLog.append($0) }),
                 .telegram: telegram,
