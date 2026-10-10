@@ -76,6 +76,58 @@ import Testing
         #expect(GIFUploader.outputURL(for: file).path == "/tmp/rec/2026-10-10 10.00.00.gif")
     }
 
+    // MARK: - Memory budget
+
+    static let natural1080p = CGSize(width: 1920, height: 1080)
+
+    @Test func planKeepsTheSettingsWhenTheyFit() {
+        let options = GIFOptions(fps: 10, maxWidth: 800, maxSeconds: 30)
+        let plan = GIFUploader.plan(duration: 30, options: options, naturalSize: Self.natural1080p)
+        #expect(
+            plan == GIFPlan(fps: 10, size: CGSize(width: 800, height: 450), frameCount: 300, reduced: false))
+        #expect(plan.bytes <= GIFUploader.defaultBudgetBytes)
+    }
+
+    @Test func planLowersFPSFirst() {
+        // 30 fps × 30 s × 800×450×4 ≈ 1.3 GB; 13 fps ≈ 562 MB is still over 512 MiB, 12 fps ≈ 518 MB fits.
+        let options = GIFOptions(fps: 30, maxWidth: 800, maxSeconds: 30)
+        let plan = GIFUploader.plan(duration: 30, options: options, naturalSize: Self.natural1080p)
+        #expect(plan.fps == 12)
+        #expect(plan.size == CGSize(width: 800, height: 450))
+        #expect(plan.reduced)
+        #expect(plan.bytes <= GIFUploader.defaultBudgetBytes)
+    }
+
+    @Test func planLowersWidthOnceFPSIsAtTheFloor() {
+        let options = GIFOptions(fps: 30, maxWidth: 1920, maxSeconds: 120)
+        let plan = GIFUploader.plan(duration: 120, options: options, naturalSize: Self.natural1080p)
+        #expect(plan.fps == GIFUploader.minimumFPS)
+        #expect(plan.size.width < 1920)
+        #expect(plan.size.width >= CGFloat(GIFUploader.minimumWidth))
+        #expect(plan.bytes <= GIFUploader.defaultBudgetBytes)
+        // The widest size that fits: 8 px wider would not.
+        let wider = GIFUploader.outputSize(for: Self.natural1080p, maxWidth: Int(plan.size.width) + 8)
+        #expect(plan.frameCount * Int(wider.width) * Int(wider.height) * 4 > GIFUploader.defaultBudgetBytes)
+    }
+
+    @Test func planNeverGoesBelowTheFloors() {
+        let options = GIFOptions(fps: 30, maxWidth: 1920, maxSeconds: 120)
+        let plan = GIFUploader.plan(
+            duration: 120, options: options, naturalSize: Self.natural1080p, budgetBytes: 1 << 20)
+        #expect(plan.fps == GIFUploader.minimumFPS)
+        #expect(plan.size == CGSize(width: 320, height: 180))
+        #expect(plan.frameCount == 600)
+        #expect(plan.reduced)
+    }
+
+    @Test func planKeepsSettingsAlreadyBelowTheFloors() {
+        let options = GIFOptions(fps: 2, maxWidth: 200, maxSeconds: 120)
+        let plan = GIFUploader.plan(
+            duration: 120, options: options, naturalSize: Self.natural1080p, budgetBytes: 1 << 10)
+        #expect(plan.fps == 2)
+        #expect(plan.size == CGSize(width: 200, height: 113))
+    }
+
     // MARK: - End to end
 
     @Test(.enabled("needs an H.264 encoder") { ClipMaker.h264Available() })
@@ -84,12 +136,7 @@ import Testing
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let input = dir.appending(path: "clip.mov")
-        do {
-            try await ClipMaker.make(input, width: 640, height: 480, fps: 30, seconds: 1)
-        } catch {
-            // The clip writer is unavailable on this host; nothing to convert.
-            return
-        }
+        try await ClipMaker.make(input, width: 640, height: 480, fps: 30, seconds: 1)
         let options = GIFOptions(fps: 10, maxWidth: 320, maxSeconds: 30)
         let uploader = GIFUploader(options: { options })
         let seen = ProgressLog()
@@ -114,7 +161,7 @@ import Testing
         let frameGIF = frame?[kCGImagePropertyGIFDictionary] as? [CFString: Any]
         let delay = (frameGIF?[kCGImagePropertyGIFDelayTime] as? Double) ?? 0
         #expect(abs(delay - 0.1) < 0.011)
-        #expect(stages.values == ["Rendering GIF"])
+        #expect(stages.values == ["Rendering GIF 10 fps 320 px"])
         let values = seen.values
         #expect(values == values.sorted())
         #expect(values.last == 1)

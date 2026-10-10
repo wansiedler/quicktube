@@ -16,6 +16,25 @@ public struct GIFOptions: Sendable, Equatable {
     }
 }
 
+/// What a conversion will actually produce, after fitting the settings into the memory budget.
+public struct GIFPlan: Sendable, Equatable {
+    public let fps: Int
+    public let size: CGSize
+    public let frameCount: Int
+    /// True when fps or width had to be lowered below the settings.
+    public let reduced: Bool
+
+    public init(fps: Int, size: CGSize, frameCount: Int, reduced: Bool) {
+        self.fps = fps
+        self.size = size
+        self.frameCount = frameCount
+        self.reduced = reduced
+    }
+
+    /// Decoded RGBA bytes of all frames; ImageIO holds every frame until the GIF is finalized.
+    public var bytes: Int { frameCount * Int(size.width) * Int(size.height) * 4 }
+}
+
 public enum GIFError: Error, Equatable {
     case cannotRead
     case cannotWrite
@@ -42,12 +61,13 @@ public actor GIFUploader: VideoUploader {
     ) async throws -> UploadResult {
         let options = options()
         let output = Self.outputURL(for: file)
-        context.onStatus("Rendering GIF")
         progress(0)
         let log = log
+        let onStatus = context.onStatus
         // The asset and its image generator are not Sendable; they live and die inside this detached task.
         let task = Task.detached(priority: .utility) {
-            try await Self.render(file, to: output, options: options, log: log, progress: progress)
+            try await Self.render(
+                file, to: output, options: options, log: log, onStatus: onStatus, progress: progress)
         }
         try await withTaskCancellationHandler {
             try await task.value
@@ -56,6 +76,47 @@ public actor GIFUploader: VideoUploader {
         }
         progress(1)
         return UploadResult(link: output)
+    }
+
+    /// ImageIO keeps every added frame decoded until `CGImageDestinationFinalize`, so frames × w × h × 4 is capped.
+    public static let defaultBudgetBytes = 512 << 20
+    public static let minimumFPS = 5
+    public static let minimumWidth = 320
+
+    /// Keeps the settings when all frames fit in `budgetBytes`; otherwise lowers fps first (not below
+    /// `minimumFPS`), then the width (not below `minimumWidth`). Settings already below a floor are kept.
+    public static func plan(
+        duration: Double, options: GIFOptions, naturalSize: CGSize, budgetBytes: Int = defaultBudgetBytes
+    ) -> GIFPlan {
+        func make(fps: Int, maxWidth: Int) -> GIFPlan {
+            GIFPlan(
+                fps: fps, size: outputSize(for: naturalSize, maxWidth: maxWidth),
+                frameCount: frameTimes(duration: duration, fps: fps, maxSeconds: options.maxSeconds).count,
+                reduced: false)
+        }
+        let requestedFPS = max(1, options.fps)
+        var fps = requestedFPS
+        var plan = make(fps: fps, maxWidth: options.maxWidth)
+        let fpsFloor = min(fps, minimumFPS)
+        while plan.bytes > budgetBytes, fps > fpsFloor {
+            fps -= 1
+            plan = make(fps: fps, maxWidth: options.maxWidth)
+        }
+        var width = Int(plan.size.width)
+        let widthFloor = min(width, minimumWidth)
+        if plan.bytes > budgetBytes, width > widthFloor {
+            // Area scales with width², so start near the answer and step down to the first fit.
+            let estimate = Double(width) * (Double(budgetBytes) / Double(plan.bytes)).squareRoot()
+            width = max(widthFloor, min(width, Int(estimate) + 8))
+            plan = make(fps: fps, maxWidth: width)
+            while plan.bytes > budgetBytes, width > widthFloor {
+                width = max(widthFloor, width - 8)
+                plan = make(fps: fps, maxWidth: width)
+            }
+        }
+        let reduced =
+            fps != requestedFPS || plan.size != outputSize(for: naturalSize, maxWidth: options.maxWidth)
+        return GIFPlan(fps: fps, size: plan.size, frameCount: plan.frameCount, reduced: reduced)
     }
 
     /// `<stem>.gif` next to the recording.
@@ -87,7 +148,7 @@ public actor GIFUploader: VideoUploader {
 
     private static func render(
         _ input: URL, to output: URL, options: GIFOptions, log: @Sendable (String) -> Void,
-        progress: @Sendable (Double) -> Void
+        onStatus: @Sendable (String) -> Void, progress: @Sendable (Double) -> Void
     ) async throws {
         let asset = AVURLAsset(url: input)
         let duration: CMTime
@@ -103,9 +164,19 @@ public actor GIFUploader: VideoUploader {
             try Task.checkCancellation()
             throw GIFError.cannotRead
         }
-        let times = frameTimes(duration: duration.seconds, fps: options.fps, maxSeconds: options.maxSeconds)
-        let size = outputSize(for: natural, maxWidth: options.maxWidth)
+        let plan = Self.plan(duration: duration.seconds, options: options, naturalSize: natural)
+        let times = frameTimes(duration: duration.seconds, fps: plan.fps, maxSeconds: options.maxSeconds)
+        let size = plan.size
         guard !times.isEmpty, size != .zero else { throw GIFError.noFrames }
+        if plan.reduced {
+            let wanted = Self.plan(
+                duration: duration.seconds, options: options, naturalSize: natural, budgetBytes: .max)
+            log(
+                "GIF: \(wanted.fps) fps at \(Int(wanted.size.width)) px needs \(wanted.bytes >> 20) MB of frames, "
+                    + "over the \(defaultBudgetBytes >> 20) MB budget; using \(plan.fps) fps at \(Int(size.width)) px"
+            )
+        }
+        onStatus("Rendering GIF \(plan.fps) fps \(Int(size.width)) px")
 
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
@@ -123,7 +194,7 @@ public actor GIFUploader: VideoUploader {
         CGImageDestinationSetProperties(
             destination,
             [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]] as CFDictionary)
-        let delay = 1 / Double(max(1, options.fps))
+        let delay = 1 / Double(plan.fps)
         let frameProperties =
             [
                 kCGImagePropertyGIFDictionary: [
@@ -141,11 +212,14 @@ public actor GIFUploader: VideoUploader {
         for await result in generator.images(for: times) {
             if Task.isCancelled { break }
             do {
-                let image = try result.image
-                for _ in 0...missed { CGImageDestinationAddImage(destination, image, frameProperties) }
-                added += missed + 1
-                missed = 0
-                last = image
+                // Frees the generator's per-frame temporaries; the CGImage itself is retained by ImageIO.
+                try autoreleasepool {
+                    let image = try result.image
+                    for _ in 0...missed { CGImageDestinationAddImage(destination, image, frameProperties) }
+                    added += missed + 1
+                    missed = 0
+                    last = image
+                }
             } catch {
                 log("GIF: no frame at \(result.requestedTime.seconds) s: \(error)")
                 missed += 1

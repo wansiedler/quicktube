@@ -371,15 +371,18 @@ final class AppModel {
         updateGIFHotkey()
     }
 
+    private static let gifConflictSuffix = "; GIF has no hotkey."
+
     private func updateGIFHotkey() {
         let slot = Self.slots[.gif]!
         guard settings.gifEnabled else {
             hotkey.remove(slot: slot)
+            if hotkeyMessage?.hasSuffix(Self.gifConflictSuffix) == true { hotkeyMessage = nil }
             return
         }
         let combo = combo(for: .gif)
         if !hotkey.register(combo, slot: slot) {
-            hotkeyMessage = "\(combo.label) is already in use by another app; GIF has no hotkey."
+            hotkeyMessage = "\(combo.label) is already in use by another app\(Self.gifConflictSuffix)"
         }
     }
 
