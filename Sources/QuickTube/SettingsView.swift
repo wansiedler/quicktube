@@ -128,10 +128,16 @@ struct SettingsView: View {
                         }
                     }
                 }
+                Toggle(
+                    "Show only shortcuts (keys with ⌘ ⌃ ⌥)", isOn: $model.settings.keystrokeShortcutsOnly
+                )
+                .disabled(!model.settings.keystrokeOverlayEnabled)
                 Toggle("Show overlays in recording", isOn: $model.settings.overlaysInRecording)
                 Text(
                     "While recording, a ring marks each click and a pill above the status bar shows the last "
-                        + "key combo. Keystrokes need Input Monitoring. With \"Show overlays in recording\" off "
+                        + "key combo. Keystrokes need Input Monitoring. \"Show only shortcuts\" leaves out plain "
+                        + "typing (letters with or without ⇧); nothing is shown while a password field is active. "
+                        + "With \"Show overlays in recording\" off "
                         + "you still see them, but the video does not."
                 )
                 .font(.callout).foregroundStyle(.secondary)

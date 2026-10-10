@@ -96,7 +96,10 @@ display draws a fading ring at each global mouse-down (global `NSEvent`
 monitor; no permission needed). `keystrokeOverlayEnabled`: a small pill at
 the bottom shows the last key combo for 1.5 s; needs Input Monitoring —
 Settings shows the status and a button to System Settings; the toggle is
-disabled until granted. Both overlays are excluded from capture only if
+disabled until granted (it stays switchable off when the grant is revoked).
+`keystrokeShortcutsOnly` (default on) limits the pill to combos with ⌘/⌃/⌥
+and standalone keys (⎋ ⇥ ↩ ⌫ arrows, F-keys), so plain typing never reaches
+the video; with Secure Event Input active nothing is shown. Both overlays are excluded from capture only if
 `overlaysInRecording` is off (default: on — they are the point).
 
 ### 7. Trimming (and segment concatenation)
@@ -159,7 +162,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var pauseEnabled = false
     public var systemAudioEnabled = false, microphoneEnabled = true
     public var historyEnabled = true
-    public var clickHighlightEnabled = false, keystrokeOverlayEnabled = false, overlaysInRecording = true
+    public var clickHighlightEnabled = false, keystrokeOverlayEnabled = false, keystrokeShortcutsOnly = true, overlaysInRecording = true
     public var trimTailSeconds = 1.0, trimHeadSeconds = 0.0
     public var titleTemplate = "{date}"
     public var deleteAfterUpload = false, deleteOlderThanDays = 0

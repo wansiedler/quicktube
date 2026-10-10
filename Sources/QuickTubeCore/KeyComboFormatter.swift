@@ -34,6 +34,21 @@ public enum KeyComboFormatter {
         98: "F7", 100: "F8", 101: "F9", 109: "F10", 103: "F11", 111: "F12",
     ]
 
+    /// Keys shown even without ⌘, ⌃ or ⌥ in shortcuts-only mode: ⎋ ⇥ ↩ ⌅ ⌫ ⌦, the arrows and F1–F12.
+    /// Space is left out, as it is part of plain typing.
+    private static let standaloneKeys: Set<UInt16> = [
+        53, 48, 36, 76, 51, 117, 123, 124, 125, 126,
+        122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111,
+    ]
+
+    /// Whether the keystroke pill shows this key press. With `shortcutsOnly` (the default setting) a
+    /// press counts only when ⌘, ⌃ or ⌥ is held, or the key is a standalone key such as ⎋ or an arrow;
+    /// ⇧ alone does not count, so plain typing (passwords included) never reaches the recording.
+    public static func shouldShow(modifiers: Modifiers, keyCode: UInt16, shortcutsOnly: Bool) -> Bool {
+        guard shortcutsOnly else { return true }
+        return !modifiers.isDisjoint(with: [.command, .control, .option]) || standaloneKeys.contains(keyCode)
+    }
+
     /// The combo for a key press: modifiers, then the key — a symbol for special keys, otherwise
     /// `characters` (pass `charactersIgnoringModifiers`) uppercased. Nil when there is no key to show.
     public static func format(modifiers: Modifiers, keyCode: UInt16, characters: String?) -> String? {

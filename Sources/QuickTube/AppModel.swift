@@ -181,6 +181,7 @@ final class AppModel {
         self.hud = hud
         // The HUD and the selection overlay stay out of recordings; the camera bubble is recorded; the
         // click and keystroke overlays are recorded unless "Show overlays in recording" is off.
+        keystrokeOverlay.shortcutsOnly = { [settingsStore] in settingsStore.settings.keystrokeShortcutsOnly }
         exclusions.windows = { [weak hud, selectionOverlay, clickOverlay, keystrokeOverlay, settingsStore] in
             var windows = [hud?.windowNumber, selectionOverlay.windowNumber].compactMap { $0 }
             if !settingsStore.settings.overlaysInRecording {

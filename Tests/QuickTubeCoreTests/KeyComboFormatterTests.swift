@@ -44,6 +44,31 @@ import Testing
         #expect(KeyComboFormatter.format(modifiers: [], keyCode: 200, characters: "") == nil)
     }
 
+    @Test func shortcutsOnlyHidesPlainTyping() {
+        // Plain letter, ⇧+letter and plain space are typing, not shortcuts.
+        #expect(!KeyComboFormatter.shouldShow(modifiers: [], keyCode: 0, shortcutsOnly: true))
+        #expect(!KeyComboFormatter.shouldShow(modifiers: [.shift], keyCode: 1, shortcutsOnly: true))
+        #expect(!KeyComboFormatter.shouldShow(modifiers: [], keyCode: 49, shortcutsOnly: true))
+        // fn alone (set by AppKit on many keys) does not make a shortcut.
+        #expect(!KeyComboFormatter.shouldShow(modifiers: [.function], keyCode: 0, shortcutsOnly: true))
+    }
+
+    @Test func shortcutsOnlyShowsCombosAndStandaloneKeys() {
+        #expect(KeyComboFormatter.shouldShow(modifiers: [.command], keyCode: 1, shortcutsOnly: true))
+        #expect(KeyComboFormatter.shouldShow(modifiers: [.control], keyCode: 1, shortcutsOnly: true))
+        #expect(KeyComboFormatter.shouldShow(modifiers: [.option, .shift], keyCode: 1, shortcutsOnly: true))
+        for keyCode: UInt16 in [53, 48, 36, 51, 123, 124, 125, 126, 122, 111] {
+            #expect(KeyComboFormatter.shouldShow(modifiers: [], keyCode: keyCode, shortcutsOnly: true))
+        }
+    }
+
+    @Test func everythingIsShownWithShortcutsOnlyOff() {
+        #expect(KeyComboFormatter.shouldShow(modifiers: [], keyCode: 0, shortcutsOnly: false))
+        #expect(KeyComboFormatter.shouldShow(modifiers: [.shift], keyCode: 1, shortcutsOnly: false))
+        #expect(KeyComboFormatter.shouldShow(modifiers: [.command], keyCode: 1, shortcutsOnly: false))
+        #expect(KeyComboFormatter.shouldShow(modifiers: [], keyCode: 53, shortcutsOnly: false))
+    }
+
     @Test func modifiersCanBeBuiltFromRawEventFlags() {
         // NSEvent.ModifierFlags raw values, so the app can pass `event.modifierFlags.rawValue`.
         let raw: UInt = (1 << 20) | (1 << 17) | (1 << 23)

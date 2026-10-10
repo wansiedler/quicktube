@@ -59,6 +59,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var historyEnabled = true
     public var clickHighlightEnabled = false
     public var keystrokeOverlayEnabled = false
+    /// The keystroke pill shows only combos with ⌘, ⌃ or ⌥ and standalone keys, never plain typing.
+    public var keystrokeShortcutsOnly = true
     public var overlaysInRecording = true
     public var trimTailSeconds = 1.0
     public var trimHeadSeconds = 0.0
@@ -86,7 +88,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case captureMode, cameraEnabled, cameraAlwaysOn, cameraSize, cameraCorner, pauseEnabled
         case systemAudioEnabled, microphoneEnabled, historyEnabled, clickHighlightEnabled
-        case keystrokeOverlayEnabled, overlaysInRecording, trimTailSeconds, trimHeadSeconds
+        case keystrokeOverlayEnabled, keystrokeShortcutsOnly, overlaysInRecording, trimTailSeconds,
+            trimHeadSeconds
         case titleTemplate, deleteAfterUpload, deleteOlderThanDays, automaticUpdates
         case gifEnabled, gifFPS, gifMaxWidth, gifMaxSeconds, quality
         case telegramCompressToFit, telegramLimitMB, telegramAllowDownscale
@@ -111,6 +114,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
         keystrokeOverlayEnabled =
             c.lenient(Bool.self, .keystrokeOverlayEnabled)
             ?? d.keystrokeOverlayEnabled
+        keystrokeShortcutsOnly =
+            c.lenient(Bool.self, .keystrokeShortcutsOnly) ?? d.keystrokeShortcutsOnly
         overlaysInRecording =
             c.lenient(Bool.self, .overlaysInRecording) ?? d.overlaysInRecording
         trimTailSeconds =

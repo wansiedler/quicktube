@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import Observation
 import QuickTubeCore
 import SwiftUI
@@ -18,6 +19,8 @@ final class KeystrokeOverlay {
     private let keystroke = Keystroke()
     private var monitors: [Any] = []
     private var hideTask: Task<Void, Never>?
+    /// Settings → Overlays "Show only shortcuts"; read per key press.
+    var shortcutsOnly: () -> Bool = { true }
 
     init() {
         panel = OverlayWindow.make(frame: NSRect(origin: .zero, size: Self.size))
@@ -79,10 +82,14 @@ final class KeystrokeOverlay {
     }
 
     private func show(_ event: NSEvent) {
+        // A password field (or a terminal with Secure Keyboard Entry) is active: show nothing.
+        guard !IsSecureEventInputEnabled() else { return }
+        let modifiers = KeyComboFormatter.Modifiers(eventFlags: event.modifierFlags.rawValue)
         guard
+            KeyComboFormatter.shouldShow(
+                modifiers: modifiers, keyCode: event.keyCode, shortcutsOnly: shortcutsOnly()),
             let text = KeyComboFormatter.format(
-                modifiers: .init(eventFlags: event.modifierFlags.rawValue), keyCode: event.keyCode,
-                characters: event.charactersIgnoringModifiers)
+                modifiers: modifiers, keyCode: event.keyCode, characters: event.charactersIgnoringModifiers)
         else { return }
         keystroke.text = text
         hideTask?.cancel()

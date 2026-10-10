@@ -138,8 +138,11 @@ modifiers).
   contain it. The status pill and selection overlays are never recorded.
 - **Overlays**: "Highlight clicks" draws a ring at each click, "Show
   keystrokes" a pill with the last key combo (needs Input Monitoring; Settings
-  → Overlays shows the status and opens System Settings). "Show overlays in
-  recording" decides whether the video contains them.
+  → Overlays shows the status and opens System Settings). "Show only
+  shortcuts" (on by default) leaves out plain typing: only combos with ⌘ ⌃ ⌥
+  and keys such as ⎋, ↩, arrows and F-keys appear, and nothing is shown while
+  a password field is active. "Show overlays in recording" decides whether the
+  video contains them.
 - **History**: the last 20 uploaded links under Recent Links in the menu; click
   copies one. Settings → History can turn it off or clear it.
 - **Cleanup**: "Move to Trash after upload" and "Trash recordings older than N
