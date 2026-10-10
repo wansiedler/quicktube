@@ -3,7 +3,7 @@ import QuickTubeCore
 import SwiftUI
 
 struct MenuContent: View {
-    let model: AppModel
+    @Bindable var model: AppModel
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
@@ -33,6 +33,14 @@ struct MenuContent: View {
         if model.state.lastLink != nil {
             Button("Copy Last Link") { model.copyLastLink() }
         }
+        Divider()
+        Picker("Quality: \(model.quality.resolution.label)", selection: $model.quality.resolution) {
+            ForEach(RecordingQuality.Resolution.allCases, id: \.self) { Text($0.label).tag($0) }
+        }
+        Picker("Frame rate: \(model.quality.fps) fps", selection: $model.quality.fps) {
+            ForEach(RecordingQuality.frameRates, id: \.self) { Text("\($0) fps").tag($0) }
+        }
+        Divider()
         Button("Open Recordings Folder") { model.openRecordingsFolder() }
         Button("Open Log File") { NSWorkspace.shared.open(DiagnosticsLog.url) }
         Divider()
