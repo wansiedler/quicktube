@@ -87,6 +87,20 @@ public actor GoogleAuth: TokenProvider {
         cached = nil
     }
 
+    /// Full installed-app flow: loopback listener, browser, code exchange.
+    public func signIn(openBrowser: @escaping @Sendable (URL) -> Void) async throws {
+        let server = try LoopbackServer()
+        let port = try await server.start()
+        let redirectURI = "http://127.0.0.1:\(port)"
+        let pkce = PKCE.random()
+        let state = UUID().uuidString
+        openBrowser(try authorizationURL(pkce: pkce, redirectURI: redirectURI, state: state))
+        let callback = try await server.waitForCallback()
+        guard callback.error == nil else { throw AuthError.cancelled }
+        guard callback.state == state, let code = callback.code else { throw AuthError.badCallback }
+        try await exchange(code: code, pkce: pkce, redirectURI: redirectURI)
+    }
+
     public func authorizationURL(pkce: PKCE, redirectURI: String, state: String) throws -> URL {
         guard let client = try client() else { throw AuthError.missingClient }
         var components = URLComponents(url: endpoints.authorization, resolvingAgainstBaseURL: false)!
