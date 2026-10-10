@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 import QuickTubeCore
 import Testing
+import VideoToolbox
 
 @Suite struct VideoTranscoderTests {
     static let fiftyMB = 50 << 20
@@ -75,7 +76,7 @@ import Testing
 
     // MARK: - End to end
 
-    @Test(.enabled("needs an AVAssetWriter that can encode H.264") { ClipMaker.writerAvailable() })
+    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
     func transcodesAGeneratedClip() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -101,7 +102,7 @@ import Testing
         #expect(values.last == 1)
     }
 
-    @Test(.enabled("needs an AVAssetWriter that can encode H.264") { ClipMaker.writerAvailable() })
+    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
     func keepsTheAudioTrack() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -118,6 +119,23 @@ import Testing
         let audio = try #require(tracks.first { $0.mediaType == .audio })
         let formats = try await audio.load(.formatDescriptions)
         #expect(formats.first.map { CMFormatDescriptionGetMediaSubType($0) } == kAudioFormatMPEG4AAC)
+    }
+
+    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
+    func cancellationThrowsCancellationErrorAndLeavesNoOutput() async throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appending(path: "clip.mov")
+        try await ClipMaker.make(input, width: 640, height: 480, fps: 30, seconds: 1, audio: true)
+        let plan = TranscodePlan(width: 320, height: 240, videoBitrate: 300_000, audioBitrate: 64_000)
+        let output = dir.appending(path: "clip.telegram.mp4")
+
+        let task = Task { try await VideoTranscoder.transcode(input, plan: plan, output: output) { _ in } }
+        task.cancel()
+
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        #expect(!FileManager.default.fileExists(atPath: output.path))
     }
 
     @Test func unreadableInputThrowsCannotRead() async throws {
@@ -139,16 +157,21 @@ import Testing
 enum ClipMaker {
     struct Failure: Error {}
 
-    /// False on hosts without a usable encoder (some CI sandboxes); the end-to-end test is skipped there.
-    static func writerAvailable() -> Bool {
-        let url = FileManager.default.temporaryDirectory.appending(path: "probe-\(UUID().uuidString).mov")
-        guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mov) else { return false }
-        let input = AVAssetWriterInput(
-            mediaType: .video,
-            outputSettings: [
-                AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: 64, AVVideoHeightKey: 64,
-            ])
-        return writer.canAdd(input)
+    /// False on hosts without an H.264 encoder for the source clip or an HEVC encoder for the transcode
+    /// (some CI VMs); the end-to-end tests are skipped there.
+    static func encodersAvailable() -> Bool {
+        canEncode(kCMVideoCodecType_H264) && canEncode(kCMVideoCodecType_HEVC)
+    }
+
+    private static func canEncode(_ codec: CMVideoCodecType) -> Bool {
+        var session: VTCompressionSession?
+        let status = VTCompressionSessionCreate(
+            allocator: nil, width: 64, height: 64, codecType: codec, encoderSpecification: nil,
+            imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: nil, refcon: nil,
+            compressionSessionOut: &session)
+        guard status == noErr, let session else { return false }
+        VTCompressionSessionInvalidate(session)
+        return true
     }
 
     static func make(

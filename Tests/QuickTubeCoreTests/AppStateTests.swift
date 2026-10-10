@@ -454,3 +454,18 @@ final class LogLines: @unchecked Sendable {
                 == "Sign-in failed: badResponse(503)")
     }
 }
+
+@Suite struct TranscodeMessageTests {
+    @Test(arguments: [
+        (TranscodeError.cannotRead as Error, "Could not read the recording to compress it for Telegram."),
+        (TranscodeError.cannotWrite as Error, "Could not write the compressed copy for Telegram."),
+        (TranscodeError.failed("x") as Error, "Compressing for Telegram failed: x"),
+        (
+            TelegramError.fileTooLarge(limit: 50 << 20, actual: 75 << 20) as Error,
+            "File is 75 MB; the Telegram limit is 50 MB (Settings → Telegram)."
+        ),
+    ])
+    @MainActor func messages(error: Error, expected: String) {
+        #expect(AppState.message(for: error) == expected)
+    }
+}

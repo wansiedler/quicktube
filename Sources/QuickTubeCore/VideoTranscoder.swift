@@ -92,12 +92,17 @@ public enum VideoTranscoder {
             tracks = try await asset.load(.tracks)
             duration = try await asset.load(.duration)
         } catch {
+            try Task.checkCancellation()
+            if error is CancellationError { throw error }
             throw TranscodeError.cannotRead
         }
         guard let videoTrack = tracks.first(where: { $0.mediaType == .video }),
             let (transform, nominalFPS) = try? await videoTrack.load(.preferredTransform, .nominalFrameRate),
             let reader = try? AVAssetReader(asset: asset)
-        else { throw TranscodeError.cannotRead }
+        else {
+            try Task.checkCancellation()
+            throw TranscodeError.cannotRead
+        }
         let audioTracks = tracks.filter { $0.mediaType == .audio }
 
         let videoOutput = AVAssetReaderTrackOutput(
@@ -167,41 +172,55 @@ public enum VideoTranscoder {
         writer.startSession(atSourceTime: .zero)
 
         let total = duration.seconds
+        let writerBox = Unchecked(writer)
         var pumps = [
             Pump(
-                output: videoOutput, input: videoInput, label: "video",
+                output: videoOutput, input: videoInput, writer: writerBox, label: "video",
                 onSample: { seconds in
                     guard total.isFinite, total > 0 else { return }
                     progress(min(0.99, max(0, seconds / total)))
                 })
         ]
         if let audioOutput, let audioInput {
-            pumps.append(Pump(output: audioOutput, input: audioInput, label: "audio", onSample: { _ in }))
+            pumps.append(
+                Pump(
+                    output: audioOutput, input: audioInput, writer: writerBox, label: "audio",
+                    onSample: { _ in }))
         }
+        // Stops every pump, including one parked waiting for `isReadyForMoreMediaData`, so the group always ends.
         let readerBox = Unchecked(reader)
+        let pumpList = pumps
+        let abortAll: @Sendable () -> Void = {
+            readerBox.value.cancelReading()
+            for pump in pumpList { pump.abort() }
+        }
         await withTaskCancellationHandler {
             await withTaskGroup(of: Void.self) { group in
-                for pump in pumps { group.addTask { await pump.run() } }
+                for pump in pumpList { group.addTask { await pump.run(onFailure: abortAll) } }
             }
         } onCancel: {
-            readerBox.value.cancelReading()
+            abortAll()
         }
 
         func discard() {
             writer.cancelWriting()
             try? FileManager.default.removeItem(at: output)
         }
-        if Task.isCancelled || reader.status == .cancelled {
+        if Task.isCancelled {
             discard()
             throw CancellationError()
+        }
+        if writer.status == .failed {
+            discard()
+            throw TranscodeError.failed(writer.error?.localizedDescription ?? "writing failed")
         }
         if reader.status == .failed {
             discard()
             throw TranscodeError.failed(reader.error?.localizedDescription ?? "reading failed")
         }
-        if writer.status == .failed {
+        if reader.status == .cancelled || writer.status != .writing {
             discard()
-            throw TranscodeError.failed(writer.error?.localizedDescription ?? "writing failed")
+            throw TranscodeError.failed("transcoding stopped early")
         }
         await writer.finishWriting()
         guard writer.status == .completed else {
@@ -218,48 +237,84 @@ public enum VideoTranscoder {
         init(_ value: T) { self.value = value }
     }
 
-    /// Moves samples from one reader output to one writer input on its own queue until either runs dry.
+    /// Moves samples from one reader output to one writer input on its own queue until either runs dry,
+    /// the writer stops writing, or `abort()` is called.
     private final class Pump: @unchecked Sendable {
         private let output: AVAssetReaderOutput
         private let input: AVAssetWriterInput
+        private let writer: Unchecked<AVAssetWriter>
         private let queue: DispatchQueue
         private let onSample: @Sendable (Double) -> Void
         /// Touched only on `queue`.
         private var finished = false
+        private var continuation: CheckedContinuation<Void, Never>?
 
         init(
-            output: AVAssetReaderOutput, input: AVAssetWriterInput, label: String,
-            onSample: @escaping @Sendable (Double) -> Void
+            output: AVAssetReaderOutput, input: AVAssetWriterInput, writer: Unchecked<AVAssetWriter>,
+            label: String, onSample: @escaping @Sendable (Double) -> Void
         ) {
             self.output = output
             self.input = input
+            self.writer = writer
             self.queue = DispatchQueue(label: "QuickTube.transcode.\(label)")
             self.onSample = onSample
         }
 
-        func run() async {
+        /// Returns once this track is done; `onFailure` runs when the writer rejects or stops taking samples.
+        func run(onFailure: @escaping @Sendable () -> Void) async {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                input.requestMediaDataWhenReady(on: queue) { [self] in
-                    guard !finished else { return }
-                    while input.isReadyForMoreMediaData {
-                        guard let sample = output.copyNextSampleBuffer() else {
-                            finish(continuation)
-                            return
-                        }
-                        guard input.append(sample) else {
-                            finish(continuation)
-                            return
-                        }
-                        onSample(CMSampleBufferGetPresentationTimeStamp(sample).seconds)
+                // Registration, `abort()` and `finish()` all run on `queue`, so an input is never asked for
+                // data after it was marked finished (AVFoundation raises on that).
+                queue.sync {
+                    self.continuation = continuation
+                    guard !finished, writer.value.status == .writing else {
+                        finish()
+                        return
                     }
+                    input.requestMediaDataWhenReady(on: queue) { [self] in pull(onFailure: onFailure) }
                 }
             }
         }
 
-        private func finish(_ continuation: CheckedContinuation<Void, Never>) {
-            finished = true
-            input.markAsFinished()
-            continuation.resume()
+        /// Runs on `queue`.
+        private func pull(onFailure: @Sendable () -> Void) {
+            guard !finished else { return }
+            while input.isReadyForMoreMediaData {
+                guard writer.value.status == .writing else {
+                    finish()
+                    onFailure()
+                    return
+                }
+                guard let sample = output.copyNextSampleBuffer() else {
+                    finish()
+                    return
+                }
+                guard input.append(sample) else {
+                    finish()
+                    onFailure()
+                    return
+                }
+                onSample(CMSampleBufferGetPresentationTimeStamp(sample).seconds)
+            }
+            if writer.value.status != .writing {
+                finish()
+                onFailure()
+            }
+        }
+
+        /// Ends `run` even if the writer never asks for more data again.
+        func abort() {
+            queue.async { [self] in finish() }
+        }
+
+        /// Runs on `queue`; marks the input finished once and resumes `run` if it is waiting.
+        private func finish() {
+            if !finished {
+                finished = true
+                if writer.value.status == .writing { input.markAsFinished() }
+            }
+            continuation?.resume()
+            continuation = nil
         }
     }
 }
