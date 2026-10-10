@@ -29,6 +29,21 @@ public enum Stage: Sendable {
     case recording, upload, signIn
 }
 
+/// What the UI can offer for the current failure, e.g. a link to the matching Privacy pane.
+public enum FailureKind: Equatable, Sendable {
+    case screenPermission
+    case microphonePermission
+    case other
+
+    public init(_ error: Error) {
+        switch error {
+        case RecorderError.screenPermissionDenied: self = .screenPermission
+        case RecorderError.microphonePermissionDenied: self = .microphonePermission
+        default: self = .other
+        }
+    }
+}
+
 public enum Phase: Equatable, Sendable {
     case idle
     case recording
@@ -43,6 +58,8 @@ public enum Phase: Equatable, Sendable {
 public final class AppState {
     public private(set) var phase: Phase = .idle
     public private(set) var lastLink: URL?
+    /// Classifies the most recent failure; meaningful while `phase` is `.failed`.
+    public private(set) var failureKind: FailureKind = .other
 
     private let recorder: ScreenRecorder
     private let uploader: VideoUploader
@@ -131,6 +148,7 @@ public final class AppState {
 
     private func fail(_ error: Error, file: URL?, stage: Stage) {
         let message = Self.message(for: error, stage: stage)
+        failureKind = FailureKind(error)
         phase = .failed(message: message, file: file)
         notifier.failed(message)
     }

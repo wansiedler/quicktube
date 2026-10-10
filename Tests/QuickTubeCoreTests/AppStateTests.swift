@@ -140,6 +140,21 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         #expect(notifier.failures.count == 1)
     }
 
+    @Test func permissionFailuresAreClassified() async {
+        recorder.startError = RecorderError.screenPermissionDenied
+        let state = makeState()
+        await state.toggle()
+        #expect(state.failureKind == .screenPermission)
+
+        recorder.startError = RecorderError.microphonePermissionDenied
+        await state.toggle()
+        #expect(state.failureKind == .microphonePermission)
+
+        recorder.startError = RecorderError.noDisplay
+        await state.toggle()
+        #expect(state.failureKind == .other)
+    }
+
     @Test func uploadFailureKeepsFileAndRetryWorks() async {
         uploader.error = UploadError.exhaustedRetries
         let state = makeState()

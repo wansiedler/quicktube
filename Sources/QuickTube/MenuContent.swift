@@ -1,3 +1,4 @@
+import AppKit
 import QuickTubeCore
 import SwiftUI
 
@@ -15,8 +16,13 @@ struct MenuContent: View {
         default:
             Button("Start Recording") { Task { await model.state.toggle() } }
         }
-        if case .failed(_, let file) = model.state.phase, file != nil {
-            Button("Retry Upload") { Task { await model.state.retry() } }
+        if case .failed(_, let file) = model.state.phase {
+            if file != nil {
+                Button("Retry Upload") { Task { await model.state.retry() } }
+            }
+            if let pane = privacyPane {
+                Button("Open Privacy Settings…") { NSWorkspace.shared.open(pane) }
+            }
         }
         if model.state.lastLink != nil {
             Button("Copy Last Link") { model.copyLastLink() }
@@ -25,6 +31,16 @@ struct MenuContent: View {
         Divider()
         SettingsLink { Text("Settings…") }
         Button("Quit QuickTube") { NSApplication.shared.terminate(nil) }
+    }
+
+    /// The System Settings pane that fixes the current permission failure, if any.
+    private var privacyPane: URL? {
+        let base = "x-apple.systempreferences:com.apple.preference.security?"
+        switch model.state.failureKind {
+        case .screenPermission: return URL(string: base + "Privacy_ScreenCapture")
+        case .microphonePermission: return URL(string: base + "Privacy_Microphone")
+        default: return nil
+        }
     }
 
     private var statusText: String {
