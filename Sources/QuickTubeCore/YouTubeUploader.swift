@@ -20,8 +20,17 @@ public struct UploadResult: Sendable, Equatable {
         self.privacyStatus = nil
     }
 
-    /// False means YouTube overrode the request, usually the unverified-API-project lock.
-    public var isUnlisted: Bool { privacyStatus == nil || privacyStatus == "unlisted" }
+    /// A destination with its own link, video id and privacy (Vimeo's `privacy.view`).
+    public init(link: URL, videoID: String, privacyStatus: String) {
+        self.link = link
+        self.videoID = videoID
+        self.privacyStatus = privacyStatus
+    }
+
+    /// False means YouTube overrode the requested "unlisted" with "private", usually the
+    /// unverified-API-project lock. Other destinations' privacy values (Vimeo's "anybody", "nobody") are
+    /// what the user chose, so they never count as an override.
+    public var isUnlisted: Bool { privacyStatus != "private" }
 }
 
 public enum UploadError: Error, Equatable {

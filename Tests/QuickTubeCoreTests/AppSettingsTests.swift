@@ -23,6 +23,7 @@ import Testing
         #expect(s.telegramCompressToFit && s.telegramLimitMB == 50)
         #expect(s.telegramLimitBytes == 50 << 20)
         #expect(!s.telegramAllowDownscale)
+        #expect(s.vimeoPrivacy == .unlisted)
     }
 
     @Test func telegramLimitBytesIsClamped() {
@@ -68,6 +69,7 @@ import Testing
         s.telegramCompressToFit = false
         s.telegramLimitMB = 2000
         s.telegramAllowDownscale = true
+        s.vimeoPrivacy = .nobody
         return s
     }
 
@@ -141,6 +143,15 @@ import Testing
         expected.gifMaxSeconds = 12
         expected.cameraSize = .small
         #expect(decoded == expected)
+    }
+
+    @Test func vimeoPrivacyDecodesLeniently() throws {
+        let good = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"vimeoPrivacy":"anybody"}"#.utf8))
+        #expect(good.vimeoPrivacy == .anybody)
+        let bad = try JSONDecoder().decode(
+            AppSettings.self, from: Data(#"{"vimeoPrivacy":"password","gifFPS":12}"#.utf8))
+        #expect(bad.vimeoPrivacy == .unlisted)
+        #expect(bad.gifFPS == 12)
     }
 
     @Test func cameraSizePoints() {

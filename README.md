@@ -2,8 +2,8 @@
 
 Menu bar app for macOS 15+: press a hotkey, record the screen (a display, an
 area or one window) with your voice, press `⌃⌥⌘R` again to just save the file,
-or press a destination shortcut to upload it to YouTube, Telegram, Google Drive
-or Slack (or turn it into a GIF) and get the link on your clipboard.
+or press a destination shortcut to upload it to YouTube, Telegram, Google Drive,
+Slack or Vimeo (or turn it into a GIF) and get the link on your clipboard.
 
 ## Install
 
@@ -102,6 +102,25 @@ permalink goes on the clipboard (visible to workspace members).
    (channel details → bottom of the About tab).
 3. QuickTube → Settings → Slack: token + channel ID → Save.
 
+## Vimeo (optional)
+
+`⌃⌥⌘V` stops the recording and uploads it to your Vimeo account (tus
+resumable upload in 32 MB chunks, resumed after network hiccups); the video
+link goes on the clipboard right away and shows "processing" until Vimeo has
+transcoded it.
+
+1. developer.vimeo.com → Create an app → Generate an access token
+   (Authenticated, "you") with the scopes `upload`, `private` and `edit`.
+2. QuickTube → Settings → Vimeo: paste the token → Save Vimeo. The token is
+   kept in the Keychain (service `com.wansiedler.quicktube`, account
+   `vimeo.token`); an empty field clears it.
+3. Pick the privacy: Unlisted (`unlisted`, link includes a hash), Anyone with
+   the link (`anybody`, i.e. public) or Only me (`nobody`).
+
+Free (Basic) plans have weekly/total upload quotas and may refuse `unlisted`;
+Vimeo's error text is shown as is ("Vimeo: …"), so pick another privacy or
+plan if that happens.
+
 ## Use
 
 ### Shortcuts
@@ -117,6 +136,7 @@ modifiers).
 | `⌃⌥⌘T` | stop and send to Telegram |
 | `⌃⌥⌘D` | stop and upload to Google Drive |
 | `⌃⌥⌘S` | stop and send to Slack |
+| `⌃⌥⌘V` | stop and upload to Vimeo |
 | `⌃⌥⌘G` | stop and save a GIF (when Settings → GIF is on) |
 | `⌃⌥⌘P` | pause / resume (when pause is on in Settings → Recording; fixed) |
 
@@ -169,7 +189,7 @@ modifiers).
 General (launch at login, updates) · Recording (capture, quality, frame rate,
 system audio, microphone, pause, trimming, title template) · Camera · History ·
 Overlays · Files (cleanup) · GIF · Permissions · Google · Telegram · Google
-Drive · Slack · Shortcuts.
+Drive · Slack · Vimeo · Shortcuts.
 
 ## Develop
 

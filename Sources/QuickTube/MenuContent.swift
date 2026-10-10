@@ -23,6 +23,7 @@ struct MenuContent: View {
                 Task { await model.state.toggle(destination: .drive) }
             }
             Button("Stop and Send to Slack") { Task { await model.state.toggle(destination: .slack) } }
+            Button("Stop → Vimeo") { Task { await model.state.toggle(destination: .vimeo) } }
             if model.settings.gifEnabled {
                 Button("Stop and Make GIF") { Task { await model.state.toggle(destination: .gif) } }
             }

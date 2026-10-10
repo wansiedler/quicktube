@@ -79,6 +79,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var telegramLimitMB = 50
     /// Compression only lowers bitrate by default; when true it may also step the frame size down.
     public var telegramAllowDownscale = false
+    /// `privacy.view` of Vimeo uploads; some plans refuse `unlisted`, and the API error says so.
+    public var vimeoPrivacy: VimeoPrivacy = .unlisted
 
     /// The Telegram limit in bytes, clamped to the range Settings offers.
     public var telegramLimitBytes: Int { min(max(telegramLimitMB, 10), 2000) << 20 }
@@ -93,6 +95,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         case titleTemplate, deleteAfterUpload, deleteOlderThanDays, automaticUpdates
         case gifEnabled, gifFPS, gifMaxWidth, gifMaxSeconds, quality
         case telegramCompressToFit, telegramLimitMB, telegramAllowDownscale
+        case vimeoPrivacy
     }
 
     public init(from decoder: Decoder) throws {
@@ -139,6 +142,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         telegramLimitMB = c.lenient(Int.self, .telegramLimitMB) ?? d.telegramLimitMB
         telegramAllowDownscale =
             c.lenient(Bool.self, .telegramAllowDownscale) ?? d.telegramAllowDownscale
+        vimeoPrivacy = c.lenient(VimeoPrivacy.self, .vimeoPrivacy) ?? d.vimeoPrivacy
     }
 
     /// UserDefaults key holding the JSON-encoded settings.

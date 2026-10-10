@@ -265,12 +265,32 @@ struct SettingsView: View {
                     Text(message).font(.callout).foregroundStyle(.secondary)
                 }
             }
+            Section("Vimeo") {
+                SecureField("Access token", text: $model.vimeoToken)
+                Picker("Privacy", selection: $model.settings.vimeoPrivacy) {
+                    ForEach(VimeoPrivacy.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                HStack {
+                    Button("Save Vimeo") { model.saveVimeo() }
+                    Spacer()
+                    Text(model.vimeoConfigured ? "Configured" : "Not set up").foregroundStyle(.secondary)
+                }
+                Text(
+                    "Create an app at developer.vimeo.com, generate a personal access token with the upload, "
+                        + "private and edit scopes."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+                if let message = model.vimeoMessage {
+                    Text(message).font(.callout).foregroundStyle(.secondary)
+                }
+            }
             Section("Shortcuts") {
                 shortcutRow("Record / Save only", destination: .local)
                 shortcutRow("Record → YouTube", destination: .youtube)
                 shortcutRow("Record → Telegram", destination: .telegram)
                 shortcutRow("Record → Google Drive", destination: .drive)
                 shortcutRow("Record → Slack", destination: .slack)
+                shortcutRow("Record → Vimeo", destination: .vimeo)
                 if model.settings.gifEnabled {
                     shortcutRow("Record → GIF", destination: .gif)
                 }
@@ -298,6 +318,7 @@ struct SettingsView: View {
             model.refreshAuth()
             model.refreshTelegram()
             model.refreshSlack()
+            model.refreshVimeo()
             model.refreshLaunchAtLogin()
             model.refreshPermissions()
         }

@@ -934,6 +934,40 @@ final class LogLines: @unchecked Sendable {
         #expect(logs.all.contains { $0.contains("Cleanup after upload") })
     }
 
+    // MARK: Vimeo
+
+    @Test func vimeoUploadRecordsHistoryAndRunsAfterUpload() async {
+        let vimeo = FakeUploader()
+        let link = URL(string: "https://vimeo.com/123/abcdef")!
+        vimeo.result = UploadResult(link: link, videoID: "123", privacyStatus: "unlisted")
+        let called = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader, .vimeo: vimeo], notifier: notifier,
+            titleProvider: { [now] in TitleContext(date: now) },
+            afterUpload: { called.append($0.path) })
+        await record(state, to: .vimeo)
+        #expect(state.phase == .done(link: link))
+        #expect(state.destination == .vimeo)
+        #expect(vimeo.uploads.count == 1)
+        #expect(uploader.uploads.isEmpty)
+        #expect(notifier.links.first?.0 == link)
+        #expect(notifier.links.first?.1 == true)
+        #expect(state.history.first?.destination == .vimeo)
+        #expect(state.history.first?.link == link)
+        #expect(called.all.count == 1)
+        #expect(called.all.first == vimeo.uploads.first?.0.path)
+        #expect(AppState.doneText(link: link, destination: .vimeo) == "Link copied · vimeo.com/123/abcdef")
+    }
+
+    @Test func vimeoDestinationIsCodable() throws {
+        #expect(Destination.vimeo.label == "Vimeo")
+        #expect(Destination(rawValue: "vimeo") == .vimeo)
+        let item = HistoryItem(
+            link: URL(string: "https://vimeo.com/1")!, destination: .vimeo, date: now, title: "T")
+        let decoded = try JSONDecoder().decode(HistoryItem.self, from: JSONEncoder().encode(item))
+        #expect(decoded == item)
+    }
+
     // MARK: GIF
 
     @Test func gifDestinationFinishesThroughTheNormalDonePath() async {
@@ -1071,6 +1105,20 @@ final class LogLines: @unchecked Sendable {
             "YouTube is not set up in Settings."
         ),
         (RecorderError.windowGone as Error, "The chosen window is gone."),
+        (
+            VimeoError.notConfigured as Error,
+            "Vimeo is not set up: add the access token in Settings."
+        ),
+        (
+            VimeoError.apiError(status: 403, message: "You have exceeded your upload quota.") as Error,
+            "Vimeo: You have exceeded your upload quota."
+        ),
+        (
+            VimeoError.uploadIncomplete(offset: 3 << 20, size: 10 << 20) as Error,
+            "Vimeo: the upload stopped at 3 of 10 MB. Retry the upload."
+        ),
+        (VimeoError.badResponse(200) as Error, "Vimeo: unexpected response (HTTP 200)."),
+        (DestinationError.unavailable(.vimeo) as Error, "Vimeo is not set up in Settings."),
     ])
     @MainActor func messages(error: Error, expected: String) {
         #expect(AppState.message(for: error) == expected)
