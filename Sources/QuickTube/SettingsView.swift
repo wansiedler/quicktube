@@ -22,6 +22,10 @@ struct SettingsView: View {
                 }
             }
             Section("Recording") {
+                Picker("Capture", selection: $model.settings.captureMode) {
+                    ForEach(CaptureMode.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
                 Picker("Quality", selection: $model.settings.quality.resolution) {
                     ForEach(RecordingQuality.Resolution.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
@@ -30,6 +34,13 @@ struct SettingsView: View {
                     ForEach(RecordingQuality.frameRates, id: \.self) { Text("\($0) fps").tag($0) }
                 }
                 .pickerStyle(.segmented)
+                Toggle("System audio", isOn: $model.settings.systemAudioEnabled)
+                Toggle("Microphone", isOn: $model.settings.microphoneEnabled)
+                Text(
+                    "Select area and Select window show a chooser first: drag an area or click a window, Esc cancels. "
+                        + "System audio records other apps' sound, never QuickTube's own."
+                )
+                .font(.callout).foregroundStyle(.secondary)
                 Toggle(
                     "Pause and resume (\(AppModel.pauseCombo.label))",
                     isOn: Binding(

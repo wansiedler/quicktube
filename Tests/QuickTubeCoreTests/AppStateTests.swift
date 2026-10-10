@@ -122,6 +122,17 @@ final class LogLines: @unchecked Sendable {
     var all: [String] { lock.withLock { lines } }
 }
 
+/// Hands out queued results and records the modes it was asked for.
+@MainActor final class FakePicker: CaptureTargetPicker {
+    var results: [CaptureTarget?] = []
+    var modes: [CaptureMode] = []
+
+    func pick(mode: CaptureMode) async -> CaptureTarget? {
+        modes.append(mode)
+        return results.isEmpty ? nil : results.removeFirst()
+    }
+}
+
 @MainActor
 @Suite struct AppStateTests {
     let recorder = FakeRecorder()
@@ -456,6 +467,77 @@ final class LogLines: @unchecked Sendable {
                     file: renamed))
     }
 
+    // MARK: - Capture target selection
+
+    func makePickingState(picker: FakePicker, mode: CaptureMode) -> AppState {
+        AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            finisher: FakeFinisher(), captureTarget: { .display(7) }, picker: picker,
+            captureMode: { mode }, titleProvider: { [now] in TitleContext(date: now) })
+    }
+
+    @Test(arguments: [
+        (CaptureMode.selectWindow, CaptureTarget.window(42)),
+        (
+            CaptureMode.selectArea,
+            CaptureTarget.region(display: 3, rect: CGRect(x: 10, y: 20, width: 300, height: 200))
+        ),
+    ])
+    func selectModesRecordThePickedTarget(mode: CaptureMode, target: CaptureTarget) async {
+        let picker = FakePicker()
+        picker.results = [target]
+        let state = makePickingState(picker: picker, mode: mode)
+        await state.toggle()
+        #expect(picker.modes == [mode])
+        #expect(recorder.targets == [target])
+        #expect(state.phase == .recording)
+    }
+
+    @Test func cancelledSelectionStaysIdleSilently() async {
+        let picker = FakePicker()
+        picker.results = [nil]
+        let state = makePickingState(picker: picker, mode: .selectArea)
+        await state.toggle()
+        #expect(state.phase == .idle)
+        #expect(recorder.starts == 0)
+        #expect(notifier.failures.isEmpty)
+        // The transition is released: the next press picks again and records.
+        picker.results = [.window(9)]
+        await state.toggle()
+        #expect(picker.modes.count == 2)
+        #expect(recorder.targets == [.window(9)])
+        #expect(state.phase == .recording)
+    }
+
+    @Test func cancelAfterAFinishedRecordingReturnsToIdle() async {
+        let picker = FakePicker()
+        picker.results = [.window(1), nil]
+        let state = makePickingState(picker: picker, mode: .selectWindow)
+        await state.toggle()
+        await state.toggle()
+        #expect(state.phase == .done(link: URL(string: "https://youtu.be/abc123")!))
+        await state.toggle()
+        #expect(state.phase == .idle)
+        #expect(recorder.starts == 1)
+        #expect(notifier.failures.isEmpty)
+    }
+
+    @Test func displayModeSkipsThePicker() async {
+        let picker = FakePicker()
+        let state = makePickingState(picker: picker, mode: .displayUnderCursor)
+        await state.toggle()
+        #expect(picker.modes.isEmpty)
+        #expect(recorder.targets == [.display(7)])
+    }
+
+    @Test func selectModeWithoutAPickerFallsBackToTheDisplay() async {
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            captureTarget: { .display(7) }, captureMode: { .selectWindow })
+        await state.toggle()
+        #expect(recorder.targets == [.display(7)])
+    }
+
     // MARK: - Pause, segments and the finisher
 
     func makePausableState(
@@ -700,6 +782,7 @@ final class LogLines: @unchecked Sendable {
             DestinationError.unavailable(.youtube) as Error,
             "YouTube is not set up in Settings."
         ),
+        (RecorderError.windowGone as Error, "The chosen window is gone."),
     ])
     @MainActor func messages(error: Error, expected: String) {
         #expect(AppState.message(for: error) == expected)

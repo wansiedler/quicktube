@@ -39,6 +39,9 @@ struct MenuContent: View {
             Button("Copy Last Link") { model.copyLastLink() }
         }
         Divider()
+        Picker("Capture: \(model.settings.captureMode.label)", selection: $model.settings.captureMode) {
+            ForEach(CaptureMode.allCases, id: \.self) { Text($0.label).tag($0) }
+        }
         Picker(
             "Quality: \(model.settings.quality.resolution.label)",
             selection: $model.settings.quality.resolution

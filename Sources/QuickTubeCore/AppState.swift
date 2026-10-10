@@ -16,6 +16,8 @@ public enum RecorderError: Error, Equatable {
     case screenPermissionDenied
     case microphonePermissionDenied
     case noDisplay
+    /// The window chosen for a window recording is no longer on screen.
+    case windowGone
     case alreadyRecording
     case notRecording
     case notPaused
@@ -103,6 +105,9 @@ public final class AppState {
     private let finisher: RecordingFinishing
     private let trim: @Sendable () -> TrimSettings
     private let captureTarget: @Sendable () -> CaptureTarget
+    /// Shows the area/window selection in the select capture modes.
+    private let picker: CaptureTargetPicker?
+    private let captureMode: @Sendable () -> CaptureMode
     private let clock: @Sendable () -> Date
     private let titleProvider: @Sendable () -> TitleContext
     private let titleTemplate: @Sendable () -> String
@@ -136,7 +141,8 @@ public final class AppState {
             trim: trim, titleProvider: titleProvider, titleTemplate: titleTemplate, log: log)
     }
 
-    /// `trim` and `captureTarget` are read at stop and start, so Settings changes apply to the next recording.
+    /// `trim`, `captureMode` and `captureTarget` are read at stop and start, so Settings changes apply to the
+    /// next recording. In the select modes `picker` chooses the target; without one `captureTarget` is used.
     public init(
         recorder: ScreenRecorder,
         uploaders: [Destination: VideoUploader],
@@ -144,6 +150,8 @@ public final class AppState {
         finisher: RecordingFinishing = RecordingFinisher(),
         trim: @escaping @Sendable () -> TrimSettings = { .none },
         captureTarget: @escaping @Sendable () -> CaptureTarget = { CaptureTarget.displayUnderCursor() },
+        picker: CaptureTargetPicker? = nil,
+        captureMode: @escaping @Sendable () -> CaptureMode = { .displayUnderCursor },
         clock: @escaping @Sendable () -> Date = { Date() },
         titleProvider: @escaping @Sendable () -> TitleContext = { TitleContext() },
         titleTemplate: @escaping @Sendable () -> String = { "{date}" },
@@ -155,6 +163,8 @@ public final class AppState {
         self.finisher = finisher
         self.trim = trim
         self.captureTarget = captureTarget
+        self.picker = picker
+        self.captureMode = captureMode
         self.clock = clock
         self.titleProvider = titleProvider
         self.titleTemplate = titleTemplate
@@ -242,10 +252,21 @@ public final class AppState {
         }
     }
 
+    /// In the select modes the picker runs first; cancelling it returns to `.idle` without a notification.
     private func startRecording() async {
         let context = titleProvider()
+        let target: CaptureTarget
+        if let picker, case let mode = captureMode(), mode != .displayUnderCursor {
+            guard let picked = await picker.pick(mode: mode) else {
+                phase = .idle
+                return
+            }
+            target = picked
+        } else {
+            target = captureTarget()
+        }
         do {
-            try await recorder.start(target: captureTarget())
+            try await recorder.start(target: target)
             titleContext = context
             pendingSegments = nil
             recordedBefore = 0
@@ -396,6 +417,8 @@ public final class AppState {
             return "Allow Screen Recording for QuickTube in System Settings → Privacy & Security."
         case RecorderError.microphonePermissionDenied:
             return "Allow Microphone for QuickTube in System Settings → Privacy & Security."
+        case RecorderError.windowGone:
+            return "The chosen window is gone."
         case RecorderError.stopTimedOut:
             return
                 "Recording did not finalize in time; segments are kept in the recordings folder. Try Retry."

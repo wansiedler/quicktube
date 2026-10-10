@@ -3,8 +3,23 @@ import CoreGraphics
 import Foundation
 import ScreenCaptureKit
 
-/// Records a display with microphone audio to HEVC .mp4 segments: `<date>.seg1.mp4`, `.seg2.mp4`, …
-/// Pausing closes the current segment, resuming opens the next one with the same target.
+/// What a recording is made with; read once per recording, so every segment of it matches.
+public struct RecorderOptions: Sendable, Equatable {
+    public var quality: RecordingQuality
+    /// Other apps' audio (`SCStreamConfiguration.capturesAudio`); QuickTube's own sound is excluded.
+    public var systemAudio: Bool
+    public var microphone: Bool
+
+    public init(quality: RecordingQuality = .default, systemAudio: Bool = false, microphone: Bool = true) {
+        self.quality = quality
+        self.systemAudio = systemAudio
+        self.microphone = microphone
+    }
+}
+
+/// Records a display, a window or a display region, with optional system and microphone audio,
+/// to HEVC .mp4 segments: `<date>.seg1.mp4`, `.seg2.mp4`, …
+/// Pausing closes the current segment, resuming opens the next one with the same target and options.
 public actor Recorder: ScreenRecorder {
     public static let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appending(path: "Movies/QuickTube")
@@ -26,9 +41,10 @@ public actor Recorder: ScreenRecorder {
         case stopping
     }
 
-    /// The recording in progress: where it captures, its file stem, and the closed segments.
+    /// The recording in progress: where it captures, with what, its file stem, and the closed segments.
     private struct Take {
         let target: CaptureTarget
+        let options: RecorderOptions
         let stem: String
         var segments: [URL] = []
     }
@@ -36,23 +52,23 @@ public actor Recorder: ScreenRecorder {
     private static let stopTimeout: Duration = .seconds(10)
 
     private let directory: URL
-    private let quality: @Sendable () -> RecordingQuality
+    private let options: @Sendable () -> RecorderOptions
     private var state = State.idle
     private var take: Take?
 
-    /// `quality` is read at the start of every recording, so Settings changes apply to the next one.
+    /// `options` is read at the start of every recording, so Settings changes apply to the next one.
     public init(
         directory: URL = Recorder.defaultDirectory,
-        quality: @escaping @Sendable () -> RecordingQuality = { .default }
+        options: @escaping @Sendable () -> RecorderOptions = { RecorderOptions() }
     ) {
         self.directory = directory
-        self.quality = quality
+        self.options = options
     }
 
     public func start(target: CaptureTarget) async throws {
         guard case .idle = state else { throw RecorderError.alreadyRecording }
         state = .starting
-        let take = Take(target: target, stem: RecordingNaming.title(for: Date()))
+        let take = Take(target: target, options: options(), stem: RecordingNaming.title(for: Date()))
         do {
             state = .recording(try await beginSession(take, index: 1))
             self.take = take
@@ -107,9 +123,45 @@ public actor Recorder: ScreenRecorder {
         try await stream.value.stopCapture()
     }
 
+    /// Builds the content filter for `target`; for a region also returns its source rect (display points).
+    private static func filter(
+        for target: CaptureTarget, in content: SCShareableContent
+    ) throws -> (filter: SCContentFilter, sourceRect: CGRect?) {
+        // Keep QuickTube's own windows (the status HUD, the selection overlay) out of display recordings.
+        let ownApps = content.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
+        switch target {
+        case .display(let displayID):
+            guard
+                let display = content.displays.first(where: { $0.displayID == displayID })
+                    ?? content.displays.first
+            else { throw RecorderError.noDisplay }
+            return (
+                SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: []), nil
+            )
+        case .window(let windowID):
+            guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
+                throw RecorderError.windowGone
+            }
+            return (SCContentFilter(desktopIndependentWindow: window), nil)
+        case .region(let displayID, let rect):
+            guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+                throw RecorderError.noDisplay
+            }
+            let filter = SCContentFilter(
+                display: display, excludingApplications: ownApps, exceptingWindows: [])
+            guard let source = CaptureTarget.sourceRect(rect, displaySize: filter.contentRect.size) else {
+                throw RecorderError.noDisplay
+            }
+            return (filter, source)
+        }
+    }
+
     private func beginSession(_ take: Take, index: Int) async throws -> Session {
-        guard await AVCaptureDevice.requestAccess(for: .audio) else {
-            throw RecorderError.microphonePermissionDenied
+        let options = take.options
+        if options.microphone {
+            guard await AVCaptureDevice.requestAccess(for: .audio) else {
+                throw RecorderError.microphonePermissionDenied
+            }
         }
         let content: SCShareableContent
         do {
@@ -117,27 +169,21 @@ public actor Recorder: ScreenRecorder {
         } catch {
             throw RecorderError.screenPermissionDenied
         }
-        guard case .display(let displayID) = take.target,
-            let display = content.displays.first(where: { $0.displayID == displayID })
-                ?? content.displays.first
-        else { throw RecorderError.noDisplay }
-
-        // Keep QuickTube's own windows (the status HUD) out of the recording.
-        let ownApps = content.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
-        let filter = SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: [])
+        let (filter, sourceRect) = try Self.filter(for: take.target, in: content)
         let scale = CGFloat(filter.pointPixelScale)
         let configuration = SCStreamConfiguration()
-        // HEVC rejects odd dimensions.
-        let quality = quality()
-        let size = quality.resolution.outputSize(
-            forNative: CGSize(
-                width: filter.contentRect.width * scale, height: filter.contentRect.height * scale))
+        let captured = sourceRect?.size ?? filter.contentRect.size
+        // HEVC rejects odd dimensions; outputSize keeps them even.
+        let size = options.quality.resolution.outputSize(
+            forNative: CGSize(width: captured.width * scale, height: captured.height * scale))
+        if let sourceRect { configuration.sourceRect = sourceRect }
         configuration.width = Int(size.width)
         configuration.height = Int(size.height)
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(quality.fps))
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(options.quality.fps))
         configuration.showsCursor = true
-        configuration.capturesAudio = false
-        configuration.captureMicrophone = true
+        configuration.capturesAudio = options.systemAudio
+        configuration.excludesCurrentProcessAudio = true
+        configuration.captureMicrophone = options.microphone
 
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appending(path: "\(take.stem).seg\(index).mp4")

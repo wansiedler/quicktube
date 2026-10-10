@@ -12,6 +12,7 @@ final class AppModel {
     private let hotkey = HotkeyManager()
     private let notifier: AppNotifier
     private var hud: HUDController?
+    private let selectionOverlay = SelectionOverlay()
     private static let comboKeys: [Destination: String] = [
         .youtube: "hotkey.combo", .telegram: "hotkey.telegramCombo",
         .drive: "hotkey.driveCombo", .slack: "hotkey.slackCombo",
@@ -74,9 +75,12 @@ final class AppModel {
         let notifier = AppNotifier()
         self.notifier = notifier
         self.state = AppState(
-            recorder: Recorder(quality: {
+            recorder: Recorder(options: {
                 // The store persists every change to UserDefaults; read it back at each start.
-                AppSettings.load(from: .standard).quality
+                let settings = AppSettings.load(from: .standard)
+                return RecorderOptions(
+                    quality: settings.quality, systemAudio: settings.systemAudioEnabled,
+                    microphone: settings.microphoneEnabled)
             }),
             uploaders: [
                 .youtube: YouTubeUploader(tokens: auth, log: { DiagnosticsLog.append($0) }),
@@ -89,6 +93,8 @@ final class AppModel {
                 let settings = AppSettings.load(from: .standard)
                 return TrimSettings(head: settings.trimHeadSeconds, tail: settings.trimTailSeconds)
             },
+            picker: selectionOverlay,
+            captureMode: { AppSettings.load(from: .standard).captureMode },
             titleProvider: { MainActor.assumeIsolated { Self.currentTitleContext() } },
             titleTemplate: { AppSettings.load(from: .standard).titleTemplate },
             log: { DiagnosticsLog.append($0) })
