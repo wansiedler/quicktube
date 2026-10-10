@@ -20,6 +20,8 @@ public actor LoopbackServer {
     }
 
     private let listener: NWListener
+    /// Serial, so listener and connection callbacks never run concurrently.
+    private let queue = DispatchQueue(label: "com.wansiedler.quicktube.loopback")
     private var received: Callback?
     private var failure: Error?
     private var finished = false
@@ -35,7 +37,8 @@ public actor LoopbackServer {
     public func start() async throws -> UInt16 {
         let listener = listener
         return try await withCheckedThrowingContinuation { continuation in
-            // Serial queue: this handler runs once to completion, then swaps itself out.
+            // Runs on the serial `queue`: each call completes before the next state update,
+            // so the ready/failed branch resumes the continuation once and swaps itself out.
             let server = Weak(self)
             listener.stateUpdateHandler = { state in
                 switch state {
@@ -65,7 +68,7 @@ public actor LoopbackServer {
                 guard let self else { return }
                 Task { await self.handle(connection) }
             }
-            listener.start(queue: .global())
+            listener.start(queue: queue)
         }
     }
 
@@ -97,7 +100,7 @@ public actor LoopbackServer {
     }
 
     private func handle(_ connection: NWConnection) {
-        connection.start(queue: .global())
+        connection.start(queue: queue)
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, _, _ in
             let text = String(decoding: data ?? Data(), as: UTF8.self)
             let line = text.split(separator: "\r\n", maxSplits: 1).first.map(String.init) ?? ""
