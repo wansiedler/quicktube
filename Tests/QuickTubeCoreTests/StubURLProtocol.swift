@@ -19,6 +19,7 @@ final class StubURLProtocol: URLProtocol {
     static var requests: [URLRequest] { lock.withLock { recorded } }
 
     static func makeSession() -> URLSession {
+        _ = CrashBacktrace.installed
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
         return URLSession(configuration: configuration)

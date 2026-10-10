@@ -122,13 +122,14 @@ jobs:
       # the serial verdict decides the step, and the parallel crash stays a warning.
       - name: Run tests with coverage
         id: tests
-        env:
-          # The Swift runtime prints the crashing thread's backtrace to stderr.
-          SWIFT_BACKTRACE: enable=yes,interactive=no,color=no
         run: |
           mkdir -p test-logs
           touch test-logs/.started
           summary() { grep -E "Executed [0-9]+ tests|Test run with|unexpected signal" "$1" | tail -n 3; }
+          # CrashBacktrace (Tests/) prints the faulting thread between these markers.
+          backtraces() {
+            awk '/=== QuickTubeCoreTests: fatal signal/{p=1} p{print} /=== end of backtrace ===/{p=0}' "$1"
+          }
           set +e
           swift test --enable-code-coverage > test-logs/swift-test.log 2>&1
           rc=$?
@@ -138,6 +139,7 @@ jobs:
             echo "::group::Full output of the parallel run (exit $rc)"
             cat test-logs/swift-test.log
             echo "::endgroup::"
+            backtraces test-logs/swift-test.log
             if grep -q "Exited with unexpected signal" test-logs/swift-test.log; then
               sig=$(grep -oE "unexpected signal code [0-9]+" test-logs/swift-test.log | head -n 1)
               echo "::warning::Parallel test run crashed ($sig); rerunning with --no-parallel"
@@ -151,6 +153,7 @@ jobs:
                 echo "::group::Full output of the --no-parallel run (exit $rc)"
                 cat test-logs/swift-test-serial.log
                 echo "::endgroup::"
+                backtraces test-logs/swift-test-serial.log
               else
                 tail -n 40 test-logs/swift-test-serial.log
               fi
@@ -168,6 +171,13 @@ jobs:
               summary test-logs/swift-test-serial.log
             fi
             echo '```'
+            if [ "$rc" -ne 0 ] || grep -q "fatal signal" test-logs/swift-test.log; then
+              echo ""
+              echo '```'
+              backtraces test-logs/swift-test.log | head -n 80
+              [ -f test-logs/swift-test-serial.log ] && backtraces test-logs/swift-test-serial.log | head -n 80
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
@@ -176,9 +186,14 @@ jobs:
         if: ${{ !cancelled() && (steps.tests.outcome == 'failure' || steps.tests.outputs.crashed == 'true') }}
         run: |
           mkdir -p test-logs/DiagnosticReports
-          for dir in "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports; do
-            [ -d "$dir" ] || continue
-            find "$dir" -type f -newer test-logs/.started -exec cp {} test-logs/DiagnosticReports/ \; || true
+          # ReportCrash writes asynchronously; give it up to a minute.
+          for _ in $(seq 1 12); do
+            for dir in "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports; do
+              [ -d "$dir" ] || continue
+              find "$dir" -type f -newer test-logs/.started -exec cp {} test-logs/DiagnosticReports/ \; || true
+            done
+            [ -n "$(ls -A test-logs/DiagnosticReports)" ] && break
+            sleep 5
           done
           ls -la test-logs/DiagnosticReports
           for f in test-logs/DiagnosticReports/*; do

@@ -444,6 +444,7 @@ enum ClipMaker {
     }
 
     private static func canEncode(_ codec: CMVideoCodecType, specification: CFDictionary? = nil) -> Bool {
+        _ = CrashBacktrace.installed
         var session: VTCompressionSession?
         let status = VTCompressionSessionCreate(
             allocator: nil, width: 64, height: 64, codecType: codec, encoderSpecification: specification,
