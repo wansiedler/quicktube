@@ -88,20 +88,62 @@ public enum VideoTranscoder {
         return "transcoded \(frames) frames in \(String(format: "%.1f", seconds)) s (\(fps) fps)"
     }
 
-    /// The HEVC encoder settings: the bitrate (also as a hard per-second cap) plus speed over quality and no frame reordering (no B-frame
-    /// delay), since a Telegram copy only has to fit the limit, not look its best.
-    public static func compressionProperties(bitrate: Int, fps: Double) -> [String: Any] {
+    /// The software encoder's spec: hardware explicitly off, so "using software" is what actually happens.
+    static func softwareEncoderSpecification() -> [String: Any] {
+        [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: false]
+    }
+
+    /// The HEVC encoder settings: the bitrate and no frame reordering (no B-frame delay), since a Telegram copy
+    /// only has to fit the limit, not look its best. The `hardware` encoder also gets speed over quality and a
+    /// hard bitrate cap (bitrate/8 bytes per 1 s window, because the average alone overshoots at 6K). Apple's
+    /// software HEVC encoder rejects both VideoToolbox keys with an uncatchable exception, so it gets only the
+    /// AVFoundation ones.
+    public static func compressionProperties(bitrate: Int, fps: Double, hardware: Bool) -> [String: Any] {
         var properties: [String: Any] = [
             AVVideoAverageBitRateKey: bitrate,
-            // A hard cap of bitrate/8 bytes per 1 s window; the average alone overshoots at 6K.
-            kVTCompressionPropertyKey_DataRateLimits as String: [
-                NSNumber(value: bitrate / 8), NSNumber(value: 1.0),
-            ],
             AVVideoAllowFrameReorderingKey: false,
-            kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String: true,
         ]
+        if hardware {
+            properties[kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String] = true
+            properties[kVTCompressionPropertyKey_DataRateLimits as String] = [
+                NSNumber(value: bitrate / 8), NSNumber(value: 1.0),
+            ]
+        }
         if fps > 0 { properties[AVVideoExpectedSourceFrameRateKey] = Int(fps.rounded()) }
         return properties
+    }
+
+    /// OSStatus / AVError codes that mean "this encoder cannot be used here" (none on the machine, none free
+    /// now, or the hardware one refusing the session, as for sizes beyond its limit).
+    static let encoderUnavailableCodes: Set<Int> = [
+        Int(kVTCouldNotFindVideoEncoderErr), Int(kVTVideoEncoderNotAvailableNowErr),
+        Int(kVTInvalidSessionErr),
+        AVError.Code.encoderNotFound.rawValue, AVError.Code.encoderTemporarilyUnavailable.rawValue,
+    ]
+
+    /// Pure: true when `error` or one of its underlying errors says the video encoder is unavailable.
+    public static func isEncoderUnavailable(_ error: Error?) -> Bool {
+        var current = error.map { $0 as NSError }
+        while let nsError = current {
+            let osStatusLike =
+                nsError.domain == NSOSStatusErrorDomain || nsError.domain == AVFoundationErrorDomain
+            if osStatusLike && encoderUnavailableCodes.contains(nsError.code) { return true }
+            current = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return false
+    }
+
+    /// The error and its underlying chain as one line, e.g. "Cannot Encode (AVFoundationErrorDomain -11800
+    /// ← NSOSStatusErrorDomain -12903)".
+    static func describe(_ error: Error?) -> String {
+        guard let error else { return "unknown error" }
+        var codes: [String] = []
+        var current: NSError? = error as NSError
+        while let nsError = current {
+            codes.append("\(nsError.domain) \(nsError.code)")
+            current = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return "\(error.localizedDescription) (\(codes.joined(separator: " ← ")))"
     }
 
     /// Pure: pick an output size and bitrates so the file fits `limitBytes` with 8 % headroom.
@@ -152,13 +194,19 @@ public enum VideoTranscoder {
     /// a single AAC audio track is copied untouched, several tracks are mixed to stereo 48 kHz AAC at
     /// `plan.audioBitrate` (clamped to 64–320 kbit/s). Replaces `output` if it exists and removes it again on failure. Returns `output`.
     /// `log` gets the software-encoder fallback and, on success, a throughput line (frames, seconds, fps).
+    /// The hardware HEVC encoder is required first; only if starting it fails with an encoder-unavailable error
+    /// does the transcode fall back to the software encoder (a hardware failure surfacing later, at an append,
+    /// fails the transcode instead). `hardwareEncoder: false` skips the hardware attempt (tests use it to cover
+    /// the software path on every host).
     public static func transcode(
-        _ input: URL, plan: TranscodePlan, output: URL, log: (@Sendable (String) -> Void)? = nil,
-        progress: @escaping @Sendable (Double) -> Void
+        _ input: URL, plan: TranscodePlan, output: URL, hardwareEncoder: Bool = true,
+        log: (@Sendable (String) -> Void)? = nil, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> URL {
         // Reader and writer are not Sendable; they live and die inside this detached task.
         let task = Task.detached(priority: .utility) {
-            try await run(input, plan: plan, output: output, log: log, progress: progress)
+            try await run(
+                input, plan: plan, output: output, hardwareEncoder: hardwareEncoder, log: log,
+                progress: progress)
         }
         return try await withTaskCancellationHandler {
             try await task.value
@@ -168,7 +216,8 @@ public enum VideoTranscoder {
     }
 
     private static func run(
-        _ input: URL, plan: TranscodePlan, output: URL, log: (@Sendable (String) -> Void)?,
+        _ input: URL, plan: TranscodePlan, output: URL, hardwareEncoder: Bool,
+        log: (@Sendable (String) -> Void)?,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> URL {
         let clock = ContinuousClock()
@@ -237,27 +286,36 @@ public enum VideoTranscoder {
 
         // The plan is in display orientation; a rotated track is encoded in its natural orientation.
         let rotated = abs(transform.b) > 0.5 && abs(transform.c) > 0.5
-        let compression = compressionProperties(bitrate: plan.videoBitrate, fps: Double(nominalFPS))
-        /// A started writer with its inputs, or nil when the video encoder could not be set up (with
-        /// `hardware`, that means no hardware HEVC encoder).
-        func startWriter(hardware: Bool) throws -> (AVAssetWriter, AVAssetWriterInput, AVAssetWriterInput?)? {
+        typealias Started = (writer: AVAssetWriter, video: AVAssetWriterInput, audio: AVAssetWriterInput?)
+        enum Attempt {
+            case started(Started)
+            case encoderUnavailable(String)
+        }
+        /// A started writer with its inputs, `.encoderUnavailable` when the hardware encoder cannot be used, or
+        /// a thrown error (with the writer's reason, logged) for anything else.
+        func startWriter(hardware: Bool) throws -> Attempt {
             try? FileManager.default.removeItem(at: output)
             guard let writer = try? AVAssetWriter(outputURL: output, fileType: .mp4) else {
                 throw TranscodeError.cannotWrite
             }
             writer.shouldOptimizeForNetworkUse = true
-            var settings: [String: Any] = [
+            let settings: [String: Any] = [
                 AVVideoCodecKey: AVVideoCodecType.hevc,
                 AVVideoWidthKey: rotated ? plan.height : plan.width,
                 AVVideoHeightKey: rotated ? plan.width : plan.height,
                 AVVideoScalingModeKey: AVVideoScalingModeResizeAspect,
-                AVVideoCompressionPropertiesKey: compression,
+                AVVideoCompressionPropertiesKey: compressionProperties(
+                    bitrate: plan.videoBitrate, fps: Double(nominalFPS), hardware: hardware),
+                AVVideoEncoderSpecificationKey: hardware
+                    ? encoderSpecification() : softwareEncoderSpecification(),
             ]
-            if hardware { settings[AVVideoEncoderSpecificationKey] = encoderSpecification() }
             let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
             videoInput.transform = transform
             videoInput.expectsMediaDataInRealTime = false
-            guard writer.canAdd(videoInput) else { return nil }
+            guard writer.canAdd(videoInput) else {
+                log?("cannot add the HEVC video input")
+                throw TranscodeError.cannotWrite
+            }
             writer.add(videoInput)
             var audioInput: AVAssetWriterInput?
             switch strategy {
@@ -286,19 +344,25 @@ public enum VideoTranscoder {
                 audioInput = aac
             }
             guard writer.startWriting() else {
+                let error = writer.error
                 writer.cancelWriting()
                 try? FileManager.default.removeItem(at: output)
-                return nil
+                let reason = describe(error)
+                if hardware && isEncoderUnavailable(error) { return .encoderUnavailable(reason) }
+                log?("could not start writing: \(reason)")
+                throw TranscodeError.failed(error?.localizedDescription ?? "writing could not start")
             }
-            return (writer, videoInput, audioInput)
+            return .started((writer, videoInput, audioInput))
         }
 
-        var started = try startWriter(hardware: true)
-        if started == nil {
-            log?("hardware HEVC encoder unavailable, using software")
-            started = try startWriter(hardware: false)
+        var attempt = try startWriter(hardware: hardwareEncoder)
+        if case .encoderUnavailable(let reason) = attempt {
+            log?("hardware HEVC encoder unavailable (\(reason)), using software")
+            attempt = try startWriter(hardware: false)
         }
-        guard let (writer, videoInput, audioInput) = started else { throw TranscodeError.cannotWrite }
+        guard case .started(let (writer, videoInput, audioInput)) = attempt else {
+            throw TranscodeError.cannotWrite
+        }
         guard reader.startReading() else {
             writer.cancelWriting()
             try? FileManager.default.removeItem(at: output)

@@ -105,7 +105,7 @@ import VideoToolbox
     }
 
     @Test func compressionPropertiesPreferSpeedAndSkipReordering() throws {
-        let properties = VideoTranscoder.compressionProperties(bitrate: 2_000_000, fps: 29.97)
+        let properties = VideoTranscoder.compressionProperties(bitrate: 2_000_000, fps: 29.97, hardware: true)
         #expect(properties[AVVideoAverageBitRateKey] as? Int == 2_000_000)
         #expect(properties[AVVideoAllowFrameReorderingKey] as? Bool == false)
         #expect(
@@ -115,8 +115,36 @@ import VideoToolbox
         let limits = try #require(
             properties[kVTCompressionPropertyKey_DataRateLimits as String] as? [NSNumber])
         #expect(limits == [NSNumber(value: 250_000), NSNumber(value: 1.0)])
-        let unknownFPS = VideoTranscoder.compressionProperties(bitrate: 1, fps: 0)
+        let unknownFPS = VideoTranscoder.compressionProperties(bitrate: 1, fps: 0, hardware: true)
         #expect(unknownFPS[AVVideoExpectedSourceFrameRateKey] == nil)
+    }
+
+    @Test func softwareCompressionPropertiesHaveNoDataRateLimits() {
+        // Apple's software HEVC encoder raises NSInvalidArgumentException on these VideoToolbox keys.
+        let properties = VideoTranscoder.compressionProperties(bitrate: 2_000_000, fps: 30, hardware: false)
+        #expect(properties[kVTCompressionPropertyKey_DataRateLimits as String] == nil)
+        #expect(properties[kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String] == nil)
+        #expect(properties[AVVideoAllowFrameReorderingKey] as? Bool == false)
+        #expect(properties[AVVideoExpectedSourceFrameRateKey] as? Int == 30)
+        #expect(properties[AVVideoAverageBitRateKey] as? Int == 2_000_000)
+    }
+
+    @Test func encoderUnavailableIsRecognisedThroughUnderlyingErrors() {
+        func wrapped(_ domain: String, _ code: Int) -> NSError {
+            NSError(
+                domain: AVFoundationErrorDomain, code: -11800,
+                userInfo: [NSUnderlyingErrorKey: NSError(domain: domain, code: code)])
+        }
+        #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12903)))
+        #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12908)))
+        #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12915)))
+        #expect(
+            VideoTranscoder.isEncoderUnavailable(
+                NSError(domain: AVFoundationErrorDomain, code: AVError.Code.encoderNotFound.rawValue)))
+        #expect(!VideoTranscoder.isEncoderUnavailable(nil))
+        #expect(!VideoTranscoder.isEncoderUnavailable(wrapped(NSPOSIXErrorDomain, 28)))  // disk full
+        #expect(!VideoTranscoder.isEncoderUnavailable(wrapped(NSCocoaErrorDomain, -12908)))
+        #expect(!VideoTranscoder.isEncoderUnavailable(NSError(domain: AVFoundationErrorDomain, code: -11800)))
     }
 
     @Test func encoderSpecificationRequiresTheHardwareEncoder() {
@@ -164,7 +192,8 @@ import VideoToolbox
 
     // MARK: - End to end
 
-    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
+    @Test(
+        .enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() }, .timeLimit(.minutes(1)))
     func transcodesAGeneratedClip() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -195,7 +224,8 @@ import VideoToolbox
         #expect(values.last == 1)
     }
 
-    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
+    @Test(
+        .enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() }, .timeLimit(.minutes(1)))
     func keepsTheNaturalLandscapeSize() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -213,7 +243,8 @@ import VideoToolbox
         #expect(info.width == 640 && info.height == 360)
     }
 
-    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
+    @Test(
+        .enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() }, .timeLimit(.minutes(1)))
     func scalesToThePlanSizeForADifferentAspect() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -230,7 +261,8 @@ import VideoToolbox
         #expect(info.width == 640 && info.height == 360)
     }
 
-    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
+    @Test(
+        .enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() }, .timeLimit(.minutes(1)))
     func keepsTheAudioTrack() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -249,13 +281,14 @@ import VideoToolbox
         #expect(formats.first.map { CMFormatDescriptionGetMediaSubType($0) } == kAudioFormatMPEG4AAC)
     }
 
-    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
+    @Test(
+        .enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() }, .timeLimit(.minutes(1)))
     func passesASingleAACTrackThroughUntouched() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let input = dir.appending(path: "clip.mov")
-        try await ClipMaker.make(input, width: 640, height: 480, fps: 30, seconds: 1, audio: true)
+        try await ClipMaker.make(input, width: 640, height: 480, fps: 30, seconds: 2, audio: true)
         let sourceInfo = try await VideoInfo.read(input)
         #expect(sourceInfo.audioTrackCount == 1)
         let sourceRate = try #require(sourceInfo.audioDataRate)
@@ -288,14 +321,36 @@ import VideoToolbox
         #expect(outputInfo.audioTrackCount == 1)
     }
 
-    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
+    @Test(
+        .enabled("needs H.264 and a software HEVC encoder") { ClipMaker.softwareHEVCAvailable() },
+        .timeLimit(.minutes(1)))
+    func softwareEncoderPathTranscodesWithoutCrashing() async throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appending(path: "clip.mov")
+        try await ClipMaker.make(input, width: 640, height: 480, fps: 30, seconds: 1, audio: true)
+        let plan = TranscodePlan(width: 320, height: 240, videoBitrate: 300_000, audioBitrate: 160_000)
+        let output = dir.appending(path: "clip.telegram.mp4")
+
+        _ = try await VideoTranscoder.transcode(input, plan: plan, output: output, hardwareEncoder: false) {
+            _ in
+        }
+
+        let info = try await VideoInfo.read(output)
+        #expect(info.width == 320 && info.height == 240)
+        #expect(info.audioTrackCount == 1)
+    }
+
+    @Test(
+        .enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() }, .timeLimit(.minutes(1)))
     func mixesSeveralAudioTracksIntoOneAACTrack() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let input = dir.appending(path: "clip.mov")
         try await ClipMaker.make(
-            input, width: 640, height: 480, fps: 30, seconds: 1, audio: true, audioTracks: 2)
+            input, width: 640, height: 480, fps: 30, seconds: 2, audio: true, audioTracks: 2)
         let sourceInfo = try await VideoInfo.read(input)
         #expect(sourceInfo.audioTrackCount == 2)
         #expect(sourceInfo.audioDataRate == nil)
@@ -313,7 +368,8 @@ import VideoToolbox
         #expect(asbd.mSampleRate == 48_000 && asbd.mChannelsPerFrame == 2)
     }
 
-    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
+    @Test(
+        .enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() }, .timeLimit(.minutes(1)))
     func cancellationThrowsCancellationErrorAndLeavesNoOutput() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -361,10 +417,18 @@ enum ClipMaker {
         canEncode(kCMVideoCodecType_H264)
     }
 
-    private static func canEncode(_ codec: CMVideoCodecType) -> Bool {
+    /// False on hosts without an H.264 encoder for the source clip or a software HEVC encoder.
+    static func softwareHEVCAvailable() -> Bool {
+        let software =
+            [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: false]
+            as CFDictionary
+        return canEncode(kCMVideoCodecType_H264) && canEncode(kCMVideoCodecType_HEVC, specification: software)
+    }
+
+    private static func canEncode(_ codec: CMVideoCodecType, specification: CFDictionary? = nil) -> Bool {
         var session: VTCompressionSession?
         let status = VTCompressionSessionCreate(
-            allocator: nil, width: 64, height: 64, codecType: codec, encoderSpecification: nil,
+            allocator: nil, width: 64, height: 64, codecType: codec, encoderSpecification: specification,
             imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: nil, refcon: nil,
             compressionSessionOut: &session)
         guard status == noErr, let session else { return false }
@@ -398,31 +462,81 @@ enum ClipMaker {
         }
         guard writer.startWriting() else { throw Failure() }
         writer.startSession(atSourceTime: .zero)
-        for frame in 0..<(Int(fps) * seconds) {
-            while !input.isReadyForMoreMediaData { try await Task.sleep(for: .milliseconds(5)) }
-            guard let pool = adaptor.pixelBufferPool else { throw Failure() }
-            var buffer: CVPixelBuffer?
-            CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer)
-            guard let buffer else { throw Failure() }
-            CVPixelBufferLockBaseAddress(buffer, [])
-            if let base = CVPixelBufferGetBaseAddress(buffer) {
-                memset(base, Int32(frame * 8 % 255), CVPixelBufferGetDataSize(buffer))
+        // Each input is fed on its own queue as the writer asks for data, so the writer's interleaving cannot
+        // deadlock them against each other (lock-step feeding hung on 2 s clips with audio).
+        let count = Int(fps) * seconds
+        var feeders = [
+            Feeder(input: input, count: count, label: "video") { frame in
+                guard let pool = adaptor.pixelBufferPool else { return false }
+                var buffer: CVPixelBuffer?
+                CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer)
+                guard let buffer else { return false }
+                CVPixelBufferLockBaseAddress(buffer, [])
+                if let base = CVPixelBufferGetBaseAddress(buffer) {
+                    memset(base, Int32(frame * 8 % 255), CVPixelBufferGetDataSize(buffer))
+                }
+                CVPixelBufferUnlockBaseAddress(buffer, [])
+                return adaptor.append(
+                    buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: fps))
             }
-            CVPixelBufferUnlockBaseAddress(buffer, [])
-            guard adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: fps))
-            else {
-                throw Failure()
-            }
-            for sound in sounds {
-                while !sound.input.isReadyForMoreMediaData { try await Task.sleep(for: .milliseconds(5)) }
-                guard sound.input.append(try sound.chunk(index: frame)) else { throw Failure() }
-            }
+        ]
+        for (index, sound) in sounds.enumerated() {
+            feeders.append(
+                Feeder(input: sound.input, count: count, label: "audio\(index)") { frame in
+                    guard let chunk = try? sound.chunk(index: frame) else { return false }
+                    return sound.input.append(chunk)
+                })
         }
-        input.markAsFinished()
-        for sound in sounds { sound.input.markAsFinished() }
+        let all = feeders
+        let results = await withTaskGroup(of: Bool.self) { group in
+            for feeder in all { group.addTask { await feeder.run() } }
+            return await group.reduce(into: [Bool]()) { $0.append($1) }
+        }
+        guard results.allSatisfy({ $0 }) else {
+            writer.cancelWriting()
+            throw Failure()
+        }
         writer.endSession(atSourceTime: CMTime(value: Int64(fps) * Int64(seconds), timescale: fps))
         await writer.finishWriting()
         guard writer.status == .completed else { throw Failure() }
+    }
+}
+
+/// Appends `count` samples to one writer input on its own queue whenever the input is ready, then marks it
+/// finished. `append` returns false on failure, which ends the feed.
+private final class Feeder: @unchecked Sendable {
+    private let input: AVAssetWriterInput
+    private let count: Int
+    private let queue: DispatchQueue
+    private let append: (Int) -> Bool
+    /// Touched only on `queue`.
+    private var index = 0
+    private var done = false
+
+    init(input: AVAssetWriterInput, count: Int, label: String, append: @escaping (Int) -> Bool) {
+        self.input = input
+        self.count = count
+        self.queue = DispatchQueue(label: "ClipMaker.\(label)")
+        self.append = append
+    }
+
+    /// True once every sample was appended.
+    func run() async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            input.requestMediaDataWhenReady(on: queue) { [self] in
+                while !done && input.isReadyForMoreMediaData {
+                    let finished = index >= count
+                    let ok = finished || append(index)
+                    if finished || !ok {
+                        done = true
+                        input.markAsFinished()
+                        continuation.resume(returning: ok)
+                        return
+                    }
+                    index += 1
+                }
+            }
+        }
     }
 }
 
