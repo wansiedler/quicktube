@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import VideoToolbox
 
 /// Output size and bitrates for a transcode, chosen by `VideoTranscoder.plan`.
 public struct TranscodePlan: Sendable, Equatable {
@@ -32,6 +33,18 @@ public enum VideoTranscoder {
     static let minimumBitsPerPixel = 0.1
     static let longSideSteps = [1920, 1280, 960, 640]
     static let fallbackFPS = 30.0
+
+    /// The HEVC encoder settings: the bitrate plus speed over quality and no frame reordering (no B-frame
+    /// delay), since a Telegram copy only has to fit the limit, not look its best.
+    public static func compressionProperties(bitrate: Int, fps: Double) -> [String: Any] {
+        var properties: [String: Any] = [
+            AVVideoAverageBitRateKey: bitrate,
+            AVVideoAllowFrameReorderingKey: false,
+            kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String: true,
+        ]
+        if fps > 0 { properties[AVVideoExpectedSourceFrameRateKey] = Int(fps.rounded()) }
+        return properties
+    }
 
     /// Pure: pick an output size and bitrates so the file fits `limitBytes` with 8 % headroom.
     /// The natural (even-rounded) size is always kept unless `allowDownscale` is true; then it is kept while the
@@ -138,8 +151,7 @@ public enum VideoTranscoder {
         writer.shouldOptimizeForNetworkUse = true
         // The plan is in display orientation; a rotated track is encoded in its natural orientation.
         let rotated = abs(transform.b) > 0.5 && abs(transform.c) > 0.5
-        var compression: [String: Any] = [AVVideoAverageBitRateKey: plan.videoBitrate]
-        if nominalFPS > 0 { compression[AVVideoExpectedSourceFrameRateKey] = Int(nominalFPS.rounded()) }
+        let compression = compressionProperties(bitrate: plan.videoBitrate, fps: Double(nominalFPS))
         let videoInput = AVAssetWriterInput(
             mediaType: .video,
             outputSettings: [
