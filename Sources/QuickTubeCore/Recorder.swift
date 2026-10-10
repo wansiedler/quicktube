@@ -75,7 +75,9 @@ public actor Recorder: ScreenRecorder {
                 ?? content.displays.first
         else { throw RecorderError.noDisplay }
 
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        // Keep QuickTube's own windows (the status HUD) out of the recording.
+        let ownApps = content.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
+        let filter = SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: [])
         let scale = CGFloat(filter.pointPixelScale)
         let configuration = SCStreamConfiguration()
         // HEVC rejects odd dimensions.

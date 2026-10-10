@@ -10,6 +10,7 @@ final class AppModel {
     let state: AppState
     private let hotkey = HotkeyManager()
     private let notifier: AppNotifier
+    private var hud: HUDController?
     private static let comboKey = "hotkey.combo"
 
     private(set) var combo: HotkeyManager.Combo
@@ -50,6 +51,7 @@ final class AppModel {
             guard let self, self.state.failureKind == .auth else { return }
             self.refreshAuth()
         }
+        hud = HUDController(state: state)
         notifier.requestPermission()
         refreshAuth()
         // Ask for the recording grants now, so the first hotkey press records instead of prompting.
