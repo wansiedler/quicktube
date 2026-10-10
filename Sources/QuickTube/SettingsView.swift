@@ -119,6 +119,7 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(minWidth: 480, idealWidth: 520, minHeight: 420, idealHeight: Self.idealHeight)
         .onAppear {
+            Self.fitWindowToScreen()
             model.refreshAuth()
             model.refreshTelegram()
             model.refreshSlack()
@@ -132,6 +133,23 @@ struct SettingsView: View {
     private static var idealHeight: CGFloat {
         let screen = NSScreen.main?.visibleFrame.height ?? 900
         return max(420, screen - 60)
+    }
+
+    /// macOS restores the last window frame, so the ideal height only applies the first time;
+    /// stretch the window to the screen on every open instead.
+    private static func fitWindowToScreen() {
+        DispatchQueue.main.async {
+            guard let window = NSApp.windows.first(where: { $0.title.hasSuffix("Settings") }),
+                let screen = window.screen ?? NSScreen.main
+            else { return }
+            let visible = screen.visibleFrame
+            var frame = window.frame
+            frame.size.height = visible.height - 40
+            frame.size.width = max(frame.width, 520)
+            frame.origin.y = visible.minY + 20
+            if frame.maxX > visible.maxX { frame.origin.x = visible.maxX - frame.width }
+            window.setFrame(frame, display: true, animate: false)
+        }
     }
 
     @ViewBuilder
