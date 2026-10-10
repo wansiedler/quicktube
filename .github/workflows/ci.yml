@@ -130,8 +130,11 @@ jobs:
           backtraces() {
             awk '/=== QuickTubeCoreTests: fatal signal/{p=1} p{print} /=== end of backtrace ===/{p=0}' "$1"
           }
+          # A test process that hangs (or wedges while reporting a crash) must not eat the
+          # job's 30 minutes: SIGALRM ends the run after 10.
+          bounded() { perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 600 "$@"; }
           set +e
-          swift test --enable-code-coverage > test-logs/swift-test.log 2>&1
+          bounded swift test --enable-code-coverage > test-logs/swift-test.log 2>&1
           rc=$?
           set -e
           mode="parallel"
@@ -146,7 +149,7 @@ jobs:
               echo "crashed=true" >> "$GITHUB_OUTPUT"
               mode="serial rerun after a parallel crash ($sig)"
               set +e
-              swift test --enable-code-coverage --no-parallel > test-logs/swift-test-serial.log 2>&1
+              bounded swift test --enable-code-coverage --no-parallel > test-logs/swift-test-serial.log 2>&1
               rc=$?
               set -e
               if [ "$rc" -ne 0 ]; then
