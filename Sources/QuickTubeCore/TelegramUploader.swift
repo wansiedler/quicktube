@@ -5,6 +5,8 @@ public enum TelegramError: Error, Equatable {
     case fileTooLarge(limit: Int, actual: Int)
     case apiError(String)
     case badResponse(Int)
+    /// A transport failure (offline, DNS, TLS, timeout); the text is token-free.
+    case network(String)
 }
 
 public struct TelegramConfiguration: Sendable, Equatable {
@@ -83,6 +85,12 @@ public actor TelegramUploader: VideoUploader {
             width: plan.width, height: plan.height, videoBitrate: video, audioBitrate: plan.audioBitrate)
     }
 
+    /// Replaces every `bot<id>:<secret>` in `text` with `bot<redacted>`. The bot token is part of the request
+    /// path, so URL-carrying errors and logs must pass through this before they become visible text.
+    public static func redact(_ text: String) -> String {
+        text.replacing(/bot\d+:[A-Za-z0-9_\-]+/, with: "bot<redacted>")
+    }
+
     public func configuration() throws -> TelegramConfiguration? {
         guard let token = try store.get(Key.token), let chat = try store.get(Key.chat),
             !token.isEmpty, !chat.isEmpty
@@ -119,7 +127,7 @@ public actor TelegramUploader: VideoUploader {
         do {
             info = try await videoInfo(file)
         } catch {
-            log("Telegram: could not read video info: \(error)")
+            log("Telegram: could not read video info: \(Self.redact("\(error)"))")
         }
         var sending = file
         var sendingInfo = info
@@ -161,7 +169,7 @@ public actor TelegramUploader: VideoUploader {
             do {
                 sendingInfo = try await videoInfo(sending)
             } catch {
-                log("Telegram: could not read transcoded video info: \(error)")
+                log("Telegram: could not read transcoded video info: \(Self.redact("\(error)"))")
                 sendingInfo = VideoInfo(
                     width: plan.width, height: plan.height, fps: info.fps, duration: info.duration)
             }
@@ -189,14 +197,23 @@ public actor TelegramUploader: VideoUploader {
         var request = URLRequest(url: baseURL.appending(path: "bot\(configuration.botToken)/sendVideo"))
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await session.upload(
-            for: request, fromFile: body, delegate: ProgressDelegate(progress))
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.upload(
+                for: request, fromFile: body, delegate: ProgressDelegate(progress))
+        } catch let error as URLError {
+            // URLError's description carries the failing URL, and with it the token.
+            let text = Self.redact(error.localizedDescription)
+            log("Telegram: network error \(error.code.rawValue): \(text)")
+            throw TelegramError.network(text)
+        }
         guard let http = response as? HTTPURLResponse else { throw TelegramError.badResponse(0) }
         let reply = try? JSONDecoder().decode(Reply.self, from: data)
         guard http.statusCode == 200, let result = reply?.result, reply?.ok == true else {
             let text = String(decoding: data.prefix(2000), as: UTF8.self)
-            log("Telegram HTTP \(http.statusCode) \(text)")
-            if let description = reply?.description { throw TelegramError.apiError(description) }
+            log("Telegram HTTP \(http.statusCode) \(Self.redact(text))")
+            if let description = reply?.description { throw TelegramError.apiError(Self.redact(description)) }
             throw TelegramError.badResponse(http.statusCode)
         }
         progress(1)

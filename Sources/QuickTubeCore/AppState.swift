@@ -495,6 +495,8 @@ public final class AppState {
             return "Could not write the compressed copy for Telegram."
         case TranscodeError.failed(let reason):
             return "Compressing for Telegram failed: \(reason)"
+        case TelegramError.network(let description):
+            return "Could not reach Telegram: \(description)"
         case TelegramError.apiError(let description):
             return "Telegram refused the upload: \(description)"
         case DriveError.insufficientScope:
@@ -543,10 +545,12 @@ public final class AppState {
         case RecorderError.finishFailed:
             return "Could not finalize the recording; segments are kept in the recordings folder."
         default:
+            // An error's description can embed a request URL; never show a bot token on screen.
+            let text = TelegramUploader.redact("\(error)")
             switch stage {
-            case .recording: return "Recording failed: \(error)"
-            case .upload: return "Upload failed: \(error)"
-            case .signIn: return "Sign-in failed: \(error)"
+            case .recording: return "Recording failed: \(text)"
+            case .upload: return "Upload failed: \(text)"
+            case .signIn: return "Sign-in failed: \(text)"
             }
         }
     }

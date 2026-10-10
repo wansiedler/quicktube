@@ -1,4 +1,5 @@
 import Foundation
+import QuickTubeCore
 
 /// Append-only text log for upload diagnostics: ~/Library/Logs/QuickTube/quicktube.log
 enum DiagnosticsLog {
@@ -13,7 +14,8 @@ enum DiagnosticsLog {
 
     static func append(_ line: String) {
         let stamp = ISO8601DateFormatter().string(from: Date())
-        let data = Data("\(stamp) \(line)\n".utf8)
+        // Last line of defence: no bot token reaches the log file, whatever the caller formatted.
+        let data = Data("\(stamp) \(TelegramUploader.redact(line))\n".utf8)
         lock.withLock {
             if let handle = try? FileHandle(forWritingTo: url) {
                 defer { try? handle.close() }

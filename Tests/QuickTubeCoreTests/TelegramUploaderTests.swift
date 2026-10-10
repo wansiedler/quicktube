@@ -75,6 +75,61 @@ extension NetworkSuite {
             #expect((request.httpBody ?? Data()).count > 16)
         }
 
+        @Test func redactReplacesTheBotTokenInURLs() {
+            let text =
+                "NSErrorFailingURLStringKey=https://api.telegram.org/bot123456789:AAH-x_Yz09/sendVideo, code -1009"
+            let redacted = TelegramUploader.redact(text)
+            #expect(redacted.contains("https://api.telegram.org/bot<redacted>/sendVideo"))
+            #expect(!redacted.contains("123456789"))
+            #expect(!redacted.contains("AAH-x_Yz09"))
+            #expect(TelegramUploader.redact("plain text, no token") == "plain text, no token")
+        }
+
+        @MainActor @Test func transportFailureDoesNotLeakTheToken() async throws {
+            let token = "987654321:SECRET-token_value"
+            let uploader = makeUploader()
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: token, chat: "@c"))
+            let file = try makeFile(bytes: 16)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue { request in
+                let url = request.url!
+                return .init(
+                    status: 0,
+                    error: URLError(
+                        .notConnectedToInternet,
+                        userInfo: [
+                            NSURLErrorFailingURLErrorKey: url,
+                            NSURLErrorFailingURLStringErrorKey: url.absoluteString,
+                        ]))
+            }
+
+            var thrown: Error?
+            do {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            } catch {
+                thrown = error
+            }
+            let error = try #require(thrown)
+            guard case TelegramError.network = error else {
+                Issue.record("expected TelegramError.network, got \(error)")
+                return
+            }
+            #expect(!"\(error)".contains("SECRET"))
+            #expect(!String(describing: error).contains("987654321"))
+            let message = AppState.message(for: error, stage: .upload)
+            #expect(message.hasPrefix("Could not reach Telegram: "))
+            #expect(!message.contains("SECRET"))
+        }
+
+        @MainActor @Test func fallbackMessageRedactsTokens() {
+            let url = URL(string: "https://api.telegram.org/bot1:abc_DEF/sendVideo")!
+            let error = URLError(
+                .timedOut, userInfo: [NSURLErrorFailingURLStringErrorKey: url.absoluteString])
+            let message = AppState.message(for: error, stage: .upload)
+            #expect(message.hasPrefix("Upload failed: "))
+            #expect(!message.contains("abc_DEF"))
+        }
+
         @Test func captionCarriesTheMetadataLine() async throws {
             let uploader = makeUploader(videoInfo: { _ in
                 VideoInfo(width: 2560, height: 1440, fps: 60, duration: 3)

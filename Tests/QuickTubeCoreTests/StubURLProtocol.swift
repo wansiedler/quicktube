@@ -8,6 +8,8 @@ final class StubURLProtocol: URLProtocol {
         var status: Int
         var headers: [String: String] = [:]
         var body: Data = Data()
+        /// When set, the request fails with this error instead of answering.
+        var error: URLError?
     }
 
     private static let lock = NSLock()
@@ -55,6 +57,10 @@ final class StubURLProtocol: URLProtocol {
             return
         }
         let response = handler(request)
+        if let error = response.error {
+            client?.urlProtocol(self, didFailWithError: error)
+            return
+        }
         let http = HTTPURLResponse(
             url: request.url!, statusCode: response.status, httpVersion: "HTTP/1.1",
             headerFields: response.headers)!
