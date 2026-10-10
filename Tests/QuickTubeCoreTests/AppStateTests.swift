@@ -896,6 +896,43 @@ final class LogLines: @unchecked Sendable {
         #expect(state.history.count == 2)
         #expect(state.history[1] == old)
     }
+
+    // MARK: after upload
+
+    @Test func afterUploadRunsOnceWithTheUploadedFileOnSuccess() async {
+        let called = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            afterUpload: { called.append($0.path) })
+        await record(state)
+        #expect(called.all.count == 1)
+        #expect(called.all.first?.hasSuffix(".mp4") == true)
+        #expect(called.all.first == uploader.uploads.first?.0.path)
+    }
+
+    @Test func afterUploadIsNotCalledOnFailure() async {
+        uploader.error = UploadError.sessionExpired
+        let called = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            afterUpload: { called.append($0.path) })
+        await record(state)
+        #expect(called.all.isEmpty)
+    }
+
+    @Test func throwingAfterUploadKeepsDoneAndIsLogged() async {
+        let logs = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            log: { logs.append($0) }, afterUpload: { _ in throw CocoaError(.fileWriteNoPermission) })
+        await record(state)
+        guard case .done = state.phase else {
+            Issue.record("expected .done, got \(state.phase)")
+            return
+        }
+        #expect(notifier.failures.isEmpty)
+        #expect(logs.all.contains { $0.contains("Cleanup after upload") })
+    }
 }
 
 @Suite struct TranscodeMessageTests {

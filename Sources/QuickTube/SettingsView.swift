@@ -122,6 +122,21 @@ struct SettingsView: View {
                 )
                 .font(.callout).foregroundStyle(.secondary)
             }
+            Section("Files") {
+                Toggle("Move to Trash after upload", isOn: $model.settings.deleteAfterUpload)
+                Stepper(
+                    value: $model.settings.deleteOlderThanDays, in: 0...365
+                ) {
+                    Text(
+                        model.settings.deleteOlderThanDays == 0
+                            ? "Trash old recordings: never"
+                            : "Trash recordings older than \(model.settings.deleteOlderThanDays) days")
+                }
+                Text(
+                    "Recordings go to the Trash, not away for good. Old ones are trashed when QuickTube starts."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+            }
             Section("Permissions") {
                 permissionRow(
                     "Microphone", status: model.microphoneStatus, pane: Permissions.microphonePane,

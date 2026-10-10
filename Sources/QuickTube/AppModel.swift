@@ -110,7 +110,11 @@ final class AppModel {
             log: { DiagnosticsLog.append($0) },
             history: Self.loadHistory(),
             historyEnabled: { AppSettings.load(from: .standard).historyEnabled },
-            onHistoryChange: { Self.saveHistory($0) })
+            onHistoryChange: { Self.saveHistory($0) },
+            afterUpload: { file in
+                guard AppSettings.load(from: .standard).deleteAfterUpload else { return }
+                try RecordingCleanup(files: DefaultRecordingFiles()).trashAfterUpload(file)
+            })
         for destination in Destination.allCases {
             let fallback = HotkeyManager.Combo.fallback(for: destination)
             combos[destination] =
@@ -171,6 +175,7 @@ final class AppModel {
             MainActor.assumeIsolated { self?.refreshPermissions() }
         }
         notifier.requestPermission()
+        trashOldRecordings()
         refreshAuth()
         refreshTelegram()
         refreshSlack()
@@ -179,6 +184,21 @@ final class AppModel {
             Task {
                 await Permissions.requestMissing()
                 refreshPermissions()
+            }
+        }
+    }
+
+    /// At launch: trashes recordings older than the configured number of days, off the main thread.
+    private func trashOldRecordings() {
+        let days = settings.deleteOlderThanDays
+        guard days > 0 else { return }
+        Task.detached {
+            do {
+                let trashed = try RecordingCleanup(files: DefaultRecordingFiles())
+                    .trashOlder(than: days, in: Recorder.defaultDirectory)
+                if !trashed.isEmpty { DiagnosticsLog.append("Trashed \(trashed.count) old recordings") }
+            } catch {
+                DiagnosticsLog.append("Trashing old recordings failed: \(error)")
             }
         }
     }

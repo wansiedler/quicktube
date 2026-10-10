@@ -146,6 +146,8 @@ public final class AppState {
     private let historyEnabled: @Sendable () -> Bool
     /// Called with the whole list after every change, so the app can persist it.
     private let onHistoryChange: (@MainActor @Sendable ([HistoryItem]) -> Void)?
+    /// Called once per successful upload with the uploaded file; a failure is logged, never surfaced.
+    private let afterUpload: (@Sendable (URL) throws -> Void)?
     /// Captured when a recording starts: the app and display it was made of.
     private var titleContext = TitleContext()
     /// Title and context of the file being uploaded; `retry()` reuses them.
@@ -191,8 +193,10 @@ public final class AppState {
         log: @escaping @Sendable (String) -> Void = { _ in },
         history: [HistoryItem] = [],
         historyEnabled: @escaping @Sendable () -> Bool = { true },
-        onHistoryChange: (@MainActor @Sendable ([HistoryItem]) -> Void)? = nil
+        onHistoryChange: (@MainActor @Sendable ([HistoryItem]) -> Void)? = nil,
+        afterUpload: (@Sendable (URL) throws -> Void)? = nil
     ) {
+        self.afterUpload = afterUpload
         self.history = Array(history.prefix(Self.historyLimit))
         self.historyEnabled = historyEnabled
         self.onHistoryChange = onHistoryChange
@@ -398,8 +402,18 @@ public final class AppState {
             phase = .done(link: link)
             record(link: link, destination: destination, title: title)
             notifier.linkReady(link, isUnlisted: result.isUnlisted)
+            runAfterUpload(file)
         } catch {
             fail(error, file: file, stage: .upload)
+        }
+    }
+
+    private func runAfterUpload(_ file: URL) {
+        guard let afterUpload else { return }
+        do {
+            try afterUpload(file)
+        } catch {
+            log("Cleanup after upload of \(file.lastPathComponent) failed: \(error)")
         }
     }
 
