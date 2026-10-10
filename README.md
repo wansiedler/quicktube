@@ -1,8 +1,9 @@
 # QuickTube
 
-Menu bar app for macOS 15+: press a hotkey, record the screen with your
-voice, press `⌃⌥⌘R` again to just save the file, or `⌃⌥⌘Y` to upload it to YouTube
-and get the link on your clipboard.
+Menu bar app for macOS 15+: press a hotkey, record the screen (a display, an
+area or one window) with your voice, press `⌃⌥⌘R` again to just save the file,
+or press a destination shortcut to upload it to YouTube, Telegram, Google Drive
+or Slack (or turn it into a GIF) and get the link on your clipboard.
 
 ## Install
 
@@ -24,8 +25,10 @@ ad-hoc Sparkle.framework loads).
 Released builds update themselves with [Sparkle](https://sparkle-project.org):
 Settings → General → "Check for updates automatically", or menu → Check for
 Updates… The feed is `https://wansiedler.github.io/quicktube/appcast.xml`.
-Builds from source carry a placeholder update key, so updates are off there
-and the controls are disabled.
+Builds from source carry a placeholder update key (`REPLACE_WITH_PUBLIC_KEY`
+in `Sources/QuickTube/Info.plist`), so Sparkle never starts there and the
+controls are disabled until a release key is set; see
+[docs/releasing.md](docs/releasing.md) for the key and the repository secrets.
 
 `make dmg` builds `build/QuickTube-<version>.dmg` (the app plus an
 Applications link) with the same signing identity. Releases are signed with
@@ -59,13 +62,24 @@ channel instead of YouTube; the message link goes on the clipboard.
 3. QuickTube → Settings → Telegram: paste the token and the channel
    (`@name` for a public channel, or the `-100…` id for a private one) → Save.
 
-The Bot API accepts files up to 50 MB. Longer recordings are re-encoded
-(HEVC + AAC at a lower bitrate; the frame size and length are kept) into a temporary
-`<name>.telegram.mp4` that is sent and then deleted; the original stays on disk.
+The Bot API accepts files up to 50 MB. Longer recordings are re-encoded into a
+temporary `<name>.telegram.mp4` that is sent and then deleted; the original
+stays on disk:
+
+- By default only the bitrate drops: the video is re-encoded to HEVC (hardware
+  encoder first, software fallback logged if it is unavailable), the frame size
+  and length are kept. Enable "Allow downscaling when compressing" in
+  Settings → Telegram to let it shrink the frame size too.
+- Audio is not degraded: a single track is copied untouched; microphone plus
+  system audio are mixed into one 160 kbit/s AAC track.
+- If the encoder overshoots the limit, one retry pass re-encodes at a
+  proportionally lower bitrate.
+- The caption is the title plus a line with the display, size, frame rate and
+  file size, for example `Pro Display XDR · 6016×3384 · 43 fps · 138 MB → 49 MB`
+  (the arrow shows the size actually sent).
+
 Settings → Telegram can turn compression off or change the limit — raise it
-only if you run a self-hosted Bot API server (up to 2000 MB). Compression
-never shrinks the frame size unless you enable "Allow downscaling when
-compressing" there.
+only if you run a self-hosted Bot API server (up to 2000 MB).
 
 ## Google Drive (optional)
 
@@ -88,22 +102,69 @@ permalink goes on the clipboard (visible to workspace members).
 
 ## Use
 
+### Shortcuts
+
+Any destination shortcut starts a recording; the one that stops it picks the
+destination. Change them in Settings → Shortcuts (hold ⌘ or ⌃ plus any other
+modifiers).
+
+| Shortcut | Action |
+|---|---|
+| `⌃⌥⌘R` | start; pressed again, stop and just save the file (Finder shows it, its URL is on the clipboard) |
+| `⌃⌥⌘Y` | stop and upload to YouTube |
+| `⌃⌥⌘T` | stop and send to Telegram |
+| `⌃⌥⌘D` | stop and upload to Google Drive |
+| `⌃⌥⌘S` | stop and send to Slack |
+| `⌃⌥⌘G` | stop and save a GIF (when Settings → GIF is on) |
+| `⌃⌥⌘P` | pause / resume (when pause is on in Settings → Recording; fixed) |
+
+### Features
+
+- **Capture target** (Settings → Recording → Capture, also in the menu): the
+  display under the cursor, a selected area (drag a rectangle; the pixel size
+  is shown) or a selected window (click it). Esc cancels the chooser.
+- **Quality**: Native / 4K / 1080p at 30 or 60 fps, for the next recording.
+- **System audio** next to the microphone; QuickTube's own sounds are never
+  recorded.
+- **Pause and resume**: each pause starts a new segment; on stop the segments
+  are joined into one file. The status pill shows "Paused".
+- **Trimming**: "Trim end" (default 1 s) cuts the stop-shortcut press, "Trim
+  start" the beginning; at least half a second is always kept.
+- **Title template**: `{date}`, `{app}` (frontmost app) and `{display}` name the
+  file and the upload.
+- **Camera bubble**: a round, draggable camera view in a chosen corner and size,
+  shown while recording (or always). It is part of the recording for display
+  and area captures; window recordings capture only that window, so they never
+  contain it. The status pill and selection overlays are never recorded.
+- **Overlays**: "Highlight clicks" draws a ring at each click, "Show
+  keystrokes" a pill with the last key combo (needs Input Monitoring; Settings
+  → Overlays shows the status and opens System Settings). "Show overlays in
+  recording" decides whether the video contains them.
+- **History**: the last 20 uploaded links under Recent Links in the menu; click
+  copies one. Settings → History can turn it off or clear it.
+- **Cleanup**: "Move to Trash after upload" and "Trash recordings older than N
+  days" (checked at launch). Files only ever go to the Trash.
+- **GIF**: frame rate (default 10 fps), max width (800 px) and max length (30 s,
+  cut from the start). Frames are capped at a 512 MB memory budget: fps drops
+  first, then width, and the log says so. The GIF is saved next to the
+  recording, copied and shown in Finder.
+
+### Everyday
+
 | Action | How |
 |---|---|
 | Grant permissions | asked at first launch; status under Settings → Permissions |
-| Start recording | `⌃⌥⌘R` (change in Settings) |
-| Stop and just save the file (no upload) | `⌃⌥⌘R` again; Finder shows the file and its URL is on the clipboard |
-| Stop and upload to YouTube | `⌃⌥⌘Y` |
-| Stop and send to Telegram | `⌃⌥⌘T` |
-| Stop and upload to Google Drive | `⌃⌥⌘D` |
-| Stop and send to Slack | `⌃⌥⌘S` (any shortcut starts a recording; the one that stops it picks the destination) |
-| Pick quality | Settings → Recording: Native / 4K / 1080p and 30 / 60 fps (applies to the next recording) |
 | Watch progress | a small pill at the bottom of the screen: recording timer → upload % → link (click opens it); it is excluded from the recording |
 | Retry a failed upload | menu → Retry Upload |
 | Find the files | menu → Open Recordings Folder (`~/Movies/QuickTube`) |
 | Start with macOS | Settings → General → Launch at login (installed app only) |
 
-Files are never deleted automatically.
+### Settings
+
+General (launch at login, updates) · Recording (capture, quality, frame rate,
+system audio, microphone, pause, trimming, title template) · Camera · History ·
+Overlays · Files (cleanup) · GIF · Permissions · Google · Telegram · Google
+Drive · Slack · Shortcuts.
 
 ## Develop
 

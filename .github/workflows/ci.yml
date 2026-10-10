@@ -115,11 +115,23 @@ jobs:
           python3 - "$CODECOV_JSON" <<'EOF'
           import json, os, sys
 
+          # v2 floors are floor(measured) - 2. RecordingFinisher and GIFUploader
+          # were measured without their AVFoundation end-to-end tests, which
+          # skip on a runner without the encoders, so the floor holds there too.
           floors = {
+              "AppSettings.swift": 82.0,
               "AppState.swift": 97.0,
+              "CameraLayout.swift": 98.0,
+              "CaptureTarget.swift": 89.0,
+              "GIFUploader.swift": 50.0,
               "GoogleAuth.swift": 87.0,
+              "HotkeyMigration.swift": 98.0,
+              "KeyComboFormatter.swift": 98.0,
+              "LocalSaver.swift": 98.0,
               "LoopbackServer.swift": 91.0,
               "PKCE.swift": 100.0,
+              "RecordingCleanup.swift": 90.0,
+              "RecordingFinisher.swift": 70.0,
               "RecordingNaming.swift": 100.0,
               "ShareLink.swift": 100.0,
               "YouTubeUploader.swift": 95.0,

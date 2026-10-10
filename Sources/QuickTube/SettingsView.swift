@@ -265,8 +265,16 @@ struct SettingsView: View {
                 if model.settings.gifEnabled {
                     shortcutRow("Record → GIF", destination: .gif)
                 }
+                if model.settings.pauseEnabled {
+                    HStack {
+                        Text("Pause / Resume")
+                        Spacer()
+                        Text(AppModel.pauseCombo.label).font(.title3.monospaced())
+                        Text("fixed").foregroundStyle(.secondary)
+                    }
+                }
                 Text(
-                    "Hold ⌘ or ⌃ (plus any other modifiers). ⌃⌥⌘R starts a recording; press it again to just save the file, or press a destination shortcut to stop and upload there."
+                    "Hold ⌘ or ⌃ (plus any other modifiers). ⌃⌥⌘R starts a recording; press it again to just save the file, or press a destination shortcut to stop and upload there. The GIF and Pause rows appear when those features are on."
                 )
                 .font(.callout).foregroundStyle(.secondary)
                 if let message = model.hotkeyMessage {
