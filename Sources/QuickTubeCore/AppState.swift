@@ -161,6 +161,10 @@ public final class AppState {
         case AuthError.notSignedIn, UploadError.unauthorized:
             return "Sign in to Google in Settings, then retry the upload."
         case UploadError.apiError(let status, let message):
+            if message.contains("exceeded the number of videos") {
+                return "YouTube's daily upload limit for this channel is reached; "
+                    + "the file is kept. Retry tomorrow."
+            }
             return "Upload failed (HTTP \(status)): \(message)"
         case AuthError.missingClient:
             return "Enter and save the OAuth client ID and secret in Settings."
