@@ -100,6 +100,7 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
             context.onStatus(stage)
             for _ in 0..<5 { await Task.yield() }
             await onStage?(stage)
+            for _ in 0..<5 { await Task.yield() }
         }
         for value in progressValues {
             progress(value)
@@ -191,11 +192,18 @@ final class LogLines: @unchecked Sendable {
         uploader.stages = ["Compressing · x", "Uploading"]
         let state = AppState(recorder: recorder, uploader: uploader, notifier: notifier)
         let stagesSeen = StageLog()
-        uploader.onStage = { _ in stagesSeen.values.append(state.uploadStage) }
+        let progressSeen = StageLog()
+        uploader.onStage = { _ in
+            stagesSeen.values.append(state.uploadStage)
+            if case .uploading(let value) = state.phase { progressSeen.values.append("\(value)") }
+            // Progress inside a stage; the next stage must start over at 0.
+            uploader.lastProgress?(0.42)
+        }
         #expect(state.uploadStage == "Uploading")
         await state.toggle()
         await state.toggle()
         #expect(stagesSeen.values == ["Compressing · x", "Uploading"])
+        #expect(progressSeen.values == ["0.0", "0.0"])
         #expect(AppState.uploadText(stage: "Compressing · x", progress: 0.21) == "Compressing 21% · x")
         #expect(AppState.uploadText(stage: "Uploading", progress: 0.6) == "Uploading 60%")
     }
@@ -220,7 +228,7 @@ final class LogLines: @unchecked Sendable {
         #expect(uploader.uploads.count == 1)
         #expect(uploader.uploads[0].1 == title)
         #expect(uploader.uploads[0].0 == renamed)
-        #expect(uploader.contexts[0] == UploadContext(display: "Studio Display"))
+        #expect(uploader.contexts[0].display == "Studio Display")
         #expect(FileManager.default.fileExists(atPath: renamed.path))
         #expect(!FileManager.default.fileExists(atPath: recorded.path))
     }

@@ -3,21 +3,31 @@ import QuickTubeCore
 import ScreenCaptureKit
 
 /// Full-screen chooser on the display under the cursor: drag an area, or click a highlighted window.
-/// Esc (or a right click) cancels. QuickTube's own windows are excluded from capture, so the overlay
+/// Esc, a right click, a QuickTube recording hotkey or a display change cancels. The overlay is a
+/// non-activating panel, so it takes key input without activating QuickTube. QuickTube's own windows are excluded from capture, so the overlay
 /// never shows up in a recording.
 @MainActor
 final class SelectionOverlay: CaptureTargetPicker {
-    private var window: OverlayWindow?
+    private var window: OverlayPanel?
     private var continuation: CheckedContinuation<CaptureTarget?, Never>?
     /// True from the start of a pick until it returns, including while the window list loads.
-    private var active = false
-    /// Gets focus back once the overlay closes.
-    private var previousApp: NSRunningApplication?
+    private(set) var isPicking = false
+    /// Set by `cancel()` while the window list loads, before the overlay exists.
+    private var cancelled = false
+    private var screenObserver: NSObjectProtocol?
+
+    /// Ends a pick in flight as cancelled; does nothing otherwise.
+    func cancel() {
+        guard isPicking else { return }
+        cancelled = true
+        finish(nil)
+    }
 
     func pick(mode: CaptureMode) async -> CaptureTarget? {
-        guard !active else { return nil }
-        active = true
-        defer { active = false }
+        guard !isPicking else { return nil }
+        isPicking = true
+        cancelled = false
+        defer { isPicking = false }
         let mouse = NSEvent.mouseLocation
         guard
             let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) })
@@ -30,20 +40,26 @@ final class SelectionOverlay: CaptureTargetPicker {
             do {
                 candidates = try await Self.windowCandidates()
             } catch {
-                // Usually a missing Screen Recording grant; recording the display lets the recorder report it.
                 DiagnosticsLog.append("Window list unavailable: \(error)")
-                return .display(displayID)
+                // Without the Screen Recording grant, hand the display to the recorder so it reports the
+                // permission error. With it, never widen a window pick to the whole display: cancel.
+                return CGPreflightScreenCaptureAccess() ? nil : .display(displayID)
             }
         }
+        guard !cancelled else { return nil }
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
+            // A display added, removed or rearranged invalidates the overlay's geometry.
+            screenObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.finish(nil) }
+            }
             let view = SelectionView(
                 mode: mode, displayID: displayID, screen: screen, candidates: candidates,
                 finish: { [weak self] target in self?.finish(target) })
-            let window = OverlayWindow(screen: screen, view: view)
+            let window = OverlayPanel(screen: screen, view: view)
             self.window = window
-            previousApp = NSWorkspace.shared.frontmostApplication
-            NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(view)
             view.refreshHover(at: window.mouseLocationOutsideOfEventStream)
@@ -54,11 +70,14 @@ final class SelectionOverlay: CaptureTargetPicker {
     private func finish(_ target: CaptureTarget?) {
         guard let continuation else { return }
         self.continuation = nil
-        window?.orderOut(nil)
+        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+        screenObserver = nil
+        let closing = window
         window = nil
+        closing?.orderOut(nil)
+        // `finish` usually runs inside the panel's own event handler; release it after that returns.
+        DispatchQueue.main.async { withExtendedLifetime(closing) {} }
         NSCursor.arrow.set()
-        if let previousApp, previousApp != NSRunningApplication.current { previousApp.activate() }
-        previousApp = nil
         continuation.resume(returning: target)
     }
 
@@ -81,7 +100,7 @@ final class SelectionOverlay: CaptureTargetPicker {
             value: try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true))
     }
 
-    /// On-screen, normal-layer, non-QuickTube windows, frontmost first.
+    /// On-screen, visible (alpha > 0), normal-layer, non-QuickTube windows, frontmost first.
     private static func windowCandidates() async throws -> [WindowCandidate] {
         let content = try await shareableContent().value
         let ownBundle = Bundle.main.bundleIdentifier
@@ -90,15 +109,19 @@ final class SelectionOverlay: CaptureTargetPicker {
             CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]] ?? []
         var order: [CGWindowID: Int] = [:]
+        var transparent: Set<CGWindowID> = []
         for (index, entry) in info.enumerated() {
-            if let number = entry[kCGWindowNumber as String] as? NSNumber {
-                order[number.uint32Value] = index
+            guard let number = entry[kCGWindowNumber as String] as? NSNumber else { continue }
+            order[number.uint32Value] = index
+            if let alpha = entry[kCGWindowAlpha as String] as? NSNumber, alpha.doubleValue <= 0 {
+                transparent.insert(number.uint32Value)
             }
         }
         return content.windows
             .filter { window in
                 window.windowLayer == 0 && window.frame.width > 0 && window.frame.height > 0
                     && window.owningApplication?.bundleIdentifier != ownBundle
+                    && !transparent.contains(window.windowID)
             }
             .sorted { (order[$0.windowID] ?? .max) < (order[$1.windowID] ?? .max) }
             .map { window in
@@ -117,10 +140,16 @@ extension NSScreen {
     }
 }
 
-/// Borderless windows cannot become key by default; the overlay must, to receive Esc.
-private final class OverlayWindow: NSWindow {
+/// A non-activating panel that still becomes key, so Esc and mouse moves reach it while the
+/// frontmost app keeps focus.
+private final class OverlayPanel: NSPanel {
     init(screen: NSScreen, view: NSView) {
-        super.init(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        super.init(
+            contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
+            defer: false)
+        isFloatingPanel = true
+        hidesOnDeactivate = false
+        becomesKeyOnlyIfNeeded = false
         setFrame(screen.frame, display: false)
         level = .screenSaver
         isOpaque = false
@@ -129,12 +158,11 @@ private final class OverlayWindow: NSWindow {
         ignoresMouseEvents = false
         acceptsMouseMovedEvents = true
         isReleasedWhenClosed = false
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         contentView = view
     }
 
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
 }
 
 /// Draws the dimmed backdrop, the selection or highlighted window, and its label; handles the input.

@@ -371,6 +371,8 @@ public final class AppState {
     private func setStage(_ stage: String) {
         guard case .uploading = phase else { return }
         uploadStage = stage
+        // Progress is per stage: a new stage starts again at 0.
+        phase = .uploading(progress: 0)
     }
 
     private func setProgress(_ value: Double) {

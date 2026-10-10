@@ -182,7 +182,7 @@ extension NetworkSuite {
             #expect(!body.contains(Data(repeating: 0xCD, count: 200)))
             #expect(!FileManager.default.fileExists(atPath: call.output.path))
             #expect(FileManager.default.fileExists(atPath: file.path))
-            #expect(seen.values == [0, 0.25, 0.5, 1])
+            #expect(seen.values == [0, 0.5, 1, 0, 1])
         }
 
         @Test func directUploadSendsDimensionsOfTheOriginal() async throws {
@@ -223,10 +223,9 @@ extension NetworkSuite {
             ) { _ in }
 
             let all = statuses.all
-            #expect(all.count == 3)
-            #expect(all.first == "Uploading")
-            #expect(all[1].hasPrefix("Compressing · 2560×1440 60 fps 200 MB → "))
-            #expect(all[1].hasSuffix(" fps ~100 MB"))
+            #expect(all.count == 2)
+            #expect(all[0].hasPrefix("Compressing · 2560×1440 60 fps 200 MB → "))
+            #expect(all[0].hasSuffix(" fps ~100 MB"))
             #expect(all.last == "Uploading")
         }
 

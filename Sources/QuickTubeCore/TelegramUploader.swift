@@ -90,7 +90,6 @@ public actor TelegramUploader: VideoUploader {
         file: URL, title: String, context: UploadContext = UploadContext(),
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> UploadResult {
-        context.onStatus("Uploading")
         guard let configuration = try configuration() else { throw TelegramError.notConfigured }
         let size = Self.fileSize(file)
         guard size > 0 else { throw UploadError.fileUnreadable }
@@ -113,7 +112,6 @@ public actor TelegramUploader: VideoUploader {
 
         var sending = file
         var sendingInfo = info
-        var sendProgress = progress
         var transcoded: URL?
         defer { if let transcoded { try? FileManager.default.removeItem(at: transcoded) } }
         if oversized {
@@ -125,13 +123,12 @@ public actor TelegramUploader: VideoUploader {
                 RecordingNaming.compressionLine(from: info, sizeBytes: size, to: plan, targetBytes: limit))
             log("Telegram: \(size) bytes over the \(limit)-byte limit, transcoding with \(plan)")
             progress(0)
-            sending = try await transcode(file, plan, output) { progress($0 * 0.5) }
+            sending = try await transcode(file, plan, output) { progress($0) }
             transcoded = sending
             let newSize = Self.fileSize(sending)
             guard newSize > 0 else { throw UploadError.fileUnreadable }
             guard newSize <= limit else { throw TelegramError.fileTooLarge(limit: limit, actual: newSize) }
-            sendProgress = { progress(0.5 + $0 * 0.5) }
-            context.onStatus("Uploading")
+
             // The player proportions must match the file that is sent, not the recording.
             do {
                 sendingInfo = try await videoInfo(sending)
@@ -142,6 +139,9 @@ public actor TelegramUploader: VideoUploader {
             }
         }
 
+        // Each stage reports 0 → 1 on its own; the status switch tells the UI which one is running.
+        context.onStatus("Uploading")
+        if oversized { progress(0) }
         let boundary = "QuickTube-\(UUID().uuidString)"
         let body = try Self.multipartBody(
             boundary: boundary, chat: configuration.chat, caption: caption, file: sending,
@@ -152,7 +152,7 @@ public actor TelegramUploader: VideoUploader {
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         let (data, response) = try await session.upload(
-            for: request, fromFile: body, delegate: ProgressDelegate(sendProgress))
+            for: request, fromFile: body, delegate: ProgressDelegate(progress))
         guard let http = response as? HTTPURLResponse else { throw TelegramError.badResponse(0) }
         let reply = try? JSONDecoder().decode(Reply.self, from: data)
         guard http.statusCode == 200, let result = reply?.result, reply?.ok == true else {

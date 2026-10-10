@@ -111,6 +111,11 @@ final class AppModel {
                 return
             }
             guard let destination = Self.slots.first(where: { $0.value == slot })?.key else { return }
+            // A recording hotkey while the selection overlay is up cancels it, rather than being ignored.
+            if self.selectionOverlay.isPicking {
+                self.selectionOverlay.cancel()
+                return
+            }
             Task { await self.state.toggle(destination: destination) }
         }
         for destination in Destination.allCases {

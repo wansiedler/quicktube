@@ -37,7 +37,7 @@ public enum UploadError: Error, Equatable {
 }
 
 /// Extra facts about a recording that some destinations put in their post.
-public struct UploadContext: Sendable, Equatable {
+public struct UploadContext: Sendable {
     /// Name of the screen that was recorded.
     public var display: String?
     /// Reports a stage change ("Compressing · details", "Uploading"); may be called from any thread.
@@ -46,11 +46,6 @@ public struct UploadContext: Sendable, Equatable {
     public init(display: String? = nil, onStatus: @escaping @Sendable (String) -> Void = { _ in }) {
         self.display = display
         self.onStatus = onStatus
-    }
-
-    /// The callback is not comparable; contexts are equal when their data is.
-    public static func == (lhs: UploadContext, rhs: UploadContext) -> Bool {
-        lhs.display == rhs.display
     }
 }
 
