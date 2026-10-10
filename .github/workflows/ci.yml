@@ -115,29 +115,111 @@ jobs:
           sudo xcode-select -s "$xc"
           swift --version
 
+      # The whole log goes to a file and is printed in full on failure: a crashed test
+      # process loses its tail, so `tail` alone hides which test was running. A crash
+      # (signal) in the parallel run is retried once with --no-parallel, which tells a
+      # race between concurrently running suites from a test that crashes on its own;
+      # the serial verdict decides the step, and the parallel crash stays a warning.
       - name: Run tests with coverage
+        id: tests
+        env:
+          # The Swift runtime prints the crashing thread's backtrace to stderr.
+          SWIFT_BACKTRACE: enable=yes,interactive=no,color=no
         run: |
+          mkdir -p test-logs
+          touch test-logs/.started
+          summary() { grep -E "Executed [0-9]+ tests|Test run with|unexpected signal" "$1" | tail -n 3; }
           set +e
-          out=$(swift test --enable-code-coverage 2>&1)
+          swift test --enable-code-coverage > test-logs/swift-test.log 2>&1
           rc=$?
           set -e
-          echo "$out" | tail -n 60
+          mode="parallel"
+          if [ "$rc" -ne 0 ]; then
+            echo "::group::Full output of the parallel run (exit $rc)"
+            cat test-logs/swift-test.log
+            echo "::endgroup::"
+            if grep -q "Exited with unexpected signal" test-logs/swift-test.log; then
+              sig=$(grep -oE "unexpected signal code [0-9]+" test-logs/swift-test.log | head -n 1)
+              echo "::warning::Parallel test run crashed ($sig); rerunning with --no-parallel"
+              echo "crashed=true" >> "$GITHUB_OUTPUT"
+              mode="serial rerun after a parallel crash ($sig)"
+              set +e
+              swift test --enable-code-coverage --no-parallel > test-logs/swift-test-serial.log 2>&1
+              rc=$?
+              set -e
+              if [ "$rc" -ne 0 ]; then
+                echo "::group::Full output of the --no-parallel run (exit $rc)"
+                cat test-logs/swift-test-serial.log
+                echo "::endgroup::"
+              else
+                tail -n 40 test-logs/swift-test-serial.log
+              fi
+            fi
+          else
+            tail -n 40 test-logs/swift-test.log
+          fi
           {
-            echo "## $([ $rc -eq 0 ] && echo '✅' || echo '❌') Tests"
+            echo "## $([ "$rc" -eq 0 ] && echo '✅' || echo '❌') Tests ($mode)"
             echo ""
             echo '```'
-            echo "$out" | grep -E "Executed [0-9]+ tests|Test run with" | tail -2
+            summary test-logs/swift-test.log
+            if [ -f test-logs/swift-test-serial.log ]; then
+              echo "--- --no-parallel:"
+              summary test-logs/swift-test-serial.log
+            fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+
+      # Crash reports written while the tests ran, next to the full logs.
+      - name: Collect crash reports
+        if: ${{ !cancelled() && (steps.tests.outcome == 'failure' || steps.tests.outputs.crashed == 'true') }}
+        run: |
+          mkdir -p test-logs/DiagnosticReports
+          for dir in "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports; do
+            [ -d "$dir" ] || continue
+            find "$dir" -type f -newer test-logs/.started -exec cp {} test-logs/DiagnosticReports/ \; || true
+          done
+          ls -la test-logs/DiagnosticReports
+          for f in test-logs/DiagnosticReports/*; do
+            [ -f "$f" ] || continue
+            echo "::group::$(basename "$f")"
+            head -c 200000 "$f"
+            echo
+            echo "::endgroup::"
+          done
+
+      - name: Upload test logs and crash reports
+        if: ${{ !cancelled() && !env.ACT && (steps.tests.outcome == 'failure' || steps.tests.outputs.crashed == 'true') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a   # v7
+        with:
+          name: test-logs
+          path: test-logs/
+          include-hidden-files: false
+          if-no-files-found: warn
+          retention-days: 30
 
       # Per-file floor: pure logic must stay fully tested. Add a file here
       # when it lands in QuickTubeCore and has no I/O of its own.
       - name: Coverage floor
         if: ${{ !cancelled() }}
+        env:
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
         run: |
           CODECOV_JSON=$(swift test --show-codecov-path)
           echo "codecov: $CODECOV_JSON"
+          # A crashed test run writes no coverage export. The tests step already failed
+          # then; say so instead of a traceback. A green run without the export fails.
+          if [ ! -f "$CODECOV_JSON" ]; then
+            if [ "$TESTS_OUTCOME" = "success" ]; then
+              echo "::error::Coverage export missing after a green test run: $CODECOV_JSON"
+              echo "## ❌ Coverage floor: export missing after a green test run" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            echo "::warning::Coverage floor skipped: no coverage export, the test run did not finish ($TESTS_OUTCOME)."
+            echo "## ⏭️ Coverage floor: skipped (tests $TESTS_OUTCOME, no coverage export)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           python3 - "$CODECOV_JSON" <<'EOF'
           import json, os, sys
 
