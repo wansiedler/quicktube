@@ -38,8 +38,21 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_26.app || sudo xcode-select -s /Applications/Xcode.app
+      # Swift 6.2 is the floor: pick the newest Xcode 26 explicitly and fail loudly
+      # without one, instead of falling back to the image default (Swift 6.1).
+      - name: Select Xcode 26
+        run: |
+          shopt -s nullglob
+          candidates=(/Applications/Xcode_26*.app)
+          if [ "${#candidates[@]}" -eq 0 ]; then
+            echo "::error::No /Applications/Xcode_26*.app on this runner; Xcode 26 (Swift 6.2) is required."
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          xc=$(printf '%s\n' "${candidates[@]}" | sort -V | tail -n 1)
+          echo "Selecting $xc"
+          sudo xcode-select -s "$xc"
+          swift --version
 
       - name: Check the tag matches the app version
         run: |
