@@ -130,7 +130,7 @@ import Testing
 
     // MARK: - End to end
 
-    @Test(.enabled("needs an H.264 encoder") { ClipMaker.h264Available() })
+    @Test(.enabled("needs an H.264 encoder") { ClipMaker.h264Available() }, .timeLimit(.minutes(1)))
     func rendersAGeneratedClipToALoopingGIF() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "gif-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

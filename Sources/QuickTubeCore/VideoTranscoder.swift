@@ -113,11 +113,13 @@ public enum VideoTranscoder {
         return properties
     }
 
-    /// OSStatus / AVError codes that mean "this encoder cannot be used here" (none on the machine, none free
-    /// now, or the hardware one refusing the session, as for sizes beyond its limit).
+    /// OSStatus / AVError codes that mean "this encoder cannot be used here": none on the machine
+    /// (kVTCouldNotFindVideoEncoderErr -12908), none free now (kVTVideoEncoderNotAvailableNowErr -12915), no
+    /// instance could be created (kVTCouldNotCreateInstanceErr -12907), or the hardware one refusing the session,
+    /// as for sizes beyond its limit (kVTInvalidSessionErr -12903, seen under AVFoundation -11800).
     static let encoderUnavailableCodes: Set<Int> = [
         Int(kVTCouldNotFindVideoEncoderErr), Int(kVTVideoEncoderNotAvailableNowErr),
-        Int(kVTInvalidSessionErr),
+        Int(kVTCouldNotCreateInstanceErr), Int(kVTInvalidSessionErr),
         AVError.Code.encoderNotFound.rawValue, AVError.Code.encoderTemporarilyUnavailable.rawValue,
     ]
 
@@ -131,6 +133,13 @@ public enum VideoTranscoder {
             current = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
         }
         return false
+    }
+
+    /// Pure: whether a failed start of the writer is retried with the software encoder. Only the hardware attempt
+    /// retries, when the writer rejected its video input (the hardware settings) or `startWriting` failed with an
+    /// encoder-unavailable error; the software attempt's failures are final.
+    public static func shouldRetryInSoftware(hardware: Bool, inputRejected: Bool, error: Error?) -> Bool {
+        hardware && (inputRejected || isEncoderUnavailable(error))
     }
 
     /// The error and its underlying chain as one line, e.g. "Cannot Encode (AVFoundationErrorDomain -11800
@@ -194,8 +203,8 @@ public enum VideoTranscoder {
     /// a single AAC audio track is copied untouched, several tracks are mixed to stereo 48 kHz AAC at
     /// `plan.audioBitrate` (clamped to 64–320 kbit/s). Replaces `output` if it exists and removes it again on failure. Returns `output`.
     /// `log` gets the software-encoder fallback and, on success, a throughput line (frames, seconds, fps).
-    /// The hardware HEVC encoder is required first; only if starting it fails with an encoder-unavailable error
-    /// does the transcode fall back to the software encoder (a hardware failure surfacing later, at an append,
+    /// The hardware HEVC encoder is required first; only if the writer rejects its settings or starting it fails
+    /// with an encoder-unavailable error does the transcode fall back to the software encoder (a hardware failure surfacing later, at an append,
     /// fails the transcode instead). `hardwareEncoder: false` skips the hardware attempt (tests use it to cover
     /// the software path on every host).
     public static func transcode(
@@ -313,6 +322,10 @@ public enum VideoTranscoder {
             videoInput.transform = transform
             videoInput.expectsMediaDataInRealTime = false
             guard writer.canAdd(videoInput) else {
+                try? FileManager.default.removeItem(at: output)
+                if shouldRetryInSoftware(hardware: hardware, inputRejected: true, error: nil) {
+                    return .encoderUnavailable("the writer rejected the hardware HEVC settings")
+                }
                 log?("cannot add the HEVC video input")
                 throw TranscodeError.cannotWrite
             }
@@ -348,7 +361,9 @@ public enum VideoTranscoder {
                 writer.cancelWriting()
                 try? FileManager.default.removeItem(at: output)
                 let reason = describe(error)
-                if hardware && isEncoderUnavailable(error) { return .encoderUnavailable(reason) }
+                if shouldRetryInSoftware(hardware: hardware, inputRejected: false, error: error) {
+                    return .encoderUnavailable(reason)
+                }
                 log?("could not start writing: \(reason)")
                 throw TranscodeError.failed(error?.localizedDescription ?? "writing could not start")
             }

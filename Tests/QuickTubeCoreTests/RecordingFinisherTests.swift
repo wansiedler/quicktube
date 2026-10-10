@@ -118,7 +118,8 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: output.path))
     }
 
-    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
+    @Test(
+        .enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() }, .timeLimit(.minutes(1)))
     func concatenatesAndTrimsTwoClips() async throws {
         let dir = try Self.tempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }

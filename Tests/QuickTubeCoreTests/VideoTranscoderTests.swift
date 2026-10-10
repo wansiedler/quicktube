@@ -138,6 +138,7 @@ import VideoToolbox
         #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12903)))
         #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12908)))
         #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12915)))
+        #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12907)))
         #expect(
             VideoTranscoder.isEncoderUnavailable(
                 NSError(domain: AVFoundationErrorDomain, code: AVError.Code.encoderNotFound.rawValue)))
@@ -145,6 +146,23 @@ import VideoToolbox
         #expect(!VideoTranscoder.isEncoderUnavailable(wrapped(NSPOSIXErrorDomain, 28)))  // disk full
         #expect(!VideoTranscoder.isEncoderUnavailable(wrapped(NSCocoaErrorDomain, -12908)))
         #expect(!VideoTranscoder.isEncoderUnavailable(NSError(domain: AVFoundationErrorDomain, code: -11800)))
+    }
+
+    @Test func onlyTheHardwareAttemptRetriesInSoftware() {
+        let unavailable = NSError(
+            domain: AVFoundationErrorDomain, code: -11800,
+            userInfo: [NSUnderlyingErrorKey: NSError(domain: NSOSStatusErrorDomain, code: -12908)])
+        let diskFull = NSError(domain: NSPOSIXErrorDomain, code: 28)
+        // The writer rejecting the hardware settings retries once in software.
+        #expect(VideoTranscoder.shouldRetryInSoftware(hardware: true, inputRejected: true, error: nil))
+        #expect(
+            VideoTranscoder.shouldRetryInSoftware(hardware: true, inputRejected: false, error: unavailable))
+        #expect(!VideoTranscoder.shouldRetryInSoftware(hardware: true, inputRejected: false, error: diskFull))
+        #expect(!VideoTranscoder.shouldRetryInSoftware(hardware: true, inputRejected: false, error: nil))
+        // The software attempt never retries: its failures are final.
+        #expect(!VideoTranscoder.shouldRetryInSoftware(hardware: false, inputRejected: true, error: nil))
+        #expect(
+            !VideoTranscoder.shouldRetryInSoftware(hardware: false, inputRejected: false, error: unavailable))
     }
 
     @Test func encoderSpecificationRequiresTheHardwareEncoder() {
