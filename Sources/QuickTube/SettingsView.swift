@@ -8,6 +8,18 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("General") {
+                Toggle(
+                    "Launch at login",
+                    isOn: Binding(
+                        get: { model.launchAtLogin },
+                        set: { model.setLaunchAtLogin($0) })
+                )
+                .disabled(!LaunchAtLogin.isAvailable)
+                if let message = model.launchAtLoginMessage {
+                    Text(message).font(.callout).foregroundStyle(.secondary)
+                }
+            }
             Section("Google") {
                 TextField("OAuth client ID", text: $model.clientID)
                 SecureField("OAuth client secret", text: $model.clientSecret)
@@ -42,7 +54,10 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 440)
-        .onAppear { model.refreshAuth() }
+        .onAppear {
+            model.refreshAuth()
+            model.refreshLaunchAtLogin()
+        }
         .onDisappear { stopListening() }
     }
 

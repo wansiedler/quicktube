@@ -20,6 +20,8 @@ final class AppModel {
     var signingIn = false
     var authMessage: String?
     private var signInTask: Task<Void, Never>?
+    private(set) var launchAtLogin = false
+    var launchAtLoginMessage: String?
 
     init() {
         let auth = GoogleAuth(store: KeychainStore())
@@ -63,6 +65,16 @@ final class AppModel {
             hotkey.register(previous)
             hotkeyMessage = "\(newCombo.label) is already in use by another app. Kept \(previous.label)."
         }
+    }
+
+    /// Re-reads the login-item state; the user may have changed it in System Settings.
+    func refreshLaunchAtLogin() {
+        launchAtLogin = LaunchAtLogin.isEnabled
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        launchAtLoginMessage = LaunchAtLogin.setEnabled(enabled)
+        launchAtLogin = LaunchAtLogin.isEnabled
     }
 
     func suspendHotkey() {

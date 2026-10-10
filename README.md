@@ -40,6 +40,7 @@ recordings a day.
 | Stop and upload | `⌃⌥⌘R` again |
 | Retry a failed upload | menu → Retry Upload |
 | Find the files | menu → Open Recordings Folder (`~/Movies/QuickTube`) |
+| Start with macOS | Settings → General → Launch at login (installed app only) |
 
 Files are never deleted automatically.
 
