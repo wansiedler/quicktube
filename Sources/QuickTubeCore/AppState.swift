@@ -94,6 +94,7 @@ public final class AppState {
     private let titleProvider: @Sendable () -> TitleContext
     private let titleTemplate: @Sendable () -> String
     /// Captured when a recording starts: the app and display it was made of.
+    private let log: @Sendable (String) -> Void
     private var titleContext = TitleContext()
     /// Title and context of the file being uploaded; `retry()` reuses them.
     private var pendingTitle: String?
@@ -106,11 +107,12 @@ public final class AppState {
         uploader: VideoUploader,
         notifier: Notifier,
         titleProvider: @escaping @Sendable () -> TitleContext = { TitleContext() },
-        titleTemplate: @escaping @Sendable () -> String = { "{date}" }
+        titleTemplate: @escaping @Sendable () -> String = { "{date}" },
+        log: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         self.init(
             recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
-            titleProvider: titleProvider, titleTemplate: titleTemplate)
+            titleProvider: titleProvider, titleTemplate: titleTemplate, log: log)
     }
 
     public init(
@@ -118,13 +120,15 @@ public final class AppState {
         uploaders: [Destination: VideoUploader],
         notifier: Notifier,
         titleProvider: @escaping @Sendable () -> TitleContext = { TitleContext() },
-        titleTemplate: @escaping @Sendable () -> String = { "{date}" }
+        titleTemplate: @escaping @Sendable () -> String = { "{date}" },
+        log: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         self.recorder = recorder
         self.uploaders = uploaders
         self.notifier = notifier
         self.titleProvider = titleProvider
         self.titleTemplate = titleTemplate
+        self.log = log
     }
 
     /// The hotkey action; the destination only matters when it stops a recording.
@@ -175,13 +179,16 @@ public final class AppState {
             fail(error, file: nil, stage: .recording)
             return
         }
-        file = Self.rename(file, toTitle: title)
+        file = Self.rename(file, toTitle: title, log: log)
         await upload(file, to: destination)
     }
 
     /// Gives the finished recording its title as file name; on a name clash appends " (2)", " (3)", ….
-    /// Falls back to the original file if the rename is not possible.
-    nonisolated static func rename(_ file: URL, toTitle title: String) -> URL {
+    /// Only the file name changes: after a clash the file is "Title (2).mp4" while the upload title
+    /// stays "Title". Falls back to the original file (and logs) if the rename is not possible.
+    nonisolated static func rename(
+        _ file: URL, toTitle title: String, log: @Sendable (String) -> Void
+    ) -> URL {
         let directory = file.deletingLastPathComponent()
         let ext = file.pathExtension.isEmpty ? "mp4" : file.pathExtension
         var target = directory.appending(path: "\(title).\(ext)")
@@ -195,6 +202,7 @@ public final class AppState {
             try FileManager.default.moveItem(at: file, to: target)
             return target
         } catch {
+            log("Rename \(file.path) -> \(target.path) failed: \(error)")
             return file
         }
     }

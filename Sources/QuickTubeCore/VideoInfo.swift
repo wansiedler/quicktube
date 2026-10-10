@@ -5,10 +5,11 @@ import Foundation
 public struct VideoInfo: Sendable, Equatable {
     public let width: Int
     public let height: Int
-    public let fps: Double
+    /// nil when the file has no usable frame rate (variable-rate screen captures can report none).
+    public let fps: Double?
     public let duration: TimeInterval
 
-    public init(width: Int, height: Int, fps: Double, duration: TimeInterval) {
+    public init(width: Int, height: Int, fps: Double?, duration: TimeInterval) {
         self.width = width
         self.height = height
         self.fps = fps
@@ -26,12 +27,27 @@ public struct VideoInfo: Sendable, Equatable {
         guard let track = tracks.first(where: { $0.mediaType == .video }) else {
             throw ReadError.noVideoTrack
         }
-        let (size, transform, fps) = try await track.load(
-            .naturalSize, .preferredTransform, .nominalFrameRate)
+        let (size, transform, nominal, minDuration) = try await track.load(
+            .naturalSize, .preferredTransform, .nominalFrameRate, .minFrameDuration)
         let duration = try await asset.load(.duration)
-        let box = CGRect(origin: .zero, size: size).applying(transform)
+        let (width, height) = displaySize(natural: size, transform: transform)
         return VideoInfo(
-            width: Int(abs(box.width).rounded()), height: Int(abs(box.height).rounded()),
-            fps: Double(fps), duration: duration.seconds)
+            width: width, height: height,
+            fps: frameRate(nominal: nominal, minFrameDuration: minDuration),
+            duration: duration.seconds)
+    }
+
+    /// The displayed size: the natural size with the track's rotation applied.
+    public static func displaySize(natural: CGSize, transform: CGAffineTransform) -> (Int, Int) {
+        let box = CGRect(origin: .zero, size: natural).applying(transform)
+        return (Int(abs(box.width).rounded()), Int(abs(box.height).rounded()))
+    }
+
+    /// The nominal rate, else the one implied by the shortest frame duration, else nil.
+    public static func frameRate(nominal: Float, minFrameDuration: CMTime) -> Double? {
+        if nominal > 0 { return Double(nominal) }
+        let seconds = minFrameDuration.seconds
+        guard seconds.isFinite, seconds > 0 else { return nil }
+        return 1 / seconds
     }
 }

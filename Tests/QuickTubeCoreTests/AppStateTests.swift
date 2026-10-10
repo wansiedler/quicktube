@@ -5,7 +5,21 @@ import Testing
 final class FakeRecorder: ScreenRecorder, @unchecked Sendable {
     var startError: Error?
     var stopError: Error?
-    var file = URL(fileURLWithPath: "/tmp/rec.mp4")
+    /// A real empty file in a private temp directory, removed with the fake.
+    let directory = FileManager.default.temporaryDirectory.appending(path: "qt-rec-\(UUID().uuidString)")
+    var file: URL
+
+    init() {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        file = directory.appending(path: "rec.mp4")
+        FileManager.default.createFile(atPath: file.path, contents: Data([0]))
+    }
+
+    deinit {
+        // A test may have made the directory read-only.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+        try? FileManager.default.removeItem(at: directory)
+    }
     var starts = 0
     var stops = 0
     /// While true, start() and stop() suspend after counting the call.
@@ -64,6 +78,13 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
     var phases: [Phase] = []
 }
 
+final class LogLines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    func append(_ line: String) { lock.withLock { lines.append(line) } }
+    var all: [String] { lock.withLock { lines } }
+}
+
 @MainActor
 @Suite struct AppStateTests {
     let recorder = FakeRecorder()
@@ -72,8 +93,13 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
     let now = Date(timeIntervalSince1970: 1_791_624_600)
 
     func makeState() -> AppState {
-        AppState(recorder: recorder, uploader: uploader, notifier: notifier)
+        AppState(
+            recorder: recorder, uploader: uploader, notifier: notifier,
+            titleProvider: { [now] in TitleContext(date: now) })
     }
+
+    /// Where the fake recording ends up after the post-stop rename with the default template.
+    var renamed: URL { recorder.directory.appending(path: RecordingNaming.fileName(for: now)) }
 
     @Test func toggleStartsRecording() async {
         let state = makeState()
@@ -83,20 +109,16 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
     }
 
     @Test func secondToggleStopsUploadsAndPublishesLink() async {
-        recorder.file = URL(fileURLWithPath: "/tmp").appending(path: RecordingNaming.fileName(for: now))
-        let state = AppState(
-            recorder: recorder, uploader: uploader, notifier: notifier,
-            titleProvider: { [now] in TitleContext(date: now) })
+        let state = makeState()
         await state.toggle()
         await state.toggle()
         let link = URL(string: "https://youtu.be/abc123")!
         #expect(state.phase == .done(link: link))
         #expect(state.lastLink == link)
         #expect(uploader.uploads.count == 1)
-        #expect(uploader.uploads[0].0 == recorder.file)
-        // Title is the file's own stem, i.e. the recording's start timestamp.
-        #expect(uploader.uploads[0].1 == recorder.file.deletingPathExtension().lastPathComponent)
+        #expect(uploader.uploads[0].0 == renamed)
         #expect(uploader.uploads[0].1 == RecordingNaming.title(for: now))
+        #expect(FileManager.default.fileExists(atPath: renamed.path))
         #expect(notifier.links.count == 1)
         #expect(notifier.links[0].1 == true)
     }
@@ -126,6 +148,27 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         #expect(!FileManager.default.fileExists(atPath: recorded.path))
     }
 
+    @Test func renameFailureLogsAndUploadsTheOriginalFile() async throws {
+        let lines = LogLines()
+        // A read-only directory: the file cannot be renamed inside it.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555], ofItemAtPath: recorder.directory.path)
+        let state = AppState(
+            recorder: recorder, uploader: uploader, notifier: notifier,
+            titleProvider: { [now] in TitleContext(date: now) }, log: { lines.append($0) })
+        await state.toggle()
+        await state.toggle()
+
+        #expect(uploader.uploads.count == 1)
+        #expect(uploader.uploads[0].0 == recorder.file)
+        #expect(uploader.uploads[0].1 == RecordingNaming.title(for: now))
+        let logged = lines.all
+        #expect(logged.count == 1)
+        #expect(logged[0].contains(recorder.file.path))
+        #expect(logged[0].contains(renamed.path))
+    }
+
+    /// On a name clash only the file name changes; the upload keeps the plain title.
     @Test func titleCollisionAppendsCounter() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "qt-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -230,7 +273,7 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         #expect(
             state.phase
                 == .failed(
-                    message: "Upload failed: exhaustedRetries", file: recorder.file))
+                    message: "Upload failed: exhaustedRetries", file: renamed))
 
         uploader.error = nil
         await state.retry()
@@ -342,12 +385,13 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         let telegram = FakeUploader()
         telegram.error = TelegramError.notConfigured
         let state = AppState(
-            recorder: recorder, uploaders: [.youtube: uploader, .telegram: telegram], notifier: notifier)
+            recorder: recorder, uploaders: [.youtube: uploader, .telegram: telegram], notifier: notifier,
+            titleProvider: { [now] in TitleContext(date: now) })
         await state.toggle()
         await state.toggle(destination: .telegram)
         #expect(
             state.phase
-                == .failed(message: AppState.message(for: TelegramError.notConfigured), file: recorder.file))
+                == .failed(message: AppState.message(for: TelegramError.notConfigured), file: renamed))
         telegram.error = nil
         telegram.result = UploadResult(link: URL(string: "https://t.me/c/1/3")!)
         await state.retry()
@@ -363,7 +407,7 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
             state.phase
                 == .failed(
                     message: AppState.message(for: DestinationError.unavailable(.telegram)),
-                    file: recorder.file))
+                    file: renamed))
     }
 
     @Test func messagesAreHumanReadable() {

@@ -56,7 +56,7 @@ public enum RecordingNaming {
         var parts: [String] = []
         if let display, !display.isEmpty { parts.append(display) }
         parts.append("\(info.width)×\(info.height)")
-        parts.append("\(Int(info.fps.rounded())) fps")
+        if let fps = info.fps { parts.append("\(Int(fps.rounded())) fps") }
         return parts.joined(separator: " · ")
     }
 }

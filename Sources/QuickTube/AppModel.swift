@@ -78,7 +78,8 @@ final class AppModel {
             ],
             notifier: notifier,
             titleProvider: { MainActor.assumeIsolated { Self.currentTitleContext() } },
-            titleTemplate: { AppSettings.load(from: .standard).titleTemplate })
+            titleTemplate: { AppSettings.load(from: .standard).titleTemplate },
+            log: { DiagnosticsLog.append($0) })
         for destination in Destination.allCases {
             let fallback = HotkeyManager.Combo.fallback(for: destination)
             combos[destination] =
