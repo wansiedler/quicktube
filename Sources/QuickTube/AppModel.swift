@@ -385,23 +385,40 @@ final class AppModel {
         updatePauseHotkey()
     }
 
+    private static let pauseConflictSuffix = "; pause has no hotkey."
+
     private func updatePauseHotkey() {
         guard settings.pauseEnabled else {
             hotkey.remove(slot: Self.pauseSlot)
+            if hotkeyMessage?.hasSuffix(Self.pauseConflictSuffix) == true { hotkeyMessage = nil }
             return
         }
-        if combos.values.contains(Self.pauseCombo) {
+        // A disabled GIF destination has no hotkey, so its combo does not block pause.
+        let active = combos.filter { $0.key != .gif || settings.gifEnabled }
+        if active.values.contains(Self.pauseCombo) {
+            hotkey.remove(slot: Self.pauseSlot)
             hotkeyMessage =
-                "\(Self.pauseCombo.label) is taken by a destination shortcut; pause has no hotkey."
+                "\(Self.pauseCombo.label) is taken by a destination shortcut\(Self.pauseConflictSuffix)"
         } else if !hotkey.register(Self.pauseCombo, slot: Self.pauseSlot) {
-            hotkeyMessage = "\(Self.pauseCombo.label) is already in use by another app; pause has no hotkey."
+            hotkeyMessage =
+                "\(Self.pauseCombo.label) is already in use by another app\(Self.pauseConflictSuffix)"
+        } else if hotkeyMessage?.hasSuffix(Self.pauseConflictSuffix) == true {
+            hotkeyMessage = nil
         }
     }
 
     /// Turns the GIF destination (menu item and hotkey) on or off.
     func setGIFEnabled(_ enabled: Bool) {
         settings.gifEnabled = enabled
-        updateGIFHotkey()
+        // The GIF combo may be the one keeping pause off its hotkey: release pause before the GIF combo
+        // claims it, and give it back once GIF is off.
+        if enabled {
+            updatePauseHotkey()
+            updateGIFHotkey()
+        } else {
+            updateGIFHotkey()
+            updatePauseHotkey()
+        }
     }
 
     private static let gifConflictSuffix = "; GIF has no hotkey."
