@@ -41,6 +41,8 @@ public final class AppState {
     private let uploader: VideoUploader
     private let notifier: Notifier
     private let now: @Sendable () -> Date
+    /// Set while a transition is in flight, so a second hotkey press cannot re-enter it.
+    private var busy = false
 
     public init(
         recorder: ScreenRecorder,
@@ -56,6 +58,9 @@ public final class AppState {
 
     /// The hotkey action.
     public func toggle() async {
+        guard !busy else { return }
+        busy = true
+        defer { busy = false }
         switch phase {
         case .idle, .done, .failed:
             await startRecording()
@@ -67,7 +72,10 @@ public final class AppState {
     }
 
     public func retry() async {
+        guard !busy else { return }
         guard case .failed(_, let file?) = phase else { return }
+        busy = true
+        defer { busy = false }
         await upload(file)
     }
 

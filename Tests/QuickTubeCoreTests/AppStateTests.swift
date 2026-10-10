@@ -8,14 +8,18 @@ final class FakeRecorder: ScreenRecorder, @unchecked Sendable {
     var file = URL(fileURLWithPath: "/tmp/rec.mp4")
     var starts = 0
     var stops = 0
+    /// While true, start() and stop() suspend after counting the call.
+    var hold = false
 
     func start() async throws {
         starts += 1
+        while hold { await Task.yield() }
         if let startError { throw startError }
     }
 
     func stop() async throws -> URL {
         stops += 1
+        while hold { await Task.yield() }
         if let stopError { throw stopError }
         return file
     }
@@ -26,14 +30,19 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
     var error: Error?
     var progressValues: [Double] = []
     var uploads: [(URL, String)] = []
+    /// Called on the main actor after each progress value has had time to land.
+    var onProgress: (@MainActor @Sendable (Double) -> Void)?
+    var lastProgress: (@Sendable (Double) -> Void)?
 
     func upload(
         file: URL, title: String, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> UploadResult {
         uploads.append((file, title))
+        lastProgress = progress
         for value in progressValues {
             progress(value)
             for _ in 0..<5 { await Task.yield() }
+            await onProgress?(value)
         }
         if let error { throw error }
         return result
@@ -46,6 +55,10 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
 
     func linkReady(_ url: URL, isUnlisted: Bool) { links.append((url, isUnlisted)) }
     func failed(_ message: String) { failures.append(message) }
+}
+
+@MainActor final class PhaseLog {
+    var phases: [Phase] = []
 }
 
 @MainActor
@@ -83,9 +96,24 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
     @Test func progressUpdatesPhaseWhileUploading() async {
         uploader.progressValues = [0.25, 0.75]
         let state = makeState()
+        let log = PhaseLog()
+        uploader.onProgress = { _ in log.phases.append(state.phase) }
         await state.toggle()
         await state.toggle()
+        #expect(log.phases == [.uploading(progress: 0.25), .uploading(progress: 0.75)])
         #expect(state.phase == .done(link: URL(string: "https://youtu.be/abc123")!))
+    }
+
+    @Test func lateProgressAfterDoneIsIgnored() async {
+        uploader.progressValues = [0.5]
+        let state = makeState()
+        await state.toggle()
+        await state.toggle()
+        let done = state.phase
+        #expect(done == .done(link: URL(string: "https://youtu.be/abc123")!))
+        uploader.lastProgress?(0.9)
+        for _ in 0..<5 { await Task.yield() }
+        #expect(state.phase == done)
     }
 
     @Test func privateUploadStillPublishesLinkWithWarning() async {
@@ -141,6 +169,45 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         await upload
         #expect(recorder.starts == 1)
         #expect(uploader.uploads.count == 1)
+    }
+
+    @Test func stopFailureGoesToFailedWithoutUpload() async {
+        recorder.stopError = RecorderError.notRecording
+        let state = makeState()
+        await state.toggle()
+        await state.toggle()
+        #expect(
+            state.phase
+                == .failed(message: AppState.message(for: RecorderError.notRecording), file: nil))
+        #expect(uploader.uploads.isEmpty)
+        #expect(notifier.failures.count == 1)
+    }
+
+    @Test func secondToggleWhileStartIsPendingIsIgnored() async {
+        recorder.hold = true
+        let state = makeState()
+        async let first: Void = state.toggle()
+        for _ in 0..<100 where recorder.starts == 0 { await Task.yield() }
+        await state.toggle()  // ignored: start still in flight
+        recorder.hold = false
+        await first
+        #expect(recorder.starts == 1)
+        #expect(state.phase == .recording)
+    }
+
+    @Test func secondToggleWhileStopIsPendingIsIgnored() async {
+        let state = makeState()
+        await state.toggle()
+        recorder.hold = true
+        async let first: Void = state.toggle()
+        for _ in 0..<100 where recorder.stops == 0 { await Task.yield() }
+        await state.toggle()  // ignored: stop still in flight
+        recorder.hold = false
+        await first
+        #expect(recorder.stops == 1)
+        #expect(notifier.failures.isEmpty)
+        #expect(uploader.uploads.count == 1)
+        #expect(state.phase == .done(link: URL(string: "https://youtu.be/abc123")!))
     }
 
     @Test func toggleAfterDoneStartsAgain() async {
