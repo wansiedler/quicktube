@@ -1,9 +1,10 @@
 import AppKit
+import QuickTubeCore
 import SwiftUI
 
 struct SettingsView: View {
     @Bindable var model: AppModel
-    @State private var listening = false
+    @State private var listening: Destination?
     @State private var monitor: Any?
 
     var body: some View {
@@ -50,14 +51,29 @@ struct SettingsView: View {
                     Text(message).font(.callout).foregroundStyle(.secondary)
                 }
             }
-            Section("Shortcut") {
+            Section("Telegram") {
+                SecureField("Bot token", text: $model.telegramToken)
+                TextField("Channel (@name or -100… id)", text: $model.telegramChat)
                 HStack {
-                    Text(model.combo.label).font(.title3.monospaced())
+                    Button("Save Telegram") { model.saveTelegram() }
                     Spacer()
-                    Button(listening ? "Press keys…" : "Change") { startListening() }
-                        .disabled(listening)
+                    Text(model.telegramConfigured ? "Configured" : "Not set up").foregroundStyle(.secondary)
                 }
-                Text("Hold ⌘ or ⌃ (plus any other modifiers).").font(.callout).foregroundStyle(.secondary)
+                Text(
+                    "Create a bot with @BotFather, add it to your channel as admin. Bots accept files up to 50 MB."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+                if let message = model.telegramMessage {
+                    Text(message).font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            Section("Shortcuts") {
+                shortcutRow("Record → YouTube", destination: .youtube)
+                shortcutRow("Record → Telegram", destination: .telegram)
+                Text(
+                    "Hold ⌘ or ⌃ (plus any other modifiers). Either shortcut starts a recording; the one you press to stop picks the destination."
+                )
+                .font(.callout).foregroundStyle(.secondary)
                 if let message = model.hotkeyMessage {
                     Text(message).font(.callout).foregroundStyle(.red)
                 }
@@ -67,10 +83,22 @@ struct SettingsView: View {
         .frame(width: 440)
         .onAppear {
             model.refreshAuth()
+            model.refreshTelegram()
             model.refreshLaunchAtLogin()
             model.refreshPermissions()
         }
         .onDisappear { stopListening() }
+    }
+
+    @ViewBuilder
+    private func shortcutRow(_ name: String, destination: Destination) -> some View {
+        HStack {
+            Text(name)
+            Spacer()
+            Text(model.combo(for: destination).label).font(.title3.monospaced())
+            Button(listening == destination ? "Press keys…" : "Change") { startListening(destination) }
+                .disabled(listening != nil)
+        }
     }
 
     @ViewBuilder
@@ -93,13 +121,13 @@ struct SettingsView: View {
         }
     }
 
-    private func startListening() {
-        listening = true
-        // Release the global hotkey so pressing the current combo is captured, not acted on.
+    private func startListening(_ destination: Destination) {
+        listening = destination
+        // Release the global hotkeys so pressing a current combo is captured, not acted on.
         model.suspendHotkey()
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             if let combo = HotkeyManager.Combo(event: event) {
-                model.setCombo(combo)
+                model.setCombo(combo, for: destination)
             }
             stopListening()
             return nil
@@ -111,9 +139,9 @@ struct SettingsView: View {
             NSEvent.removeMonitor(monitor)
         }
         monitor = nil
-        if listening {
+        if listening != nil {
             model.resumeHotkey()
         }
-        listening = false
+        listening = nil
     }
 }

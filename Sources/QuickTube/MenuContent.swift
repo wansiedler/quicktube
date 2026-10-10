@@ -11,7 +11,8 @@ struct MenuContent: View {
         Divider()
         switch model.state.phase {
         case .recording:
-            Button("Stop Recording and Upload") { Task { await model.state.toggle() } }
+            Button("Stop and Upload to YouTube") { Task { await model.state.toggle(destination: .youtube) } }
+            Button("Stop and Send to Telegram") { Task { await model.state.toggle(destination: .telegram) } }
         case .uploading:
             Button("Uploading…") {}.disabled(true)
         default:
@@ -51,8 +52,10 @@ struct MenuContent: View {
 
     private var statusText: String {
         switch model.state.phase {
-        case .idle: "Ready — \(model.combo.label)"
-        case .recording: "Recording… press \(model.combo.label) to stop"
+        case .idle:
+            "Ready — \(model.combo(for: .youtube).label) YouTube · \(model.combo(for: .telegram).label) Telegram"
+        case .recording:
+            "Recording… \(model.combo(for: .youtube).label) → YouTube, \(model.combo(for: .telegram).label) → Telegram"
         case .uploading(let progress): "Uploading \(Int(progress * 100))%"
         case .done(let link): "Uploaded: \(link.absoluteString)"
         case .failed(let message, _): "Failed: \(message)"

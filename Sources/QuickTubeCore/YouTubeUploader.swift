@@ -1,16 +1,27 @@
 import Foundation
 
 public struct UploadResult: Sendable, Equatable {
-    public let videoID: String
-    public let privacyStatus: String
+    /// What goes on the clipboard.
+    public let link: URL
+    public let videoID: String?
+    public let privacyStatus: String?
 
+    /// A YouTube upload: the link is derived from the video id.
     public init(videoID: String, privacyStatus: String) {
+        self.link = ShareLink.url(forVideoID: videoID)
         self.videoID = videoID
         self.privacyStatus = privacyStatus
     }
 
+    /// Any other destination that hands back a link directly.
+    public init(link: URL) {
+        self.link = link
+        self.videoID = nil
+        self.privacyStatus = nil
+    }
+
     /// False means YouTube overrode the request, usually the unverified-API-project lock.
-    public var isUnlisted: Bool { privacyStatus == "unlisted" }
+    public var isUnlisted: Bool { privacyStatus == nil || privacyStatus == "unlisted" }
 }
 
 public enum UploadError: Error, Equatable {

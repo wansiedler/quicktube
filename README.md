@@ -32,13 +32,27 @@ tells you in the notification; the link is still copied.
 Quota: each upload costs 1600 of the default 10000 daily units, about six
 recordings a day.
 
+## Telegram (optional)
+
+A second shortcut, `⌃⌥⌘T`, stops the recording and sends it to a Telegram
+channel instead of YouTube; the message link goes on the clipboard.
+
+1. Create a bot with [@BotFather](https://t.me/BotFather), copy its token.
+2. Add the bot to your channel as an administrator.
+3. QuickTube → Settings → Telegram: paste the token and the channel
+   (`@name` for a public channel, or the `-100…` id for a private one) → Save.
+
+Bots accept files up to 50 MB (roughly 1–2 minutes of HEVC screen video);
+larger recordings fail with a clear message and stay on disk.
+
 ## Use
 
 | Action | How |
 |---|---|
 | Grant permissions | asked at first launch; status under Settings → Permissions |
 | Start recording | `⌃⌥⌘R` (change in Settings) |
-| Stop and upload | `⌃⌥⌘R` again |
+| Stop and upload to YouTube | `⌃⌥⌘R` again |
+| Stop and send to Telegram | `⌃⌥⌘T` (either shortcut starts a recording) |
 | Watch progress | a small pill at the bottom of the screen: recording timer → upload % → link (click opens it); it is excluded from the recording |
 | Retry a failed upload | menu → Retry Upload |
 | Find the files | menu → Open Recordings Folder (`~/Movies/QuickTube`) |

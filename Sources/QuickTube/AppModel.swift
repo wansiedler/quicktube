@@ -7,14 +7,22 @@ import QuickTubeCore
 @Observable
 final class AppModel {
     let auth: GoogleAuth
+    let telegram: TelegramUploader
     let state: AppState
     private let hotkey = HotkeyManager()
     private let notifier: AppNotifier
     private var hud: HUDController?
-    private static let comboKey = "hotkey.combo"
+    private static let comboKeys: [Destination: String] = [
+        .youtube: "hotkey.combo", .telegram: "hotkey.telegramCombo",
+    ]
+    private static let slots: [Destination: UInt32] = [.youtube: 1, .telegram: 2]
 
-    private(set) var combo: HotkeyManager.Combo
+    private(set) var combos: [Destination: HotkeyManager.Combo] = [:]
     var hotkeyMessage: String?
+    var telegramToken = ""
+    var telegramChat = ""
+    var telegramConfigured = false
+    var telegramMessage: String?
     var clientID = ""
     var clientSecret = ""
     var signedIn = false
@@ -27,23 +35,37 @@ final class AppModel {
     private(set) var screenRecordingStatus = Permissions.screenRecording
 
     init() {
-        let auth = GoogleAuth(store: KeychainStore())
+        let store = KeychainStore()
+        let auth = GoogleAuth(store: store)
         self.auth = auth
+        let telegram = TelegramUploader(store: store, log: { DiagnosticsLog.append($0) })
+        self.telegram = telegram
         let notifier = AppNotifier()
         self.notifier = notifier
         self.state = AppState(
             recorder: Recorder(),
-            uploader: YouTubeUploader(tokens: auth, log: { DiagnosticsLog.append($0) }),
+            uploaders: [
+                .youtube: YouTubeUploader(tokens: auth, log: { DiagnosticsLog.append($0) }),
+                .telegram: telegram,
+            ],
             notifier: notifier)
-        self.combo =
-            UserDefaults.standard.data(forKey: Self.comboKey)
-            .flatMap { try? JSONDecoder().decode(HotkeyManager.Combo.self, from: $0) } ?? .default
-        hotkey.onPress = { [weak self] in
-            guard let self else { return }
-            Task { await self.state.toggle() }
+        for destination in Destination.allCases {
+            let fallback: HotkeyManager.Combo = destination == .youtube ? .default : .telegramDefault
+            combos[destination] =
+                UserDefaults.standard.data(forKey: Self.comboKeys[destination]!)
+                .flatMap { try? JSONDecoder().decode(HotkeyManager.Combo.self, from: $0) } ?? fallback
         }
-        if !hotkey.register(combo) {
-            hotkeyMessage = "\(combo.label) is already in use by another app. Choose another shortcut."
+        hotkey.onPress = { [weak self] slot in
+            guard let self, let destination = Self.slots.first(where: { $0.value == slot })?.key else {
+                return
+            }
+            Task { await self.state.toggle(destination: destination) }
+        }
+        for destination in Destination.allCases {
+            let combo = combos[destination]!
+            if !hotkey.register(combo, slot: Self.slots[destination]!) {
+                hotkeyMessage = "\(combo.label) is already in use by another app. Choose another shortcut."
+            }
         }
         // A revoked or missing token surfaces during upload; re-read the Keychain so
         // Settings stops showing "Signed in".
@@ -54,6 +76,7 @@ final class AppModel {
         hud = HUDController(state: state)
         notifier.requestPermission()
         refreshAuth()
+        refreshTelegram()
         // Ask for the recording grants now, so the first hotkey press records instead of prompting.
         if Bundle.main.bundleIdentifier != nil {
             Task {
@@ -78,18 +101,64 @@ final class AppModel {
         screenRecordingStatus = Permissions.requestScreenRecording()
     }
 
-    /// Registers `newCombo` and persists it; on failure keeps the previous shortcut and says why.
-    func setCombo(_ newCombo: HotkeyManager.Combo) {
-        let previous = combo
-        if hotkey.register(newCombo) {
-            combo = newCombo
+    func combo(for destination: Destination) -> HotkeyManager.Combo {
+        combos[destination] ?? (destination == .youtube ? .default : .telegramDefault)
+    }
+
+    /// Registers `newCombo` for `destination` and persists it; on failure keeps the previous shortcut.
+    func setCombo(_ newCombo: HotkeyManager.Combo, for destination: Destination) {
+        let previous = combo(for: destination)
+        let slot = Self.slots[destination]!
+        if let other = combos.first(where: { $0.key != destination && $0.value == newCombo }) {
+            hotkeyMessage = "\(newCombo.label) is already the \(other.key.label) shortcut."
+            return
+        }
+        if hotkey.register(newCombo, slot: slot) {
+            combos[destination] = newCombo
             hotkeyMessage = nil
             if let data = try? JSONEncoder().encode(newCombo) {
-                UserDefaults.standard.set(data, forKey: Self.comboKey)
+                UserDefaults.standard.set(data, forKey: Self.comboKeys[destination]!)
             }
         } else {
-            hotkey.register(previous)
+            hotkey.register(previous, slot: slot)
             hotkeyMessage = "\(newCombo.label) is already in use by another app. Kept \(previous.label)."
+        }
+    }
+
+    func refreshTelegram() {
+        Task {
+            do {
+                if let configuration = try await telegram.configuration() {
+                    telegramToken = configuration.botToken
+                    telegramChat = configuration.chat
+                    telegramConfigured = true
+                } else {
+                    telegramConfigured = false
+                }
+            } catch {
+                telegramMessage = "Keychain error: \(error)"
+            }
+        }
+    }
+
+    func saveTelegram() {
+        let configuration = TelegramConfiguration(
+            botToken: telegramToken.trimmingCharacters(in: .whitespacesAndNewlines),
+            chat: telegramChat.trimmingCharacters(in: .whitespacesAndNewlines))
+        Task {
+            do {
+                if configuration.botToken.isEmpty || configuration.chat.isEmpty {
+                    try await telegram.clearConfiguration()
+                    telegramConfigured = false
+                    telegramMessage = "Telegram cleared."
+                } else {
+                    try await telegram.setConfiguration(configuration)
+                    telegramConfigured = true
+                    telegramMessage = "Telegram saved."
+                }
+            } catch {
+                telegramMessage = "Could not save to Keychain: \(error)"
+            }
         }
     }
 

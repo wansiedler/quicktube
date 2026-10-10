@@ -275,6 +275,48 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         #expect(recorder.starts == 2)
     }
 
+    @Test func stopHotkeyPicksTheDestination() async {
+        let telegram = FakeUploader()
+        telegram.result = UploadResult(link: URL(string: "https://t.me/c/1/2")!)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader, .telegram: telegram], notifier: notifier)
+        await state.toggle(destination: .telegram)
+        await state.toggle(destination: .telegram)
+        #expect(state.phase == .done(link: URL(string: "https://t.me/c/1/2")!))
+        #expect(state.destination == .telegram)
+        #expect(uploader.uploads.isEmpty)
+        #expect(telegram.uploads.count == 1)
+        #expect(notifier.links.last?.1 == true)
+    }
+
+    @Test func retryReusesTheFailedDestination() async {
+        let telegram = FakeUploader()
+        telegram.error = TelegramError.notConfigured
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader, .telegram: telegram], notifier: notifier)
+        await state.toggle()
+        await state.toggle(destination: .telegram)
+        #expect(
+            state.phase
+                == .failed(message: AppState.message(for: TelegramError.notConfigured), file: recorder.file))
+        telegram.error = nil
+        telegram.result = UploadResult(link: URL(string: "https://t.me/c/1/3")!)
+        await state.retry()
+        #expect(state.phase == .done(link: URL(string: "https://t.me/c/1/3")!))
+        #expect(uploader.uploads.isEmpty)
+    }
+
+    @Test func missingDestinationFailsWithFileKept() async {
+        let state = makeState()
+        await state.toggle()
+        await state.toggle(destination: .telegram)
+        #expect(
+            state.phase
+                == .failed(
+                    message: AppState.message(for: DestinationError.unavailable(.telegram)),
+                    file: recorder.file))
+    }
+
     @Test func messagesAreHumanReadable() {
         let signIn = "Sign in to Google in Settings, then retry the upload."
         #expect(AppState.message(for: AuthError.notSignedIn) == signIn)

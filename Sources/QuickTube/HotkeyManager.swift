@@ -13,6 +13,10 @@ final class HotkeyManager {
             keyCode: UInt32(kVK_ANSI_R),
             modifiers: UInt32(controlKey | optionKey | cmdKey),
             label: "⌃⌥⌘R")
+        static let telegramDefault = Combo(
+            keyCode: UInt32(kVK_ANSI_T),
+            modifiers: UInt32(controlKey | optionKey | cmdKey),
+            label: "⌃⌥⌘T")
 
         init(keyCode: UInt32, modifiers: UInt32, label: String) {
             self.keyCode = keyCode
@@ -50,18 +54,24 @@ final class HotkeyManager {
         }
     }
 
-    var onPress: () -> Void = {}
-    private var hotKeyRef: EventHotKeyRef?
+    /// Called with the slot number of the hotkey that fired.
+    var onPress: (UInt32) -> Void = { _ in }
+    private var refs: [UInt32: EventHotKeyRef] = [:]
     private var handlerRef: EventHandlerRef?
-    private var active: Combo?
+    private var active: [UInt32: Combo] = [:]
 
     init() {
         var spec = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        let callback: EventHandlerUPP = { _, _, userData in
-            guard let userData else { return noErr }
+        let callback: EventHandlerUPP = { _, event, userData in
+            guard let userData, let event else { return noErr }
+            var hotKeyID = EventHotKeyID()
+            GetEventParameter(
+                event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
+                MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID)
             let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
-            MainActor.assumeIsolated { manager.onPress() }
+            let slot = hotKeyID.id
+            MainActor.assumeIsolated { manager.onPress(slot) }
             return noErr
         }
         let status = InstallEventHandler(
@@ -72,39 +82,39 @@ final class HotkeyManager {
         }
     }
 
-    /// Replaces the registered hotkey. False when the system refuses the combo (e.g. taken by another app);
-    /// nothing is registered then.
+    /// Replaces the hotkey in `slot`. False when the system refuses the combo (e.g. taken by another
+    /// app); nothing is registered in that slot then.
     @discardableResult
-    func register(_ combo: Combo) -> Bool {
-        unregister()
+    func register(_ combo: Combo, slot: UInt32) -> Bool {
+        unregister(slot)
         var ref: EventHotKeyRef?
-        let id = EventHotKeyID(signature: 0x5154_5542, id: 1)  // "QTUB"
+        let id = EventHotKeyID(signature: 0x5154_5542, id: slot)  // "QTUB"
         let status = RegisterEventHotKey(
             combo.keyCode, combo.modifiers, id, GetApplicationEventTarget(), 0, &ref)
         guard status == noErr, let ref else {
             print("QuickTube: RegisterEventHotKey(\(combo.label)) failed with status \(status)")
             return false
         }
-        hotKeyRef = ref
-        active = combo
+        refs[slot] = ref
+        active[slot] = combo
         return true
     }
 
-    /// Temporarily releases the hotkey, e.g. while Settings records a new combo.
+    /// Temporarily releases every hotkey, e.g. while Settings records a new combo.
     func suspend() {
-        unregister()
+        for slot in Array(refs.keys) { unregister(slot) }
     }
 
-    /// Re-registers the last successfully registered combo if it is currently released.
+    /// Re-registers every combo that was registered before `suspend()`.
     func resume() {
-        guard hotKeyRef == nil, let active else { return }
-        register(active)
+        for (slot, combo) in active where refs[slot] == nil {
+            register(combo, slot: slot)
+        }
     }
 
-    private func unregister() {
-        if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-            self.hotKeyRef = nil
+    private func unregister(_ slot: UInt32) {
+        if let ref = refs.removeValue(forKey: slot) {
+            UnregisterEventHotKey(ref)
         }
     }
 }
