@@ -54,6 +54,11 @@ public actor Recorder: ScreenRecorder {
         return Unchecked(value: content)
     }
 
+    /// Same reason: awaiting `stopCapture()` on actor-owned stream state counts as sending it.
+    private nonisolated static func stopCapture(_ stream: Unchecked<SCStream>) async throws {
+        try await stream.value.stopCapture()
+    }
+
     private func beginSession() async throws -> Session {
         guard await AVCaptureDevice.requestAccess(for: .audio) else {
             throw RecorderError.microphonePermissionDenied
@@ -100,7 +105,7 @@ public actor Recorder: ScreenRecorder {
         guard case .recording(let session) = state else { throw RecorderError.notRecording }
         state = .stopping
         defer { state = .idle }
-        try await session.stream.stopCapture()
+        try await Self.stopCapture(Unchecked(value: session.stream))
         try await session.delegate.waitUntilFinished(
             timeout: Self.stopTimeout, timeoutError: RecorderError.stopTimedOut(file: session.fileURL))
         return session.fileURL
