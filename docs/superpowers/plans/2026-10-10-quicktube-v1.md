@@ -308,7 +308,7 @@ import QuickTubeCore
 import Testing
 
 @Suite struct RecordingNamingTests {
-    let date = Date(timeIntervalSince1970: 1_760_088_600)  // 2026-10-10 09:30:00 UTC
+    let date = Date(timeIntervalSince1970: 1_791_624_600)  // 2026-10-10 09:30:00 UTC
     let utc = TimeZone(identifier: "UTC")!
 
     @Test func titleIsSortableTimestamp() {
@@ -1436,7 +1436,7 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
     let recorder = FakeRecorder()
     let uploader = FakeUploader()
     let notifier = FakeNotifier()
-    let now = Date(timeIntervalSince1970: 1_760_088_600)
+    let now = Date(timeIntervalSince1970: 1_791_624_600)
 
     func makeState() -> AppState {
         AppState(recorder: recorder, uploader: uploader, notifier: notifier, now: { now })
