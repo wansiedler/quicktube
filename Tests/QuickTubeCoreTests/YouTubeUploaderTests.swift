@@ -136,7 +136,204 @@ extension NetworkSuite {
             let result = try await uploader.upload(file: file, title: "T") { _ in }
             #expect(result.isUnlisted == false)
         }
+
+        func makeUploader(
+            chunkSize: Int, maxAttempts: Int, sleep: @escaping @Sendable (Duration) async throws -> Void
+        ) -> YouTubeUploader {
+            StubURLProtocol.reset()
+            return YouTubeUploader(
+                tokens: FixedTokens(), session: StubURLProtocol.makeSession(),
+                chunkSize: chunkSize, maxAttempts: maxAttempts, sleep: sleep)
+        }
+
+        func ranges(_ requests: [URLRequest]) -> [String?] {
+            requests.map { $0.value(forHTTPHeaderField: "Content-Range") }
+        }
+
+        @Test func failedStatusQueryIsRetriedWithBackoff() async throws {
+            let sleeps = DurationLog()
+            let uploader = makeUploader(chunkSize: 8, maxAttempts: 4) { sleeps.add($0) }
+            let file = try makeFile(bytes: 8)
+            StubURLProtocol.enqueue(.init(status: 200, headers: ["Location": sessionURL]))
+            StubURLProtocol.enqueue(.init(status: 500))  // chunk
+            StubURLProtocol.enqueue(.init(status: 503))  // query fails
+            StubURLProtocol.enqueue(.init(status: 308))  // query: nothing committed
+            StubURLProtocol.enqueue(.init(status: 200, body: done))
+            let result = try await uploader.upload(file: file, title: "T") { _ in }
+            #expect(result.videoID == "vid123")
+            #expect(
+                ranges(StubURLProtocol.requests).dropFirst()
+                    == ["bytes 0-7/8", "bytes */8", "bytes */8", "bytes 0-7/8"])
+            #expect(sleeps.values == [.seconds(2), .seconds(4)])
+        }
+
+        @Test func statusQueryNetworkErrorIsRetried() async throws {
+            let sleeps = DurationLog()
+            // The first query finds no stub handler and fails with a URLError;
+            // the script for the retry is queued while backing off.
+            let uploader = makeUploader(chunkSize: 8, maxAttempts: 4) { duration in
+                sleeps.add(duration)
+                if sleeps.values.count == 2 {
+                    StubURLProtocol.enqueue(.init(status: 308))
+                    StubURLProtocol.enqueue(.init(status: 200, body: self.done))
+                }
+            }
+            let file = try makeFile(bytes: 8)
+            StubURLProtocol.enqueue(.init(status: 200, headers: ["Location": sessionURL]))
+            StubURLProtocol.enqueue(.init(status: 500))  // chunk
+            _ = try await uploader.upload(file: file, title: "T") { _ in }
+            #expect(
+                ranges(StubURLProtocol.requests).dropFirst()
+                    == ["bytes 0-7/8", "bytes */8", "bytes */8", "bytes 0-7/8"])
+            #expect(sleeps.values == [.seconds(2), .seconds(4)])
+        }
+
+        @Test func nonAdvancingChunkResponsesExhaustRetries() async throws {
+            let uploader = makeUploader(chunkSize: 4, maxAttempts: 2)
+            let file = try makeFile(bytes: 8)
+            StubURLProtocol.enqueue(.init(status: 200, headers: ["Location": sessionURL]))
+            StubURLProtocol.enqueue(.init(status: 308, headers: ["Range": "bytes=0-3"]))
+            StubURLProtocol.enqueue(.init(status: 308, headers: ["Range": "bytes=0-3"]))
+            StubURLProtocol.enqueue(.init(status: 308, headers: ["Range": "bytes=0-3"]))
+            StubURLProtocol.enqueue(.init(status: 308, headers: ["Range": "bytes=0-3"]))
+            await #expect(throws: UploadError.exhaustedRetries) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+        }
+
+        @Test func chunkResponseWithoutRangeMeansNothingCommitted() async throws {
+            let uploader = makeUploader(chunkSize: 4, maxAttempts: 2)
+            let file = try makeFile(bytes: 8)
+            StubURLProtocol.enqueue(.init(status: 200, headers: ["Location": sessionURL]))
+            StubURLProtocol.enqueue(.init(status: 308))
+            StubURLProtocol.enqueue(.init(status: 308))  // query: still nothing
+            StubURLProtocol.enqueue(.init(status: 200, body: done))
+            _ = try await uploader.upload(file: file, title: "T") { _ in }
+            #expect(
+                ranges(StubURLProtocol.requests).dropFirst()
+                    == ["bytes 0-3/8", "bytes */8", "bytes 0-3/8"])
+        }
+
+        @Test func backoffDoublesPerRetry() async throws {
+            let sleeps = DurationLog()
+            let uploader = makeUploader(chunkSize: 8, maxAttempts: 3) { sleeps.add($0) }
+            let file = try makeFile(bytes: 8)
+            StubURLProtocol.enqueue(.init(status: 200, headers: ["Location": sessionURL]))
+            StubURLProtocol.enqueue(.init(status: 500))
+            StubURLProtocol.enqueue(.init(status: 308))
+            StubURLProtocol.enqueue(.init(status: 500))
+            StubURLProtocol.enqueue(.init(status: 308))
+            StubURLProtocol.enqueue(.init(status: 500))
+            await #expect(throws: UploadError.exhaustedRetries) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+            #expect(sleeps.values == [.seconds(2), .seconds(4)])
+        }
+
+        @Test func clientErrorOnChunkIsNotRetried() async throws {
+            let sleeps = DurationLog()
+            let uploader = makeUploader(chunkSize: 8, maxAttempts: 3) { sleeps.add($0) }
+            let file = try makeFile(bytes: 8)
+            StubURLProtocol.enqueue(.init(status: 200, headers: ["Location": sessionURL]))
+            StubURLProtocol.enqueue(.init(status: 400))
+            await #expect(throws: UploadError.badResponse(400)) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+            #expect(StubURLProtocol.requests.count == 2)
+            #expect(sleeps.values.isEmpty)
+        }
+
+        @Test func quotaExceededOnChunkIsReported() async throws {
+            let uploader = makeUploader(chunkSize: 8)
+            let file = try makeFile(bytes: 8)
+            let body = Data("{\"error\":{\"errors\":[{\"reason\":\"quotaExceeded\"}]}}".utf8)
+            StubURLProtocol.enqueue(.init(status: 200, headers: ["Location": sessionURL]))
+            StubURLProtocol.enqueue(.init(status: 403, body: body))
+            await #expect(throws: UploadError.quotaExceeded) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+        }
+
+        @Test func unauthorizedOnSessionCreationIsReported() async throws {
+            let uploader = makeUploader()
+            let file = try makeFile(bytes: 2)
+            StubURLProtocol.enqueue(.init(status: 401))
+            await #expect(throws: UploadError.unauthorized) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+        }
+
+        @Test func unauthorizedMidUploadIsReported() async throws {
+            let uploader = makeUploader(chunkSize: 4)
+            let file = try makeFile(bytes: 8)
+            StubURLProtocol.enqueue(.init(status: 200, headers: ["Location": sessionURL]))
+            StubURLProtocol.enqueue(.init(status: 308, headers: ["Range": "bytes=0-3"]))
+            StubURLProtocol.enqueue(.init(status: 401))
+            await #expect(throws: UploadError.unauthorized) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+        }
+
+        @Test func expiredSessionIsReported() async throws {
+            for status in [404, 410] {
+                let uploader = makeUploader(chunkSize: 8)
+                let file = try makeFile(bytes: 8)
+                StubURLProtocol.enqueue(.init(status: 200, headers: ["Location": sessionURL]))
+                StubURLProtocol.enqueue(.init(status: status))
+                await #expect(throws: UploadError.sessionExpired) {
+                    _ = try await uploader.upload(file: file, title: "T") { _ in }
+                }
+            }
+        }
+
+        @Test func emptyFileIsUnreadable() async throws {
+            let uploader = makeUploader()
+            let file = try makeFile(bytes: 0)
+            await #expect(throws: UploadError.fileUnreadable) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+            #expect(StubURLProtocol.requests.isEmpty)
+        }
+
+        @Test func cancelledSleepPropagatesWithoutRetry() async throws {
+            let sleeps = DurationLog()
+            let uploader = makeUploader(chunkSize: 8, maxAttempts: 5) {
+                sleeps.add($0)
+                throw URLError(.cancelled)
+            }
+            let file = try makeFile(bytes: 8)
+            StubURLProtocol.enqueue(.init(status: 200, headers: ["Location": sessionURL]))
+            StubURLProtocol.enqueue(.init(status: 500))
+            await #expect(throws: URLError(.cancelled)) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+            #expect(sleeps.values.count == 1)
+            #expect(StubURLProtocol.requests.count == 2)
+        }
+
+        @Test func cancelledTaskStopsUpload() async throws {
+            let uploader = makeUploader(chunkSize: 4)
+            let file = try makeFile(bytes: 8)
+            StubURLProtocol.enqueue(.init(status: 200, headers: ["Location": sessionURL]))
+            StubURLProtocol.enqueue(.init(status: 308, headers: ["Range": "bytes=0-3"]))
+            StubURLProtocol.enqueue(.init(status: 200, body: done))
+            let task = Task { try await uploader.upload(file: file, title: "T") { _ in } }
+            task.cancel()
+            do {
+                _ = try await task.value
+                Issue.record("expected cancellation")
+            } catch is CancellationError {
+            } catch let error as URLError where error.code == .cancelled {
+            }
+        }
     }
+}
+
+final class DurationLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [Duration] = []
+    var values: [Duration] { lock.withLock { stored } }
+    func add(_ value: Duration) { lock.withLock { stored.append(value) } }
 }
 
 final class ProgressLog: @unchecked Sendable {

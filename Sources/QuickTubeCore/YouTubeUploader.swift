@@ -19,6 +19,8 @@ public enum UploadError: Error, Equatable {
     case quotaExceeded
     case exhaustedRetries
     case badResponse(Int)
+    case unauthorized
+    case sessionExpired
 }
 
 public protocol VideoUploader: Sendable {
@@ -55,31 +57,64 @@ public actor YouTubeUploader: VideoUploader {
     public func upload(
         file: URL, title: String, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> UploadResult {
-        let data: Data
+        let size: Int
+        let handle: FileHandle
         do {
-            data = try Data(contentsOf: file, options: .mappedIfSafe)
+            let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+            size = (attributes[.size] as? NSNumber)?.intValue ?? 0
+            guard size > 0 else { throw UploadError.fileUnreadable }
+            handle = try FileHandle(forReadingFrom: file)
         } catch {
             throw UploadError.fileUnreadable
         }
-        let size = data.count
-        guard size > 0 else { throw UploadError.fileUnreadable }
+        defer { try? handle.close() }
         let sessionURL = try await createSession(title: title, size: size)
 
         var offset = 0
         var attempt = 0
+        var needsQuery = false
         while true {
+            try Task.checkCancellation()
+            if needsQuery {
+                try await sleep(.seconds(1 << attempt))
+                do {
+                    switch try await queryStatus(sessionURL, size: size) {
+                    case .resume(let committed):
+                        if committed > offset { attempt = 0 }
+                        offset = committed
+                        needsQuery = false
+                    case .completed(let result):
+                        progress(1)
+                        return result
+                    }
+                } catch  where Self.isRetryable(error) {
+                    attempt += 1
+                    guard attempt < maxAttempts else { throw UploadError.exhaustedRetries }
+                }
+                continue
+            }
+
             let end = min(offset + chunkSize, size)
+            let chunk: Data
+            do {
+                try handle.seek(toOffset: UInt64(offset))
+                chunk = try handle.read(upToCount: end - offset) ?? Data()
+            } catch {
+                throw UploadError.fileUnreadable
+            }
+            guard chunk.count == end - offset else { throw UploadError.fileUnreadable }
             var request = try await authorized(URLRequest(url: sessionURL))
             request.httpMethod = "PUT"
             request.setValue("bytes \(offset)-\(end - 1)/\(size)", forHTTPHeaderField: "Content-Range")
             do {
-                let (body, response) = try await session.upload(
-                    for: request, from: data.subdata(in: offset..<end))
+                let (body, response) = try await session.upload(for: request, from: chunk)
                 let http = try Self.http(response)
                 switch http.statusCode {
                 case 308:
-                    offset = Self.nextOffset(
-                        rangeHeader: http.value(forHTTPHeaderField: "Range"), fallback: end)
+                    let committed = Self.nextOffset(
+                        rangeHeader: http.value(forHTTPHeaderField: "Range"), fallback: 0)
+                    guard committed > offset else { throw Retry() }
+                    offset = committed
                     attempt = 0
                     progress(Double(offset) / Double(size))
                 case 200, 201:
@@ -90,17 +125,10 @@ public actor YouTubeUploader: VideoUploader {
                 default:
                     throw Self.error(status: http.statusCode, body: body)
                 }
-            } catch let error where error is Retry || error is URLError {
+            } catch  where Self.isRetryable(error) {
                 attempt += 1
                 guard attempt < maxAttempts else { throw UploadError.exhaustedRetries }
-                try await sleep(.seconds(1 << attempt))
-                switch try await queryStatus(sessionURL, size: size) {
-                case .resume(let committed):
-                    offset = committed
-                case .completed(let result):
-                    progress(1)
-                    return result
-                }
+                needsQuery = true
             }
         }
     }
@@ -156,6 +184,8 @@ public actor YouTubeUploader: VideoUploader {
             return .resume(Self.nextOffset(rangeHeader: http.value(forHTTPHeaderField: "Range"), fallback: 0))
         case 200, 201:
             return .completed(try Self.parseResult(body))
+        case 500...599:
+            throw Retry()
         default:
             throw Self.error(status: http.statusCode, body: body)
         }
@@ -164,6 +194,13 @@ public actor YouTubeUploader: VideoUploader {
     // MARK: - Helpers
 
     private struct Retry: Error {}
+
+    /// Transient failures only; a cancelled request must stop the upload.
+    private static func isRetryable(_ error: Error) -> Bool {
+        if error is Retry { return true }
+        if let urlError = error as? URLError { return urlError.code != .cancelled }
+        return false
+    }
 
     private func authorized(_ request: URLRequest) async throws -> URLRequest {
         var request = request
@@ -204,6 +241,10 @@ public actor YouTubeUploader: VideoUploader {
         if status == 403, String(decoding: body, as: UTF8.self).contains("quotaExceeded") {
             return .quotaExceeded
         }
-        return .badResponse(status)
+        switch status {
+        case 401: return .unauthorized
+        case 404, 410: return .sessionExpired
+        default: return .badResponse(status)
+        }
     }
 }
