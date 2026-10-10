@@ -21,13 +21,19 @@ public enum CameraLayout {
         }
     }
 
-    /// Smallest bubble shrunk to fit a small recording area.
+    /// Smallest bubble; an area too small for it gets none.
     public static let minimumSize: CGFloat = 48
 
-    /// `size`, shrunk so the bubble and its insets fit inside `area`, but never below `minimumSize`.
-    public static func fittedSize(_ size: CGFloat, in area: CGRect, inset: CGFloat = inset) -> CGFloat {
-        let room = min(area.width, area.height) - 2 * inset
-        return min(size, max(minimumSize, room))
+    /// Size and inset for a bubble of `size` that stays wholly inside `area`: shrunk to the smaller side
+    /// minus both insets, and when that is below `minimumSize`, the inset shrinks instead. Nil when the
+    /// smaller side is under `minimumSize`.
+    public static func fit(
+        _ size: CGFloat, in area: CGRect, inset: CGFloat = inset
+    ) -> (size: CGFloat, inset: CGFloat)? {
+        let side = min(area.width, area.height)
+        guard side >= minimumSize else { return nil }
+        let inset = min(inset, (side - minimumSize) / 2)
+        return (min(size, side - 2 * inset), inset)
     }
 
     /// A region of a display (`rect` in the display's points, origin top-left, as `CaptureTarget.region`

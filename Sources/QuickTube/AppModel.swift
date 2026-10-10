@@ -16,8 +16,6 @@ final class AppModel {
     private let camera = CameraPanel()
     /// The windows the recorder leaves out; filled in once the HUD exists.
     private let exclusions = WindowExclusions()
-    /// Whether the camera session was last told to run; it stays warm while the bubble is enabled.
-    @ObservationIgnored private var cameraRunning = false
     @ObservationIgnored private var activationObserver: NSObjectProtocol?
     private static let comboKeys: [Destination: String] = [
         .youtube: "hotkey.combo", .telegram: "hotkey.telegramCombo",
@@ -197,16 +195,13 @@ final class AppModel {
         }
     }
 
-    /// The camera runs while the bubble is enabled and granted. The bubble shows while a recording starts,
-    /// runs or is paused, placed in the captured area, and always (on the screen under the cursor) when
-    /// "always on" is set too. Reads only observable state, so a grant or settings change re-runs it.
+    /// With the bubble enabled and granted, it shows while a recording starts, runs or is paused, placed
+    /// in the captured area, and always (on the screen under the cursor) when "always on" is set too.
+    /// The camera runs only while the bubble shows. Reads only observable state, so a grant or settings
+    /// change re-runs it.
     private func updateCamera() {
         let settings = settings
         let enabled = settings.cameraEnabled && cameraStatus == .granted
-        if enabled != cameraRunning {
-            cameraRunning = enabled
-            if enabled { camera.startCamera() } else { camera.stopCamera() }
-        }
         let recording: Bool
         switch state.phase {
         case .recording, .paused: recording = true

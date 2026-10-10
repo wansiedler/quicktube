@@ -4,8 +4,7 @@ import QuickTubeCore
 
 /// A round, always-on-top bubble showing the default camera, mirrored. It is an ordinary window to
 /// ScreenCaptureKit, so it is recorded with the screen. Drag it anywhere; it never takes focus.
-/// The camera runs (`startCamera`) independently of the bubble being shown, so the bubble can appear
-/// with a live picture the moment a recording starts.
+/// The camera runs only while the bubble is up: `show` starts it, `hide` stops it (the light goes off).
 @MainActor
 final class CameraPanel {
     private let panel: NSPanel
@@ -37,19 +36,10 @@ final class CameraPanel {
         panel.contentView = bubble
     }
 
-    /// Configures (first time) and starts the camera on the session queue; the camera light turns on.
-    func startCamera() {
-        camera.start { [weak self] in self?.mirror() }
-    }
-
-    /// Stops the camera on the session queue; the camera light goes off.
-    func stopCamera() {
-        camera.stop()
-    }
-
-    /// Orders the bubble in, at `corner` of `area` (AppKit coordinates), or of the visible frame of the
-    /// screen under the cursor when `area` is nil. A visible bubble moves only when the size, the corner
-    /// or a given `area` changed.
+    /// Orders the bubble in and starts the camera (configured on first use), at `corner` of `area`
+    /// (AppKit coordinates), or of the visible frame of the screen under the cursor when `area` is nil.
+    /// A visible bubble moves only when the size, the corner or a given `area` changed. An area too
+    /// small for a bubble hides it.
     func show(size: CGFloat, corner: Corner, in area: CGRect?) {
         let visible = panel.isVisible
         if let placement, visible, placement.size == size, placement.corner == corner,
@@ -57,15 +47,23 @@ final class CameraPanel {
         {
             return
         }
-        guard let target = area ?? Self.screenUnderCursor() else { return }
-        place(size: size, corner: corner, in: target)
-        if !visible { panel.orderFrontRegardless() }
+        guard let target = area ?? Self.screenUnderCursor(), place(size: size, corner: corner, in: target)
+        else {
+            hide()
+            return
+        }
+        if !visible {
+            panel.orderFrontRegardless()
+            camera.start { [weak self] in self?.mirror() }
+        }
     }
 
+    /// Hides the bubble and stops the camera.
     func hide() {
         guard panel.isVisible else { return }
         panel.orderOut(nil)
         placement = nil
+        camera.stop()
     }
 
     private static func screenUnderCursor() -> CGRect? {
@@ -74,12 +72,15 @@ final class CameraPanel {
         return (underCursor ?? NSScreen.main)?.visibleFrame
     }
 
-    private func place(size wanted: CGFloat, corner: Corner, in area: CGRect) {
-        let size = CameraLayout.fittedSize(wanted, in: area)
-        let origin = CameraLayout.origin(for: corner, size: size, in: area)
-        panel.setFrame(NSRect(origin: origin, size: NSSize(width: size, height: size)), display: true)
-        bubble.resize(diameter: size, preview: previewLayer)
+    /// False when `area` is too small for a bubble.
+    private func place(size wanted: CGFloat, corner: Corner, in area: CGRect) -> Bool {
+        guard let fit = CameraLayout.fit(wanted, in: area) else { return false }
+        let origin = CameraLayout.origin(for: corner, size: fit.size, in: area, inset: fit.inset)
+        panel.setFrame(
+            NSRect(origin: origin, size: NSSize(width: fit.size, height: fit.size)), display: true)
+        bubble.resize(diameter: fit.size, preview: previewLayer)
         placement = (wanted, corner, area)
+        return true
     }
 
     /// The preview connection exists once the input is added; mirror it like a FaceTime preview.

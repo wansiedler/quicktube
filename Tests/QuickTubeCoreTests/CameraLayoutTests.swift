@@ -22,17 +22,31 @@ import Testing
         #expect(origin == CGPoint(x: 24, y: 24))
     }
 
-    @Test func fittedSizeKeepsTheBubbleWhenThereIsRoom() {
-        #expect(CameraLayout.fittedSize(220, in: CGRect(x: 0, y: 0, width: 800, height: 600)) == 220)
+    @Test func fitKeepsTheBubbleWhenThereIsRoom() {
+        let fit = CameraLayout.fit(220, in: CGRect(x: 0, y: 0, width: 800, height: 600))
+        #expect(fit?.size == 220)
+        #expect(fit?.inset == 24)
     }
 
-    @Test func fittedSizeShrinksToTheSmallerSideMinusInsets() {
+    @Test func fitShrinksToTheSmallerSideMinusInsets() {
         // 300 - 2 × 24 = 252 < 300.
-        #expect(CameraLayout.fittedSize(300, in: CGRect(x: 50, y: 50, width: 900, height: 300)) == 252)
+        let fit = CameraLayout.fit(300, in: CGRect(x: 50, y: 50, width: 900, height: 300))
+        #expect(fit?.size == 252)
+        #expect(fit?.inset == 24)
     }
 
-    @Test func fittedSizeNeverGoesBelowTheMinimum() {
-        #expect(CameraLayout.fittedSize(160, in: CGRect(x: 0, y: 0, width: 40, height: 40)) == 48)
+    @Test(arguments: [CGFloat(48), 60, 95])
+    func narrowAreasShrinkTheInsetSoTheBubbleStaysInside(side: CGFloat) throws {
+        let area = CGRect(x: 10, y: 10, width: side, height: 500)
+        let fit = try #require(CameraLayout.fit(160, in: area))
+        #expect(fit.size >= CameraLayout.minimumSize)
+        #expect(fit.size + 2 * fit.inset <= side)
+        let origin = CameraLayout.origin(for: .topRight, size: fit.size, in: area, inset: fit.inset)
+        #expect(origin.x >= area.minX && origin.x + fit.size <= area.maxX)
+    }
+
+    @Test func areasUnderTheMinimumGetNoBubble() {
+        #expect(CameraLayout.fit(160, in: CGRect(x: 0, y: 0, width: 47, height: 400)) == nil)
     }
 
     @Test func regionIsFlippedIntoGlobalAppKitCoordinates() {
