@@ -13,7 +13,7 @@ final class HUDController {
 
     init(state: AppState) {
         self.state = state
-        hosting = NSHostingView(rootView: HUDView(state: state))
+        hosting = NSHostingView(rootView: HUDView(state: state, maxWidth: 480))
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 320, height: 44),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -62,13 +62,16 @@ final class HUDController {
     }
 
     private func show() {
-        hosting.rootView = HUDView(state: state)
-        hosting.layoutSubtreeIfNeeded()
-        let size = hosting.fittingSize
         let mouse = NSEvent.mouseLocation
         let underCursor = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
         guard let screen = underCursor ?? NSScreen.main else { return }
         let visible = screen.visibleFrame
+        // Errors get the whole screen width so the server's message is readable.
+        let maxWidth: CGFloat
+        if case .failed = state.phase { maxWidth = visible.width - 48 } else { maxWidth = 480 }
+        hosting.rootView = HUDView(state: state, maxWidth: maxWidth)
+        hosting.layoutSubtreeIfNeeded()
+        let size = hosting.fittingSize
         let origin = NSPoint(x: visible.midX - size.width / 2, y: visible.minY + 24)
         panel.setFrame(NSRect(origin: origin, size: size), display: true)
         panel.orderFrontRegardless()
@@ -85,6 +88,7 @@ final class HUDController {
 
 struct HUDView: View {
     let state: AppState
+    let maxWidth: CGFloat
     @State private var recordingStart = Date()
 
     var body: some View {
@@ -108,13 +112,13 @@ struct HUDView: View {
                     .onTapGesture { NSWorkspace.shared.open(link) }
             case .failed(let message, _):
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
-                Text(message).foregroundStyle(.red).lineLimit(2)
+                Text(message).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
         }
         .font(.system(size: 13, weight: .medium))
         .padding(.horizontal, 16)
         .padding(.vertical, 9)
-        .frame(maxWidth: 480)
+        .frame(maxWidth: maxWidth)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(.white.opacity(0.12)))
         .padding(6)

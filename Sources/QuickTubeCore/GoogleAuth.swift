@@ -40,7 +40,11 @@ public enum AuthError: Error, Equatable {
 
 /// OAuth 2.0 for installed apps: PKCE, loopback redirect, refresh token in the store.
 public actor GoogleAuth: TokenProvider {
-    public static let scope = "https://www.googleapis.com/auth/youtube.upload"
+    public static let scopes = [
+        "https://www.googleapis.com/auth/youtube.upload",
+        "https://www.googleapis.com/auth/drive.file",
+    ]
+    public static let scope = scopes.joined(separator: " ")
 
     enum Key {
         static let clientID = "oauth.client_id"

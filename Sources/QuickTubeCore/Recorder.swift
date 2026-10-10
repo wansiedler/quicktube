@@ -25,10 +25,16 @@ public actor Recorder: ScreenRecorder {
     private static let stopTimeout: Duration = .seconds(10)
 
     private let directory: URL
+    private let quality: @Sendable () -> RecordingQuality
     private var state = State.idle
 
-    public init(directory: URL = Recorder.defaultDirectory) {
+    /// `quality` is read at the start of every recording, so Settings changes apply to the next one.
+    public init(
+        directory: URL = Recorder.defaultDirectory,
+        quality: @escaping @Sendable () -> RecordingQuality = { .default }
+    ) {
         self.directory = directory
+        self.quality = quality
     }
 
     public func start() async throws {
@@ -81,9 +87,13 @@ public actor Recorder: ScreenRecorder {
         let scale = CGFloat(filter.pointPixelScale)
         let configuration = SCStreamConfiguration()
         // HEVC rejects odd dimensions.
-        configuration.width = Int((filter.contentRect.width * scale).rounded()) & ~1
-        configuration.height = Int((filter.contentRect.height * scale).rounded()) & ~1
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+        let quality = quality()
+        let size = quality.resolution.outputSize(
+            forNative: CGSize(
+                width: filter.contentRect.width * scale, height: filter.contentRect.height * scale))
+        configuration.width = Int(size.width)
+        configuration.height = Int(size.height)
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(quality.fps))
         configuration.showsCursor = true
         configuration.capturesAudio = false
         configuration.captureMicrophone = true

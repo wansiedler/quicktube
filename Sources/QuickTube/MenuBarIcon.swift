@@ -4,6 +4,7 @@ import SwiftUI
 
 /// Menu bar glyph per phase. Idle and done use template symbols that follow the
 /// menu bar tint; recording draws a real red dot, which a template image cannot show.
+@MainActor
 enum MenuBarIcon {
     @ViewBuilder
     static func image(for phase: Phase) -> some View {

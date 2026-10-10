@@ -11,7 +11,12 @@ struct MenuContent: View {
         Divider()
         switch model.state.phase {
         case .recording:
-            Button("Stop Recording and Upload") { Task { await model.state.toggle() } }
+            Button("Stop and Upload to YouTube") { Task { await model.state.toggle(destination: .youtube) } }
+            Button("Stop and Send to Telegram") { Task { await model.state.toggle(destination: .telegram) } }
+            Button("Stop and Upload to Google Drive") {
+                Task { await model.state.toggle(destination: .drive) }
+            }
+            Button("Stop and Send to Slack") { Task { await model.state.toggle(destination: .slack) } }
         case .uploading:
             Button("Uploading…") {}.disabled(true)
         default:
@@ -29,6 +34,7 @@ struct MenuContent: View {
             Button("Copy Last Link") { model.copyLastLink() }
         }
         Button("Open Recordings Folder") { model.openRecordingsFolder() }
+        Button("Open Log File") { NSWorkspace.shared.open(DiagnosticsLog.url) }
         Divider()
         Button("Settings…") {
             // A menu bar app is never active, so the window would open behind others.
@@ -48,10 +54,14 @@ struct MenuContent: View {
         }
     }
 
+    private var shortcutSummary: String {
+        Destination.allCases.map { "\(model.combo(for: $0).label) \($0.label)" }.joined(separator: " · ")
+    }
+
     private var statusText: String {
         switch model.state.phase {
-        case .idle: "Ready — \(model.combo.label)"
-        case .recording: "Recording… press \(model.combo.label) to stop"
+        case .idle: "Ready — " + shortcutSummary
+        case .recording: "Recording… stop with " + shortcutSummary
         case .uploading(let progress): "Uploading \(Int(progress * 100))%"
         case .done(let link): "Uploaded: \(link.absoluteString)"
         case .failed(let message, _): "Failed: \(message)"

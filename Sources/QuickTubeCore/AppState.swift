@@ -47,6 +47,27 @@ public enum FailureKind: Equatable, Sendable {
     }
 }
 
+/// Where a recording is uploaded to.
+public enum Destination: String, Sendable, CaseIterable, Codable {
+    case youtube
+    case telegram
+    case drive
+    case slack
+
+    public var label: String {
+        switch self {
+        case .youtube: "YouTube"
+        case .telegram: "Telegram"
+        case .drive: "Google Drive"
+        case .slack: "Slack"
+        }
+    }
+}
+
+public enum DestinationError: Error, Equatable {
+    case unavailable(Destination)
+}
+
 public enum Phase: Equatable, Sendable {
     case idle
     case recording
@@ -64,24 +85,35 @@ public final class AppState {
     /// Classifies the most recent failure; meaningful while `phase` is `.failed`.
     public private(set) var failureKind: FailureKind = .other
 
+    /// Where the last (or current) upload went; `retry()` reuses it.
+    public private(set) var destination: Destination = .youtube
+
     private let recorder: ScreenRecorder
-    private let uploader: VideoUploader
+    private let uploaders: [Destination: VideoUploader]
     private let notifier: Notifier
     /// Set while a transition is in flight, so a second hotkey press cannot re-enter it.
     private var busy = false
 
-    public init(
+    public convenience init(
         recorder: ScreenRecorder,
         uploader: VideoUploader,
         notifier: Notifier
     ) {
+        self.init(recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier)
+    }
+
+    public init(
+        recorder: ScreenRecorder,
+        uploaders: [Destination: VideoUploader],
+        notifier: Notifier
+    ) {
         self.recorder = recorder
-        self.uploader = uploader
+        self.uploaders = uploaders
         self.notifier = notifier
     }
 
-    /// The hotkey action.
-    public func toggle() async {
+    /// The hotkey action; the destination only matters when it stops a recording.
+    public func toggle(destination: Destination = .youtube) async {
         guard !busy else { return }
         busy = true
         defer { busy = false }
@@ -89,7 +121,7 @@ public final class AppState {
         case .idle, .done, .failed:
             await startRecording()
         case .recording:
-            await stopAndUpload()
+            await stopAndUpload(to: destination)
         case .uploading:
             break
         }
@@ -100,7 +132,7 @@ public final class AppState {
         guard case .failed(_, let file?) = phase else { return }
         busy = true
         defer { busy = false }
-        await upload(file)
+        await upload(file, to: destination)
     }
 
     private func startRecording() async {
@@ -112,7 +144,7 @@ public final class AppState {
         }
     }
 
-    private func stopAndUpload() async {
+    private func stopAndUpload(to destination: Destination) async {
         let file: URL
         do {
             file = try await recorder.stop()
@@ -123,11 +155,16 @@ public final class AppState {
             fail(error, file: nil, stage: .recording)
             return
         }
-        await upload(file)
+        await upload(file, to: destination)
     }
 
-    private func upload(_ file: URL) async {
+    private func upload(_ file: URL, to destination: Destination) async {
+        self.destination = destination
         phase = .uploading(progress: 0)
+        guard let uploader = uploaders[destination] else {
+            fail(DestinationError.unavailable(destination), file: file, stage: .upload)
+            return
+        }
         // The Recorder names files after the start time, so the stem is the recording's timestamp.
         let title = file.deletingPathExtension().lastPathComponent
         do {
@@ -135,7 +172,7 @@ public final class AppState {
                 value in
                 Task { @MainActor in self.setProgress(value) }
             }
-            let link = ShareLink.url(forVideoID: result.videoID)
+            let link = result.link
             lastLink = link
             phase = .done(link: link)
             notifier.linkReady(link, isUnlisted: result.isUnlisted)
@@ -160,6 +197,26 @@ public final class AppState {
         switch error {
         case AuthError.notSignedIn, UploadError.unauthorized:
             return "Sign in to Google in Settings, then retry the upload."
+        case DestinationError.unavailable(let destination):
+            return "\(destination.label) is not set up in Settings."
+        case TelegramError.notConfigured:
+            return "Telegram is not set up: add the bot token and channel in Settings."
+        case TelegramError.fileTooLarge(let limit, let actual):
+            return "File is \(actual / (1 << 20)) MB; Telegram bots accept at most \(limit / (1 << 20)) MB."
+        case TelegramError.apiError(let description):
+            return "Telegram refused the upload: \(description)"
+        case DriveError.insufficientScope:
+            return "Google Drive access was not granted. Sign out and sign in again in Settings."
+        case SlackError.notConfigured:
+            return "Slack is not set up: add the bot token and channel ID in Settings."
+        case SlackError.apiError(let code):
+            return "Slack refused the upload: \(code)"
+        case UploadError.apiError(let status, let message):
+            if message.contains("exceeded the number of videos") {
+                return "YouTube's daily upload limit for this channel is reached; "
+                    + "the file is kept. Retry tomorrow."
+            }
+            return "Upload failed (HTTP \(status)): \(message)"
         case AuthError.missingClient:
             return "Enter and save the OAuth client ID and secret in Settings."
         case AuthError.tokenRevoked:

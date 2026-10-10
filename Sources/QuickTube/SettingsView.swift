@@ -1,9 +1,10 @@
 import AppKit
+import QuickTubeCore
 import SwiftUI
 
 struct SettingsView: View {
     @Bindable var model: AppModel
-    @State private var listening = false
+    @State private var listening: Destination?
     @State private var monitor: Any?
 
     var body: some View {
@@ -19,6 +20,18 @@ struct SettingsView: View {
                 if let message = model.launchAtLoginMessage {
                     Text(message).font(.callout).foregroundStyle(.secondary)
                 }
+            }
+            Section("Recording") {
+                Picker("Quality", selection: $model.quality.resolution) {
+                    ForEach(RecordingQuality.Resolution.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                Picker("Frame rate", selection: $model.quality.fps) {
+                    ForEach(RecordingQuality.frameRates, id: \.self) { Text("\($0) fps").tag($0) }
+                }
+                Text(
+                    "Applies to the next recording. 1080p at 30 fps is about 12 MB per minute; native 6K at 60 fps about 55 MB."
+                )
+                .font(.callout).foregroundStyle(.secondary)
             }
             Section("Permissions") {
                 permissionRow(
@@ -50,27 +63,86 @@ struct SettingsView: View {
                     Text(message).font(.callout).foregroundStyle(.secondary)
                 }
             }
-            Section("Shortcut") {
+            Section("Telegram") {
+                SecureField("Bot token", text: $model.telegramToken)
+                TextField("Channel (@name or -100… id)", text: $model.telegramChat)
                 HStack {
-                    Text(model.combo.label).font(.title3.monospaced())
+                    Button("Save Telegram") { model.saveTelegram() }
                     Spacer()
-                    Button(listening ? "Press keys…" : "Change") { startListening() }
-                        .disabled(listening)
+                    Text(model.telegramConfigured ? "Configured" : "Not set up").foregroundStyle(.secondary)
                 }
-                Text("Hold ⌘ or ⌃ (plus any other modifiers).").font(.callout).foregroundStyle(.secondary)
+                Text(
+                    "Create a bot with @BotFather, add it to your channel as admin. Bots accept files up to 50 MB."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+                if let message = model.telegramMessage {
+                    Text(message).font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            Section("Google Drive") {
+                Text(
+                    "Uses the Google sign-in above. Files go to a \"QuickTube\" folder and are shared as "
+                        + "\"anyone with the link\". If you signed in before Drive support, sign out and in again."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+            }
+            Section("Slack") {
+                SecureField("Bot token (xoxb-…)", text: $model.slackToken)
+                TextField("Channel ID (C…)", text: $model.slackChannel)
+                HStack {
+                    Button("Save Slack") { model.saveSlack() }
+                    Spacer()
+                    Text(model.slackConfigured ? "Configured" : "Not set up").foregroundStyle(.secondary)
+                }
+                Text(
+                    "Create a Slack app with the files:write scope, install it, invite the bot to the channel."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+                if let message = model.slackMessage {
+                    Text(message).font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            Section("Shortcuts") {
+                shortcutRow("Record → YouTube", destination: .youtube)
+                shortcutRow("Record → Telegram", destination: .telegram)
+                shortcutRow("Record → Google Drive", destination: .drive)
+                shortcutRow("Record → Slack", destination: .slack)
+                Text(
+                    "Hold ⌘ or ⌃ (plus any other modifiers). Either shortcut starts a recording; the one you press to stop picks the destination."
+                )
+                .font(.callout).foregroundStyle(.secondary)
                 if let message = model.hotkeyMessage {
                     Text(message).font(.callout).foregroundStyle(.red)
                 }
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440)
+        .frame(minWidth: 480, idealWidth: 520, minHeight: 420, idealHeight: Self.idealHeight)
         .onAppear {
             model.refreshAuth()
+            model.refreshTelegram()
+            model.refreshSlack()
             model.refreshLaunchAtLogin()
             model.refreshPermissions()
         }
         .onDisappear { stopListening() }
+    }
+
+    /// As tall as the screen allows; the grouped form scrolls if the content is taller.
+    private static var idealHeight: CGFloat {
+        let screen = NSScreen.main?.visibleFrame.height ?? 900
+        return max(420, screen - 60)
+    }
+
+    @ViewBuilder
+    private func shortcutRow(_ name: String, destination: Destination) -> some View {
+        HStack {
+            Text(name)
+            Spacer()
+            Text(model.combo(for: destination).label).font(.title3.monospaced())
+            Button(listening == destination ? "Press keys…" : "Change") { startListening(destination) }
+                .disabled(listening != nil)
+        }
     }
 
     @ViewBuilder
@@ -93,13 +165,13 @@ struct SettingsView: View {
         }
     }
 
-    private func startListening() {
-        listening = true
-        // Release the global hotkey so pressing the current combo is captured, not acted on.
+    private func startListening(_ destination: Destination) {
+        listening = destination
+        // Release the global hotkeys so pressing a current combo is captured, not acted on.
         model.suspendHotkey()
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             if let combo = HotkeyManager.Combo(event: event) {
-                model.setCombo(combo)
+                model.setCombo(combo, for: destination)
             }
             stopListening()
             return nil
@@ -111,9 +183,9 @@ struct SettingsView: View {
             NSEvent.removeMonitor(monitor)
         }
         monitor = nil
-        if listening {
+        if listening != nil {
             model.resumeHotkey()
         }
-        listening = false
+        listening = nil
     }
 }
