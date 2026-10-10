@@ -41,7 +41,9 @@ struct MenuContent: View {
             NSApp.activate(ignoringOtherApps: true)
             openSettings()
         }
+        .keyboardShortcut(",", modifiers: .command)
         Button("Quit QuickTube") { NSApplication.shared.terminate(nil) }
+            .keyboardShortcut("q", modifiers: .command)
     }
 
     /// The System Settings pane that fixes the current permission failure, if any.
