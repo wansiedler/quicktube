@@ -135,21 +135,38 @@ struct SettingsView: View {
         return max(420, screen - 60)
     }
 
-    /// macOS restores the last window frame, so the ideal height only applies the first time;
-    /// stretch the window to the screen on every open instead.
+    /// Sizes the window to its content, capped at the screen height (then the form scrolls).
+    /// macOS restores the last frame otherwise, so this runs on every open, after layout.
     private static func fitWindowToScreen() {
-        DispatchQueue.main.async {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             guard let window = NSApp.windows.first(where: { $0.title.hasSuffix("Settings") }),
-                let screen = window.screen ?? NSScreen.main
+                let screen = window.screen ?? NSScreen.main,
+                let content = window.contentView
             else { return }
             let visible = screen.visibleFrame
+            let chrome = window.frame.height - content.frame.height
+            let wanted = (documentHeight(in: content) ?? idealHeight) + chrome
             var frame = window.frame
-            frame.size.height = visible.height - 40
+            frame.size.height = min(max(wanted, 420), visible.height - 40)
             frame.size.width = max(frame.width, 520)
-            frame.origin.y = visible.minY + 20
+            // Keep the top edge where it was; clamp the whole window onto the screen.
+            frame.origin.y = window.frame.maxY - frame.height
+            if frame.minY < visible.minY { frame.origin.y = visible.minY }
+            if frame.maxY > visible.maxY { frame.origin.y = visible.maxY - frame.height }
             if frame.maxX > visible.maxX { frame.origin.x = visible.maxX - frame.width }
             window.setFrame(frame, display: true, animate: false)
         }
+    }
+
+    /// The grouped form is an NSScrollView under the hood; its document view is the full content.
+    private static func documentHeight(in view: NSView) -> CGFloat? {
+        if let scroll = view as? NSScrollView, let document = scroll.documentView {
+            return document.frame.height + scroll.contentInsets.top + scroll.contentInsets.bottom
+        }
+        for child in view.subviews {
+            if let height = documentHeight(in: child) { return height }
+        }
+        return nil
     }
 
     @ViewBuilder
