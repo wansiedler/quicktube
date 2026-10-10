@@ -4,7 +4,7 @@ import UserNotifications
 
 /// Clipboard plus a user notification. Without a bundle (swift run) it logs instead.
 @MainActor
-final class AppNotifier: Notifier {
+final class AppNotifier: NSObject, Notifier, UNUserNotificationCenterDelegate {
     func linkReady(_ url: URL, isUnlisted: Bool) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -23,9 +23,18 @@ final class AppNotifier: Notifier {
         post(title: "QuickTube", body: message)
     }
 
-    static func requestPermission() {
+    /// Also installs self as delegate so banners show while QuickTube is the active app.
+    func requestPermission() {
         guard Bundle.main.bundleIdentifier != nil else { return }
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter, willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
     }
 
     private func post(title: String, body: String) {

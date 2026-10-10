@@ -20,10 +20,11 @@ final class HotkeyManager {
             self.label = label
         }
 
-        /// nil when the event has no modifier; a bare key must not become a global hotkey.
+        /// nil unless ⌘ or ⌃ is held; bare, ⇧-only or ⌥-only keys would hijack ordinary typing.
         init?(event: NSEvent) {
             let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
-            guard !flags.isEmpty, let characters = event.charactersIgnoringModifiers, !characters.isEmpty
+            guard flags.contains(.command) || flags.contains(.control),
+                let characters = event.charactersIgnoringModifiers, !characters.isEmpty
             else {
                 return nil
             }
@@ -52,6 +53,7 @@ final class HotkeyManager {
     var onPress: () -> Void = {}
     private var hotKeyRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
+    private var active: Combo?
 
     init() {
         var spec = EventTypeSpec(
@@ -62,17 +64,47 @@ final class HotkeyManager {
             MainActor.assumeIsolated { manager.onPress() }
             return noErr
         }
-        InstallEventHandler(
+        let status = InstallEventHandler(
             GetApplicationEventTarget(), callback, 1, &spec,
             Unmanaged.passUnretained(self).toOpaque(), &handlerRef)
+        if status != noErr {
+            print("QuickTube: InstallEventHandler failed with status \(status)")
+        }
     }
 
-    func register(_ combo: Combo) {
+    /// Replaces the registered hotkey. False when the system refuses the combo (e.g. taken by another app);
+    /// nothing is registered then.
+    @discardableResult
+    func register(_ combo: Combo) -> Bool {
+        unregister()
+        var ref: EventHotKeyRef?
+        let id = EventHotKeyID(signature: 0x5154_5542, id: 1)  // "QTUB"
+        let status = RegisterEventHotKey(
+            combo.keyCode, combo.modifiers, id, GetApplicationEventTarget(), 0, &ref)
+        guard status == noErr, let ref else {
+            print("QuickTube: RegisterEventHotKey(\(combo.label)) failed with status \(status)")
+            return false
+        }
+        hotKeyRef = ref
+        active = combo
+        return true
+    }
+
+    /// Temporarily releases the hotkey, e.g. while Settings records a new combo.
+    func suspend() {
+        unregister()
+    }
+
+    /// Re-registers the last successfully registered combo if it is currently released.
+    func resume() {
+        guard hotKeyRef == nil, let active else { return }
+        register(active)
+    }
+
+    private func unregister() {
         if let hotKeyRef {
             UnregisterEventHotKey(hotKeyRef)
             self.hotKeyRef = nil
         }
-        let id = EventHotKeyID(signature: 0x5154_5542, id: 1)  // "QTUB"
-        RegisterEventHotKey(combo.keyCode, combo.modifiers, id, GetApplicationEventTarget(), 0, &hotKeyRef)
     }
 }

@@ -9,28 +9,26 @@ final class AppModel {
     let auth: GoogleAuth
     let state: AppState
     private let hotkey = HotkeyManager()
+    private let notifier: AppNotifier
     private static let comboKey = "hotkey.combo"
 
-    var combo: HotkeyManager.Combo {
-        didSet {
-            hotkey.register(combo)
-            if let data = try? JSONEncoder().encode(combo) {
-                UserDefaults.standard.set(data, forKey: Self.comboKey)
-            }
-        }
-    }
+    private(set) var combo: HotkeyManager.Combo
+    var hotkeyMessage: String?
     var clientID = ""
     var clientSecret = ""
     var signedIn = false
+    var signingIn = false
     var authMessage: String?
 
     init() {
         let auth = GoogleAuth(store: KeychainStore())
         self.auth = auth
+        let notifier = AppNotifier()
+        self.notifier = notifier
         self.state = AppState(
             recorder: Recorder(),
             uploader: YouTubeUploader(tokens: auth),
-            notifier: AppNotifier())
+            notifier: notifier)
         self.combo =
             UserDefaults.standard.data(forKey: Self.comboKey)
             .flatMap { try? JSONDecoder().decode(HotkeyManager.Combo.self, from: $0) } ?? .default
@@ -38,17 +36,46 @@ final class AppModel {
             guard let self else { return }
             Task { await self.state.toggle() }
         }
-        hotkey.register(combo)
-        AppNotifier.requestPermission()
+        if !hotkey.register(combo) {
+            hotkeyMessage = "\(combo.label) is already in use by another app. Choose another shortcut."
+        }
+        notifier.requestPermission()
         refreshAuth()
+    }
+
+    /// Registers `newCombo` and persists it; on failure keeps the previous shortcut and says why.
+    func setCombo(_ newCombo: HotkeyManager.Combo) {
+        let previous = combo
+        if hotkey.register(newCombo) {
+            combo = newCombo
+            hotkeyMessage = nil
+            if let data = try? JSONEncoder().encode(newCombo) {
+                UserDefaults.standard.set(data, forKey: Self.comboKey)
+            }
+        } else {
+            hotkey.register(previous)
+            hotkeyMessage = "\(newCombo.label) is already in use by another app. Kept \(previous.label)."
+        }
+    }
+
+    func suspendHotkey() {
+        hotkey.suspend()
+    }
+
+    func resumeHotkey() {
+        hotkey.resume()
     }
 
     func refreshAuth() {
         Task {
-            signedIn = (try? await auth.isSignedIn()) ?? false
-            if let client = try? await auth.client() {
-                clientID = client.id
-                clientSecret = client.secret
+            do {
+                signedIn = try await auth.isSignedIn()
+                if let client = try await auth.client() {
+                    clientID = client.id
+                    clientSecret = client.secret
+                }
+            } catch {
+                authMessage = "Keychain error: \(error)"
             }
         }
     }
@@ -68,8 +95,11 @@ final class AppModel {
     }
 
     func signIn() {
+        guard !signingIn else { return }
+        signingIn = true
         authMessage = "Waiting for the browser…"
         Task {
+            defer { signingIn = false }
             do {
                 try await auth.signIn { url in
                     Task { @MainActor in NSWorkspace.shared.open(url) }
@@ -84,9 +114,13 @@ final class AppModel {
 
     func signOut() {
         Task {
-            try? await auth.signOut()
-            signedIn = false
-            authMessage = nil
+            do {
+                try await auth.signOut()
+                signedIn = false
+                authMessage = nil
+            } catch {
+                authMessage = "Keychain error: \(error)"
+            }
         }
     }
 

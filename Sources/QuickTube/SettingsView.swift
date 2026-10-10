@@ -19,6 +19,7 @@ struct SettingsView: View {
                         Button("Sign out") { model.signOut() }
                     } else {
                         Button("Sign in with Google") { model.signIn() }
+                            .disabled(model.signingIn)
                     }
                 }
                 if let message = model.authMessage {
@@ -32,7 +33,10 @@ struct SettingsView: View {
                     Button(listening ? "Press keys…" : "Change") { startListening() }
                         .disabled(listening)
                 }
-                Text("Hold at least one modifier.").font(.callout).foregroundStyle(.secondary)
+                Text("Hold ⌘ or ⌃ (plus any other modifiers).").font(.callout).foregroundStyle(.secondary)
+                if let message = model.hotkeyMessage {
+                    Text(message).font(.callout).foregroundStyle(.red)
+                }
             }
         }
         .formStyle(.grouped)
@@ -42,9 +46,11 @@ struct SettingsView: View {
 
     private func startListening() {
         listening = true
+        // Release the global hotkey so pressing the current combo is captured, not acted on.
+        model.suspendHotkey()
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             if let combo = HotkeyManager.Combo(event: event) {
-                model.combo = combo
+                model.setCombo(combo)
             }
             stopListening()
             return nil
@@ -56,6 +62,9 @@ struct SettingsView: View {
             NSEvent.removeMonitor(monitor)
         }
         monitor = nil
+        if listening {
+            model.resumeHotkey()
+        }
         listening = false
     }
 }
