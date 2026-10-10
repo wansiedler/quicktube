@@ -8,18 +8,41 @@ public actor Recorder: ScreenRecorder {
     public static let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appending(path: "Movies/QuickTube")
 
+    private struct Session {
+        let stream: SCStream
+        let output: SCRecordingOutput
+        let fileURL: URL
+        let delegate: RecorderDelegate
+    }
+
+    private enum State {
+        case idle
+        case starting
+        case recording(Session)
+        case stopping
+    }
+
+    private static let stopTimeout: Duration = .seconds(10)
+
     private let directory: URL
-    private var stream: SCStream?
-    private var output: SCRecordingOutput?
-    private var fileURL: URL?
-    private let delegate = RecorderDelegate()
+    private var state = State.idle
 
     public init(directory: URL = Recorder.defaultDirectory) {
         self.directory = directory
     }
 
     public func start() async throws {
-        guard stream == nil else { throw RecorderError.alreadyRecording }
+        guard case .idle = state else { throw RecorderError.alreadyRecording }
+        state = .starting
+        do {
+            state = .recording(try await beginSession())
+        } catch {
+            state = .idle
+            throw error
+        }
+    }
+
+    private func beginSession() async throws -> Session {
         guard await AVCaptureDevice.requestAccess(for: .audio) else {
             throw RecorderError.microphonePermissionDenied
         }
@@ -36,9 +59,11 @@ public actor Recorder: ScreenRecorder {
         else { throw RecorderError.noDisplay }
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
+        let scale = CGFloat(filter.pointPixelScale)
         let configuration = SCStreamConfiguration()
-        configuration.width = Int(filter.contentRect.width * CGFloat(filter.pointPixelScale))
-        configuration.height = Int(filter.contentRect.height * CGFloat(filter.pointPixelScale))
+        // HEVC rejects odd dimensions.
+        configuration.width = Int((filter.contentRect.width * scale).rounded()) & ~1
+        configuration.height = Int((filter.contentRect.height * scale).rounded()) & ~1
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         configuration.showsCursor = true
         configuration.capturesAudio = false
@@ -51,25 +76,21 @@ public actor Recorder: ScreenRecorder {
         recording.outputFileType = .mp4
         recording.videoCodecType = .hevc
 
-        delegate.reset()
+        let delegate = RecorderDelegate()
         let output = SCRecordingOutput(configuration: recording, delegate: delegate)
         let stream = SCStream(filter: filter, configuration: configuration, delegate: delegate)
         try stream.addRecordingOutput(output)
         try await stream.startCapture()
-        self.stream = stream
-        self.output = output
-        self.fileURL = url
+        return Session(stream: stream, output: output, fileURL: url, delegate: delegate)
     }
 
     public func stop() async throws -> URL {
-        guard let stream, let output, let fileURL else { throw RecorderError.notRecording }
-        self.stream = nil
-        self.output = nil
-        self.fileURL = nil
-        try await stream.stopCapture()
-        try await delegate.waitUntilFinished()
-        try? stream.removeRecordingOutput(output)
-        return fileURL
+        guard case .recording(let session) = state else { throw RecorderError.notRecording }
+        state = .stopping
+        defer { state = .idle }
+        try await session.stream.stopCapture()
+        try await session.delegate.waitUntilFinished(timeout: Self.stopTimeout)
+        return session.fileURL
     }
 }
 
@@ -82,23 +103,28 @@ private final class RecorderDelegate: NSObject, SCStreamDelegate, SCRecordingOut
     private var failure: Error?
     private var waiter: CheckedContinuation<Void, Error>?
 
-    func reset() {
-        lock.withLock {
-            finished = false
-            failure = nil
-            waiter = nil
+    func waitUntilFinished(timeout: Duration) async throws {
+        let timer = Task {
+            try await Task.sleep(for: timeout)
+            finish(RecorderError.stopTimedOut)
         }
-    }
-
-    func waitUntilFinished() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            lock.withLock {
-                if finished {
-                    if let failure { continuation.resume(throwing: failure) } else { continuation.resume() }
-                } else {
-                    waiter = continuation
+        defer { timer.cancel() }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                lock.withLock {
+                    if finished {
+                        if let failure {
+                            continuation.resume(throwing: failure)
+                        } else {
+                            continuation.resume()
+                        }
+                    } else {
+                        waiter = continuation
+                    }
                 }
             }
+        } onCancel: {
+            finish(CancellationError())
         }
     }
 

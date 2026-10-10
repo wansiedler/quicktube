@@ -13,6 +13,7 @@ public enum RecorderError: Error, Equatable {
     case noDisplay
     case alreadyRecording
     case notRecording
+    case stopTimedOut
 }
 
 /// Side effects of a finished or failed cycle: clipboard, notification.
