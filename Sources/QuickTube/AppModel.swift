@@ -39,6 +39,12 @@ final class AppModel {
         if !hotkey.register(combo) {
             hotkeyMessage = "\(combo.label) is already in use by another app. Choose another shortcut."
         }
+        // A revoked or missing token surfaces during upload; re-read the Keychain so
+        // Settings stops showing "Signed in".
+        notifier.onFailure = { [weak self] in
+            guard let self, self.state.failureKind == .auth else { return }
+            self.refreshAuth()
+        }
         notifier.requestPermission()
         refreshAuth()
     }

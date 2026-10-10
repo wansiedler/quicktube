@@ -41,6 +41,7 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 440)
+        .onAppear { model.refreshAuth() }
         .onDisappear { stopListening() }
     }
 

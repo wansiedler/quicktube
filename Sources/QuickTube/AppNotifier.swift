@@ -5,6 +5,9 @@ import UserNotifications
 /// Clipboard plus a user notification. Without a bundle (swift run) it logs instead.
 @MainActor
 final class AppNotifier: NSObject, Notifier, UNUserNotificationCenterDelegate {
+    /// Runs after every failure, once AppState has recorded it.
+    var onFailure: (@MainActor () -> Void)?
+
     func linkReady(_ url: URL, isUnlisted: Bool) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -21,6 +24,7 @@ final class AppNotifier: NSObject, Notifier, UNUserNotificationCenterDelegate {
 
     func failed(_ message: String) {
         post(title: "QuickTube", body: message)
+        onFailure?()
     }
 
     /// Also installs self as delegate so banners show while QuickTube is the active app.

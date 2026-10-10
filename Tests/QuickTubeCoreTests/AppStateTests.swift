@@ -155,6 +155,24 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         #expect(state.failureKind == .other)
     }
 
+    @Test func authFailuresAreClassified() async {
+        uploader.error = AuthError.tokenRevoked
+        let state = makeState()
+        await state.toggle()
+        await state.toggle()
+        #expect(state.failureKind == .auth)
+
+        uploader.error = UploadError.unauthorized
+        await state.retry()
+        #expect(state.failureKind == .auth)
+
+        uploader.error = UploadError.quotaExceeded
+        await state.retry()
+        #expect(state.failureKind == .other)
+        #expect(FailureKind(AuthError.notSignedIn) == .auth)
+        #expect(FailureKind(AuthError.missingClient) == .auth)
+    }
+
     @Test func uploadFailureKeepsFileAndRetryWorks() async {
         uploader.error = UploadError.exhaustedRetries
         let state = makeState()

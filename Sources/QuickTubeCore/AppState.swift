@@ -33,12 +33,15 @@ public enum Stage: Sendable {
 public enum FailureKind: Equatable, Sendable {
     case screenPermission
     case microphonePermission
+    /// Sign-in is missing, revoked or rejected; the UI should re-check its auth state.
+    case auth
     case other
 
     public init(_ error: Error) {
         switch error {
         case RecorderError.screenPermissionDenied: self = .screenPermission
         case RecorderError.microphonePermissionDenied: self = .microphonePermission
+        case is AuthError, UploadError.unauthorized: self = .auth
         default: self = .other
         }
     }
