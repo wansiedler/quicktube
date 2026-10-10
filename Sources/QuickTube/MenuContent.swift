@@ -16,6 +16,7 @@ struct MenuContent: View {
             } else if model.settings.pauseEnabled {
                 Button("Pause") { Task { await model.state.pause() } }
             }
+            Button("Stop → Save only") { Task { await model.state.toggle(destination: .local) } }
             Button("Stop and Upload to YouTube") { Task { await model.state.toggle(destination: .youtube) } }
             Button("Stop and Send to Telegram") { Task { await model.state.toggle(destination: .telegram) } }
             Button("Stop and Upload to Google Drive") {
@@ -105,7 +106,8 @@ struct MenuContent: View {
         case .recording: "Recording… stop with " + shortcutSummary
         case .paused: "Paused — resume with \(AppModel.pauseCombo.label), stop with " + shortcutSummary
         case .uploading(let progress): AppState.uploadText(stage: model.state.uploadStage, progress: progress)
-        case .done(let link) where link.isFileURL: "GIF saved: \(link.lastPathComponent)"
+        case .done(let link) where link.isFileURL:
+            "\(model.state.destination == .local ? "Saved" : "GIF saved"): \(link.lastPathComponent)"
         case .done(let link): "Uploaded: \(link.absoluteString)"
         case .failed(let message, _): "Failed: \(message)"
         }

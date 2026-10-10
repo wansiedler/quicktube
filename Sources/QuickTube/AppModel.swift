@@ -22,10 +22,12 @@ final class AppModel {
     private static let comboKeys: [Destination: String] = [
         .youtube: "hotkey.combo", .telegram: "hotkey.telegramCombo",
         .drive: "hotkey.driveCombo", .slack: "hotkey.slackCombo", .gif: "hotkey.gifCombo",
+        .local: "hotkey.localCombo",
     ]
     /// Slot 5 is pause; the GIF hotkey (slot 6) is registered only while `gifEnabled` is on.
+    /// "Save only" (slot 7) is always on.
     private static let slots: [Destination: UInt32] = [
-        .youtube: 1, .telegram: 2, .drive: 3, .slack: 4, .gif: 6,
+        .youtube: 1, .telegram: 2, .drive: 3, .slack: 4, .gif: 6, .local: 7,
     ]
     /// Pause/resume; registered only while `pauseEnabled` is on.
     private static let pauseSlot: UInt32 = 5
@@ -100,6 +102,7 @@ final class AppModel {
                 .telegram: telegram,
                 .drive: GoogleDriveUploader(tokens: auth, log: { DiagnosticsLog.append($0) }),
                 .slack: slack,
+                .local: LocalSaver(),
                 .gif: GIFUploader(
                     options: {
                         let settings = AppSettings.load(from: .standard)
@@ -127,9 +130,17 @@ final class AppModel {
             })
         for destination in Destination.allCases {
             let fallback = HotkeyManager.Combo.fallback(for: destination)
+            let stored = UserDefaults.standard.data(forKey: Self.comboKeys[destination]!)
+                .flatMap { try? JSONDecoder().decode(HotkeyManager.Combo.self, from: $0) }
+            if destination == .youtube, stored != nil,
+                HotkeyManager.Combo.migratedYouTube(stored: stored) == nil
+            {
+                // The old default, ⌃⌥⌘R, now starts and saves; YouTube moves to its new fallback.
+                UserDefaults.standard.removeObject(forKey: Self.comboKeys[destination]!)
+            }
             combos[destination] =
-                UserDefaults.standard.data(forKey: Self.comboKeys[destination]!)
-                .flatMap { try? JSONDecoder().decode(HotkeyManager.Combo.self, from: $0) } ?? fallback
+                (destination == .youtube ? HotkeyManager.Combo.migratedYouTube(stored: stored) : stored)
+                ?? fallback
         }
         hotkey.onPress = { [weak self] slot in
             guard let self else { return }
@@ -147,7 +158,10 @@ final class AppModel {
         }
         for destination in Destination.allCases where destination != .gif {
             let combo = combos[destination]!
-            if !hotkey.register(combo, slot: Self.slots[destination]!) {
+            if destination != .local, combo == combos[.local] {
+                hotkeyMessage =
+                    "\(combo.label) is already the Save only shortcut; \(destination.label) has no hotkey."
+            } else if !hotkey.register(combo, slot: Self.slots[destination]!) {
                 hotkeyMessage = "\(combo.label) is already in use by another app. Choose another shortcut."
             }
         }
@@ -381,14 +395,18 @@ final class AppModel {
             return
         }
         let combo = combo(for: .gif)
-        if !hotkey.register(combo, slot: slot) {
+        if combo == self.combo(for: .local) {
+            hotkey.remove(slot: slot)
+            hotkeyMessage = "\(combo.label) is already the Save only shortcut\(Self.gifConflictSuffix)"
+        } else if !hotkey.register(combo, slot: slot) {
             hotkeyMessage = "\(combo.label) is already in use by another app\(Self.gifConflictSuffix)"
         }
     }
 
-    /// The destinations offered in the menu and the status line: GIF only while it is enabled.
+    /// The destinations offered in the menu and the status line: "Save only" first, GIF only while it is
+    /// enabled.
     var visibleDestinations: [Destination] {
-        Destination.allCases.filter { $0 != .gif || settings.gifEnabled }
+        [.local] + Destination.allCases.filter { $0 != .local && ($0 != .gif || settings.gifEnabled) }
     }
 
     func combo(for destination: Destination) -> HotkeyManager.Combo {

@@ -1,7 +1,8 @@
 # QuickTube
 
 Menu bar app for macOS 15+: press a hotkey, record the screen with your
-voice, press it again, and the YouTube link lands on your clipboard.
+voice, press `⌃⌥⌘R` again to just save the file, or `⌃⌥⌘Y` to upload it to YouTube
+and get the link on your clipboard.
 
 ## Install
 
@@ -75,7 +76,8 @@ permalink goes on the clipboard (visible to workspace members).
 |---|---|
 | Grant permissions | asked at first launch; status under Settings → Permissions |
 | Start recording | `⌃⌥⌘R` (change in Settings) |
-| Stop and upload to YouTube | `⌃⌥⌘R` again |
+| Stop and just save the file (no upload) | `⌃⌥⌘R` again; Finder shows the file and its URL is on the clipboard |
+| Stop and upload to YouTube | `⌃⌥⌘Y` |
 | Stop and send to Telegram | `⌃⌥⌘T` |
 | Stop and upload to Google Drive | `⌃⌥⌘D` |
 | Stop and send to Slack | `⌃⌥⌘S` (any shortcut starts a recording; the one that stops it picks the destination) |

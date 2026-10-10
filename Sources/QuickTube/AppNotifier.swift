@@ -27,12 +27,20 @@ final class AppNotifier: NSObject, Notifier, UNUserNotificationCenterDelegate {
         }
     }
 
-    /// A local file (the GIF): its file URL plus the GIF data go on the pasteboard, so it pastes as a file
-    /// in Finder and as an image in chat apps; Finder shows it selected.
-    /// The file is read off the main thread; a large GIF would otherwise stall the UI.
+    /// A local file: its file URL goes on the pasteboard and Finder shows it selected. A GIF also puts its
+    /// data there, so it pastes as a file in Finder and as an image in chat apps; the recording itself
+    /// ("Save only") is a video, too large to read for the pasteboard.
+    /// The GIF is read off the main thread; a large one would otherwise stall the UI.
     private func fileReady(_ url: URL, on pasteboard: NSPasteboard) {
         NSWorkspace.shared.activateFileViewerSelecting([url])
-        post(title: AppState.doneText(link: url, destination: .gif), body: url.lastPathComponent)
+        let isGIF = url.pathExtension.lowercased() == "gif"
+        post(
+            title: AppState.doneText(link: url, destination: isGIF ? .gif : .local),
+            body: url.lastPathComponent)
+        guard isGIF else {
+            pasteboard.writeObjects([url as NSURL])
+            return
+        }
         Task {
             let data = await Task.detached(priority: .userInitiated) { try? Data(contentsOf: url) }.value
             let item = NSPasteboardItem()

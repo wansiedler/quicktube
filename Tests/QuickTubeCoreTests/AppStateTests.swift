@@ -996,6 +996,42 @@ final class LogLines: @unchecked Sendable {
             AppState.message(for: GIFError.cannotWrite) == "Could not write the GIF next to the recording.")
         #expect(AppState.message(for: GIFError.noFrames) == "The recording has no frames to make a GIF from.")
     }
+
+    // MARK: Save only
+
+    @Test func localDestinationFinishesWithTheFileAndSkipsAfterUpload() async {
+        let local = FakeUploader()
+        let fileURL = URL(filePath: "/tmp/rec/clip.mp4")
+        local.result = UploadResult(link: fileURL)
+        let called = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader, .local: local], notifier: notifier,
+            titleProvider: { [now] in TitleContext(date: now) },
+            afterUpload: { called.append($0.path) })
+        await record(state, to: .local)
+        #expect(state.phase == .done(link: fileURL))
+        #expect(state.destination == .local)
+        #expect(local.uploads.count == 1)
+        #expect(uploader.uploads.isEmpty)
+        #expect(notifier.links.first?.0 == fileURL)
+        #expect(state.history.first?.destination == .local)
+        #expect(state.history.first?.link == fileURL)
+        #expect(called.all.isEmpty)
+    }
+
+    @Test func localLabelIsSaveOnly() {
+        #expect(Destination.local.label == "Save only")
+        #expect(Destination(rawValue: "local") == .local)
+    }
+
+    @Test func doneTextNamesTheSavedSize() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "done-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appending(path: "clip.mp4")
+        try Data(count: 3 << 19).write(to: file)  // 1.5 MB
+        #expect(AppState.doneText(link: file, destination: .local) == "Saved · 1.5 MB")
+    }
 }
 
 @Suite struct TranscodeMessageTests {

@@ -243,6 +243,7 @@ struct SettingsView: View {
                 }
             }
             Section("Shortcuts") {
+                shortcutRow("Record / Save only", destination: .local)
                 shortcutRow("Record → YouTube", destination: .youtube)
                 shortcutRow("Record → Telegram", destination: .telegram)
                 shortcutRow("Record → Google Drive", destination: .drive)
@@ -251,7 +252,7 @@ struct SettingsView: View {
                     shortcutRow("Record → GIF", destination: .gif)
                 }
                 Text(
-                    "Hold ⌘ or ⌃ (plus any other modifiers). Either shortcut starts a recording; the one you press to stop picks the destination."
+                    "Hold ⌘ or ⌃ (plus any other modifiers). ⌃⌥⌘R starts a recording; press it again to just save the file, or press a destination shortcut to stop and upload there."
                 )
                 .font(.callout).foregroundStyle(.secondary)
                 if let message = model.hotkeyMessage {

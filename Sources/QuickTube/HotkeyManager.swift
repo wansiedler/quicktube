@@ -10,10 +10,14 @@ final class HotkeyManager {
         var modifiers: UInt32  // Carbon mask: cmdKey | optionKey | controlKey | shiftKey
         var label: String
 
-        static let `default` = Combo(
+        static let localDefault = Combo(
             keyCode: UInt32(kVK_ANSI_R),
             modifiers: UInt32(controlKey | optionKey | cmdKey),
             label: "⌃⌥⌘R")
+        static let youtubeDefault = Combo(
+            keyCode: UInt32(kVK_ANSI_Y),
+            modifiers: UInt32(controlKey | optionKey | cmdKey),
+            label: "⌃⌥⌘Y")
         static let telegramDefault = Combo(
             keyCode: UInt32(kVK_ANSI_T),
             modifiers: UInt32(controlKey | optionKey | cmdKey),
@@ -37,12 +41,22 @@ final class HotkeyManager {
 
         static func fallback(for destination: Destination) -> Combo {
             switch destination {
-            case .youtube: .default
+            case .youtube: .youtubeDefault
             case .telegram: .telegramDefault
             case .drive: .driveDefault
             case .slack: .slackDefault
             case .gif: .gifDefault
+            case .local: .localDefault
             }
+        }
+
+        /// ⌃⌥⌘R used to be the YouTube default and now belongs to "Save only": a stored YouTube combo
+        /// equal to it is the old default, not a choice, and is dropped so YouTube takes ⌃⌥⌘Y.
+        /// Any other stored combo is kept.
+        static func migratedYouTube(stored: Combo?) -> Combo? {
+            guard let stored else { return nil }
+            let old = Combo.localDefault
+            return stored.keyCode == old.keyCode && stored.modifiers == old.modifiers ? nil : stored
         }
 
         init(keyCode: UInt32, modifiers: UInt32, label: String) {
