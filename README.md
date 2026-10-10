@@ -15,7 +15,9 @@ open /Applications/QuickTube.app
 `/Applications`. The app icon is rendered from `Resources/AppIcon.svg`, which
 needs `rsvg-convert` (`brew install librsvg`). The bundle is signed with the first "Apple Development"
 identity in your keychain, or ad-hoc if there is none (then macOS re-asks
-for Screen Recording after each rebuild).
+for Screen Recording after each rebuild, and the app is signed with
+`QuickTube.adhoc.entitlements`, which turns off library validation so the
+ad-hoc Sparkle.framework loads).
 
 ## Updates
 

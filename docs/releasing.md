@@ -74,7 +74,10 @@ gh api -X POST repos/wansiedler/quicktube/pages -f 'source[branch]=gh-pages' -f 
      workflow fails if it does not match the tag.
    - `CFBundleVersion` to a number greater than every earlier release.
      Sparkle compares this value, so an update with the same or a lower
-     build number is never offered.
+     build number is never offered. The workflow fails before publishing
+     anything if it is not greater than the newest `sparkle:version` in the
+     `appcast.xml` on `gh-pages` (or if `SUPublicEDKey` is still the
+     placeholder).
 2. Commit, merge to `main`, then tag and push the tag:
 
    ```bash
@@ -88,7 +91,10 @@ gh api -X POST repos/wansiedler/quicktube/pages -f 'source[branch]=gh-pages' -f 
 
 To check a DMG locally before tagging: `make dmg` (signs with your
 Apple Development identity, ad-hoc without one) and
-`codesign --verify --deep --strict QuickTube.app`.
+`codesign --verify --deep --strict QuickTube.app`. Ad-hoc builds are signed
+with `QuickTube.adhoc.entitlements`, which adds
+`com.apple.security.cs.disable-library-validation`: without a Team ID the
+hardened runtime would refuse to load the bundled Sparkle.framework.
 
 If a run fails after the release was created, delete the release and the tag
 (`gh release delete v0.2.0 --cleanup-tag`), fix, and tag again.

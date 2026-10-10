@@ -16,6 +16,15 @@ ifeq ($(IDENTITY),)
 IDENTITY := -
 endif
 SIGN := codesign --force --sign "$(IDENTITY)" --options runtime --timestamp=none
+# Hardened runtime enforces library validation: an ad-hoc app has no Team ID, so dyld refuses the
+# (also ad-hoc) Sparkle.framework and the app aborts at launch. Ad-hoc builds therefore add
+# com.apple.security.cs.disable-library-validation; identity-signed builds share a Team ID and keep
+# the plain entitlements.
+ifeq ($(IDENTITY),-)
+APP_ENTITLEMENTS := QuickTube.adhoc.entitlements
+else
+APP_ENTITLEMENTS := $(ENTITLEMENTS)
+endif
 
 # App icon: Resources/AppIcon.svg -> build/AppIcon.icns. Needs rsvg-convert (brew install librsvg).
 ICON_SVG  := Resources/AppIcon.svg
@@ -53,7 +62,7 @@ app: build $(ICNS)
 	$(SIGN) $(APP)/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate
 	$(SIGN) $(APP)/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app
 	$(SIGN) $(APP)/Contents/Frameworks/Sparkle.framework
-	$(SIGN) --entitlements $(ENTITLEMENTS) $(APP)
+	$(SIGN) --entitlements $(APP_ENTITLEMENTS) $(APP)
 	@echo "Signed with: $(IDENTITY)"
 
 # build/QuickTube-<version>.dmg: the app and an Applications link, signed with the same identity.

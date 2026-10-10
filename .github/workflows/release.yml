@@ -62,9 +62,12 @@ jobs:
           CERT_P12: ${{ secrets.APPLE_DEV_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.APPLE_DEV_CERT_PASSWORD }}
         run: |
+          # Fixed paths: the cleanup step deletes both even if this step fails half-way.
+          umask 077
           keychain="$RUNNER_TEMP/release.keychain-db"
-          keychain_password=$(openssl rand -base64 24)
           p12="$RUNNER_TEMP/cert.p12"
+          trap 'rm -f "$p12"' EXIT
+          keychain_password=$(openssl rand -base64 24)
           printf '%s' "$CERT_P12" | base64 --decode > "$p12"
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 3600 "$keychain"
@@ -78,13 +81,11 @@ jobs:
             existing+=("${line%\"*}")
           done < <(security list-keychains -d user)
           security list-keychains -d user -s "$keychain" "${existing[@]}"
-          rm -f "$p12"
           identity=$(security find-identity -v -p codesigning "$keychain" | awk -F'"' '/Apple Development/ {print $2; exit}')
           if [ -z "$identity" ]; then
             echo "::error::No Apple Development identity in APPLE_DEV_CERT_P12"
             exit 1
           fi
-          echo "KEYCHAIN=$keychain" >> "$GITHUB_ENV"
           echo "IDENTITY=$identity" >> "$GITHUB_ENV"
 
       - name: Build the DMG
@@ -92,6 +93,66 @@ jobs:
           make dmg IDENTITY="$IDENTITY"
           codesign --verify --deep --strict QuickTube.app
           codesign --verify "$DMG"
+
+      # Both checks run before anything is published: a placeholder key ships an app whose
+      # updater never starts, and a CFBundleVersion that is not above the feed's newest
+      # sparkle:version is never offered to installed copies.
+      - name: Check the built app can be updated
+        run: |
+          plist=QuickTube.app/Contents/Info.plist
+          key=$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$plist")
+          if [ -z "$key" ] || [ "$key" = REPLACE_WITH_PUBLIC_KEY ]; then
+            echo "::error::SUPublicEDKey in Info.plist is still the placeholder; see docs/releasing.md"
+            exit 1
+          fi
+          build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")
+
+          # The public repo's gh-pages branch holds the live feed; exit code 2 means no such branch yet.
+          rc=0
+          git ls-remote --exit-code --heads origin gh-pages > /dev/null || rc=$?
+          if [ "$rc" -eq 2 ]; then
+            echo "No gh-pages branch yet: first release, skipping the CFBundleVersion check"
+            exit 0
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::Could not read the gh-pages branch (git ls-remote exit $rc)"
+            exit 1
+          fi
+          git fetch -q --depth 1 origin gh-pages
+          if ! git cat-file -e FETCH_HEAD:appcast.xml 2> /dev/null; then
+            echo "gh-pages has no appcast.xml yet, skipping the CFBundleVersion check"
+            exit 0
+          fi
+          git show FETCH_HEAD:appcast.xml > "$RUNNER_TEMP/appcast-current.xml"
+          python3 - "$RUNNER_TEMP/appcast-current.xml" "$build" <<'EOF'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          ns = "{http://www.andymatuschak.org/xml-namespaces/sparkle}"
+
+          def key(v):
+              try:
+                  return tuple(int(p) for p in v.strip().split("."))
+              except ValueError:
+                  sys.exit(f"::error::Non-numeric build version {v!r}; use a dotted number")
+
+          feed, build = sys.argv[1], sys.argv[2]
+          versions = []
+          for item in ET.parse(feed).getroot().iter("item"):
+              v = item.findtext(ns + "version")
+              if v is None:
+                  enclosure = item.find("enclosure")
+                  v = enclosure.get(ns + "version") if enclosure is not None else None
+              if v:
+                  versions.append(v)
+          if not versions:
+              print("appcast.xml has no versions, skipping the CFBundleVersion check")
+              sys.exit(0)
+          newest = max(versions, key=key)
+          if key(build) <= key(newest):
+              sys.exit(f"::error::CFBundleVersion {build} is not greater than the newest "
+                       f"sparkle:version {newest} in appcast.xml; bump it in Info.plist")
+          print(f"CFBundleVersion {build} > newest sparkle:version {newest}")
+          EOF
 
       - name: Sign the DMG for Sparkle
         env:
@@ -150,4 +211,5 @@ jobs:
       - name: Delete the temporary keychain
         if: always()
         run: |
-          if [ -n "${KEYCHAIN:-}" ]; then security delete-keychain "$KEYCHAIN" || true; fi
+          security delete-keychain "$RUNNER_TEMP/release.keychain-db" 2> /dev/null || true
+          rm -f "$RUNNER_TEMP/cert.p12"
