@@ -17,6 +17,20 @@ needs `rsvg-convert` (`brew install librsvg`). The bundle is signed with the fir
 identity in your keychain, or ad-hoc if there is none (then macOS re-asks
 for Screen Recording after each rebuild).
 
+## Updates
+
+Released builds update themselves with [Sparkle](https://sparkle-project.org):
+Settings → General → "Check for updates automatically", or menu → Check for
+Updates… The feed is `https://wansiedler.github.io/quicktube/appcast.xml`.
+Builds from source carry a placeholder update key, so updates are off there
+and the controls are disabled.
+
+`make dmg` builds `build/QuickTube-<version>.dmg` (the app plus an
+Applications link) with the same signing identity. Releases are signed with
+an Apple Development certificate and not notarised, so on another Mac
+Gatekeeper warns on first launch (right-click → Open). How to cut a release:
+[docs/releasing.md](docs/releasing.md).
+
 ## Google setup (once)
 
 1. Google Cloud console → enable **YouTube Data API v3**.

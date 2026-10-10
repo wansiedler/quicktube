@@ -1,0 +1,153 @@
+name: Release
+
+# Tag v<version> → signed DMG → GitHub Release → Sparkle appcast on gh-pages.
+# The tag must match CFBundleShortVersionString in Sources/QuickTube/Info.plist;
+# bump it (and CFBundleVersion) before tagging. See docs/releasing.md.
+#
+# Secrets:
+#   APPLE_DEV_CERT_P12       base64 of the Apple Development certificate (.p12)
+#   APPLE_DEV_CERT_PASSWORD  the .p12 password
+#   SPARKLE_PRIVATE_KEY      the EdDSA private key from Sparkle's generate_keys -x
+
+on:
+  push:
+    tags: ["v*"]
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release
+    runs-on: macos-15
+    permissions:
+      contents: write   # create the release and push appcast.xml to gh-pages
+    env:
+      TAG: ${{ github.ref_name }}
+      SPARKLE_BIN: .build/artifacts/sparkle/Sparkle/bin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.app || sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Check the tag matches the app version
+        run: |
+          version=$(make -s version)
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match CFBundleShortVersionString $version in Info.plist"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "DMG=build/QuickTube-$version.dmg" >> "$GITHUB_ENV"
+
+      # `make app` renders the icon from SVG.
+      - name: Install rsvg-convert
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install librsvg
+
+      - name: Import the signing certificate
+        env:
+          CERT_P12: ${{ secrets.APPLE_DEV_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_DEV_CERT_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          keychain_password=$(openssl rand -base64 24)
+          p12="$RUNNER_TEMP/cert.p12"
+          printf '%s' "$CERT_P12" | base64 --decode > "$p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$p12" -k "$keychain" -P "$CERT_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          # Put the release keychain first in the search list, keeping the existing ones.
+          existing=()
+          while IFS= read -r line; do
+            line=${line#*\"}
+            existing+=("${line%\"*}")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain" "${existing[@]}"
+          rm -f "$p12"
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk -F'"' '/Apple Development/ {print $2; exit}')
+          if [ -z "$identity" ]; then
+            echo "::error::No Apple Development identity in APPLE_DEV_CERT_P12"
+            exit 1
+          fi
+          echo "KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          echo "IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Build the DMG
+        run: |
+          make dmg IDENTITY="$IDENTITY"
+          codesign --verify --deep --strict QuickTube.app
+          codesign --verify "$DMG"
+
+      - name: Sign the DMG for Sparkle
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          signature=$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_BIN/sign_update" --ed-key-file - "$DMG")
+          {
+            echo "## Sparkle signature"
+            echo ""
+            echo '```'
+            echo "$signature"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" "$DMG" --verify-tag --title "QuickTube $VERSION" --generate-notes
+
+      - name: Publish appcast.xml to gh-pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          pages="$RUNNER_TEMP/pages"
+          archives="$RUNNER_TEMP/archives"
+          generate_appcast="$PWD/$SPARKLE_BIN/generate_appcast"
+          mkdir -p "$archives"
+          cp "$DMG" "$archives/"
+
+          git init -q "$pages"
+          git -C "$pages" remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          if git -C "$pages" fetch -q --depth 1 origin gh-pages; then
+            git -C "$pages" checkout -q -b gh-pages FETCH_HEAD
+          else
+            git -C "$pages" checkout -q --orphan gh-pages
+          fi
+          # generate_appcast adds the new DMG to the existing feed and keeps the older items.
+          if [ -f "$pages/appcast.xml" ]; then cp "$pages/appcast.xml" "$archives/"; fi
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$generate_appcast" --ed-key-file - \
+            --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/" \
+            --link "https://github.com/$GITHUB_REPOSITORY" \
+            "$archives"
+
+          cp "$archives/appcast.xml" "$pages/appcast.xml"
+          touch "$pages/.nojekyll"
+          git -C "$pages" add appcast.xml .nojekyll
+          git -C "$pages" -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Appcast for $TAG"
+          git -C "$pages" -c credential.helper= -c credential.helper='!gh auth git-credential' \
+            push -q origin gh-pages
+
+      - name: Delete the temporary keychain
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN:-}" ]; then security delete-keychain "$KEYCHAIN" || true; fi
