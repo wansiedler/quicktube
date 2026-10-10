@@ -8,6 +8,29 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("General") {
+                Toggle(
+                    "Launch at login",
+                    isOn: Binding(
+                        get: { model.launchAtLogin },
+                        set: { model.setLaunchAtLogin($0) })
+                )
+                .disabled(!LaunchAtLogin.isAvailable)
+                if let message = model.launchAtLoginMessage {
+                    Text(message).font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            Section("Permissions") {
+                permissionRow(
+                    "Microphone", status: model.microphoneStatus, pane: Permissions.microphonePane,
+                    request: { model.requestMicrophone() })
+                permissionRow(
+                    "Screen Recording", status: model.screenRecordingStatus,
+                    pane: Permissions.screenRecordingPane,
+                    request: { model.requestScreenRecording() })
+                Text("macOS applies a new Screen Recording grant after QuickTube is relaunched.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
             Section("Google") {
                 TextField("OAuth client ID", text: $model.clientID)
                 SecureField("OAuth client secret", text: $model.clientSecret)
@@ -42,8 +65,32 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 440)
-        .onAppear { model.refreshAuth() }
+        .onAppear {
+            model.refreshAuth()
+            model.refreshLaunchAtLogin()
+            model.refreshPermissions()
+        }
         .onDisappear { stopListening() }
+    }
+
+    @ViewBuilder
+    private func permissionRow(
+        _ name: String, status: Permissions.Status, pane: URL, request: @escaping () -> Void
+    ) -> some View {
+        HStack {
+            Text(name)
+            Spacer()
+            Text(status.label)
+                .foregroundStyle(status == .granted ? Color.secondary : Color.red)
+            switch status {
+            case .granted:
+                EmptyView()
+            case .notDetermined:
+                Button("Request") { request() }
+            case .denied:
+                Button("Open System Settings") { NSWorkspace.shared.open(pane) }
+            }
+        }
     }
 
     private func startListening() {

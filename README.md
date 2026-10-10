@@ -36,10 +36,13 @@ recordings a day.
 
 | Action | How |
 |---|---|
+| Grant permissions | asked at first launch; status under Settings → Permissions |
 | Start recording | `⌃⌥⌘R` (change in Settings) |
 | Stop and upload | `⌃⌥⌘R` again |
+| Watch progress | a small pill at the bottom of the screen: recording timer → upload % → link (click opens it); it is excluded from the recording |
 | Retry a failed upload | menu → Retry Upload |
 | Find the files | menu → Open Recordings Folder (`~/Movies/QuickTube`) |
+| Start with macOS | Settings → General → Launch at login (installed app only) |
 
 Files are never deleted automatically.
 

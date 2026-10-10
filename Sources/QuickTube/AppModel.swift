@@ -10,6 +10,7 @@ final class AppModel {
     let state: AppState
     private let hotkey = HotkeyManager()
     private let notifier: AppNotifier
+    private var hud: HUDController?
     private static let comboKey = "hotkey.combo"
 
     private(set) var combo: HotkeyManager.Combo
@@ -20,6 +21,10 @@ final class AppModel {
     var signingIn = false
     var authMessage: String?
     private var signInTask: Task<Void, Never>?
+    private(set) var launchAtLogin = false
+    var launchAtLoginMessage: String?
+    private(set) var microphoneStatus = Permissions.microphone
+    private(set) var screenRecordingStatus = Permissions.screenRecording
 
     init() {
         let auth = GoogleAuth(store: KeychainStore())
@@ -46,8 +51,31 @@ final class AppModel {
             guard let self, self.state.failureKind == .auth else { return }
             self.refreshAuth()
         }
+        hud = HUDController(state: state)
         notifier.requestPermission()
         refreshAuth()
+        // Ask for the recording grants now, so the first hotkey press records instead of prompting.
+        if Bundle.main.bundleIdentifier != nil {
+            Task {
+                await Permissions.requestMissing()
+                refreshPermissions()
+            }
+        }
+    }
+
+    func refreshPermissions() {
+        microphoneStatus = Permissions.microphone
+        screenRecordingStatus = Permissions.screenRecording
+    }
+
+    func requestMicrophone() {
+        Task {
+            microphoneStatus = await Permissions.requestMicrophone()
+        }
+    }
+
+    func requestScreenRecording() {
+        screenRecordingStatus = Permissions.requestScreenRecording()
     }
 
     /// Registers `newCombo` and persists it; on failure keeps the previous shortcut and says why.
@@ -63,6 +91,16 @@ final class AppModel {
             hotkey.register(previous)
             hotkeyMessage = "\(newCombo.label) is already in use by another app. Kept \(previous.label)."
         }
+    }
+
+    /// Re-reads the login-item state; the user may have changed it in System Settings.
+    func refreshLaunchAtLogin() {
+        launchAtLogin = LaunchAtLogin.isEnabled
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        launchAtLoginMessage = LaunchAtLogin.setEnabled(enabled)
+        launchAtLogin = LaunchAtLogin.isEnabled
     }
 
     func suspendHotkey() {
