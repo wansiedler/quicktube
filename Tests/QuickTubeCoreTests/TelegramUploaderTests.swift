@@ -324,7 +324,7 @@ extension NetworkSuite {
                     return output
                 })
             try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
-            let file = try makeFile(bytes: 20 << 20)
+            let file = try makeFile(bytes: 20 * 1_048_576)
             defer { try? FileManager.default.removeItem(at: file) }
             StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
 
