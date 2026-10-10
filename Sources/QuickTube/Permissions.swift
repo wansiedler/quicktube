@@ -3,7 +3,8 @@ import CoreGraphics
 import Foundation
 
 /// The TCC grants QuickTube uses. Microphone and screen recording are asked for up front instead of on
-/// the first hotkey press; the camera only when the camera bubble is first turned on.
+/// the first hotkey press; the camera only when the camera bubble is first turned on; Input Monitoring
+/// (for the keystroke overlay) only from its Settings button.
 @MainActor
 enum Permissions {
     enum Status: Equatable {
@@ -21,10 +22,12 @@ enum Permissions {
     }
 
     private static let screenAskedKey = "permissions.screenRecordingAsked"
+    private static let inputMonitoringAskedKey = "permissions.inputMonitoringAsked"
     private static let securityPane = "x-apple.systempreferences:com.apple.preference.security?"
     static let microphonePane = URL(string: securityPane + "Privacy_Microphone")!
     static let screenRecordingPane = URL(string: securityPane + "Privacy_ScreenCapture")!
     static let cameraPane = URL(string: securityPane + "Privacy_Camera")!
+    static let inputMonitoringPane = URL(string: securityPane + "Privacy_ListenEvent")!
 
     static var microphone: Status { status(for: .audio) }
 
@@ -42,6 +45,19 @@ enum Permissions {
     static var screenRecording: Status {
         if CGPreflightScreenCaptureAccess() { return .granted }
         return UserDefaults.standard.bool(forKey: screenAskedKey) ? .denied : .notDetermined
+    }
+
+    /// Global key events (the keystroke overlay). Like screen capture, TCC has no "undetermined" query.
+    static var inputMonitoring: Status {
+        if CGPreflightListenEventAccess() { return .granted }
+        return UserDefaults.standard.bool(forKey: inputMonitoringAskedKey) ? .denied : .notDetermined
+    }
+
+    /// Shows the system prompt once per install; later calls only report the state.
+    static func requestInputMonitoring() -> Status {
+        UserDefaults.standard.set(true, forKey: inputMonitoringAskedKey)
+        _ = CGRequestListenEventAccess()
+        return inputMonitoring
     }
 
     static func requestMicrophone() async -> Status {

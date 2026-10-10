@@ -97,6 +97,31 @@ struct SettingsView: View {
                         .disabled(model.state.history.isEmpty)
                 }
             }
+            Section("Overlays") {
+                Toggle("Highlight clicks", isOn: $model.settings.clickHighlightEnabled)
+                HStack {
+                    Toggle("Show keystrokes", isOn: $model.settings.keystrokeOverlayEnabled)
+                        .disabled(model.inputMonitoringStatus != .granted)
+                    Spacer()
+                    switch model.inputMonitoringStatus {
+                    case .granted:
+                        EmptyView()
+                    case .notDetermined:
+                        Button("Request") { model.requestInputMonitoring() }
+                    case .denied:
+                        Button("Open System Settings") {
+                            NSWorkspace.shared.open(Permissions.inputMonitoringPane)
+                        }
+                    }
+                }
+                Toggle("Show overlays in recording", isOn: $model.settings.overlaysInRecording)
+                Text(
+                    "While recording, a ring marks each click and a pill above the status bar shows the last "
+                        + "key combo. Keystrokes need Input Monitoring. With \"Show overlays in recording\" off "
+                        + "you still see them, but the video does not."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+            }
             Section("Permissions") {
                 permissionRow(
                     "Microphone", status: model.microphoneStatus, pane: Permissions.microphonePane,
@@ -108,6 +133,10 @@ struct SettingsView: View {
                 permissionRow(
                     "Camera", status: model.cameraStatus, pane: Permissions.cameraPane,
                     request: { model.requestCamera() })
+                permissionRow(
+                    "Input Monitoring", status: model.inputMonitoringStatus,
+                    pane: Permissions.inputMonitoringPane,
+                    request: { model.requestInputMonitoring() })
                 Text("macOS applies a new Screen Recording grant after QuickTube is relaunched.")
                     .font(.callout).foregroundStyle(.secondary)
             }

@@ -14,6 +14,8 @@ final class AppModel {
     private var hud: HUDController?
     private let selectionOverlay = SelectionOverlay()
     private let camera = CameraPanel()
+    private let clickOverlay = ClickOverlay()
+    private let keystrokeOverlay = KeystrokeOverlay()
     /// The windows the recorder leaves out; filled in once the HUD exists.
     private let exclusions = WindowExclusions()
     @ObservationIgnored private var activationObserver: NSObjectProtocol?
@@ -53,6 +55,7 @@ final class AppModel {
     private(set) var microphoneStatus = Permissions.microphone
     private(set) var screenRecordingStatus = Permissions.screenRecording
     private(set) var cameraStatus = Permissions.camera
+    private(set) var inputMonitoringStatus = Permissions.inputMonitoring
 
     /// The frontmost app and the screen under the cursor, read when a recording starts.
     private static func currentTitleContext() -> TitleContext {
@@ -143,13 +146,24 @@ final class AppModel {
         }
         let hud = HUDController(state: state)
         self.hud = hud
-        // Only the HUD and the selection overlay stay out of recordings; the camera bubble is recorded.
-        exclusions.windows = { [weak hud, selectionOverlay] in
-            [hud?.windowNumber, selectionOverlay.windowNumber].compactMap { $0 }
+        // The HUD and the selection overlay stay out of recordings; the camera bubble is recorded; the
+        // click and keystroke overlays are recorded unless "Show overlays in recording" is off.
+        exclusions.windows = { [weak hud, selectionOverlay, clickOverlay, keystrokeOverlay, settingsStore] in
+            var windows = [hud?.windowNumber, selectionOverlay.windowNumber].compactMap { $0 }
+            if !settingsStore.settings.overlaysInRecording {
+                windows += clickOverlay.windowNumbers
+                windows += [keystrokeOverlay.windowNumber].compactMap { $0 }
+            }
+            return windows
         }
-        // Show the bubble before the recorder starts, so it is in the first frame.
-        state.onRecordingWillStart = { [weak self] _ in self?.updateCamera() }
+        // Show the bubble and the overlay windows before the recorder starts, so the bubble is in the
+        // first frame and the overlays are on screen (and excludable) when the capture filter is built.
+        state.onRecordingWillStart = { [weak self] _ in
+            self?.updateCamera()
+            self?.updateOverlays()
+        }
         observeCamera()
+        observeOverlays()
         // Grants changed in System Settings take effect when QuickTube is next activated.
         activationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
@@ -192,6 +206,42 @@ final class AppModel {
         microphoneStatus = Permissions.microphone
         screenRecordingStatus = Permissions.screenRecording
         cameraStatus = Permissions.camera
+        inputMonitoringStatus = Permissions.inputMonitoring
+    }
+
+    /// Only from the Settings button; never at launch.
+    func requestInputMonitoring() {
+        inputMonitoringStatus = Permissions.requestInputMonitoring()
+    }
+
+    /// Re-arms after every change, like `observeCamera`.
+    private func observeOverlays() {
+        withObservationTracking {
+            updateOverlays()
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.observeOverlays() }
+        }
+    }
+
+    /// Each enabled overlay runs while a recording starts, runs or is paused, and stops otherwise; the
+    /// keystroke overlay also needs the Input Monitoring grant. Start and stop are idempotent.
+    private func updateOverlays() {
+        let settings = settings
+        let recording: Bool
+        switch state.phase {
+        case .recording, .paused: recording = true
+        default: recording = state.isStarting
+        }
+        if recording && settings.clickHighlightEnabled {
+            clickOverlay.start()
+        } else {
+            clickOverlay.stop()
+        }
+        if recording && settings.keystrokeOverlayEnabled && inputMonitoringStatus == .granted {
+            keystrokeOverlay.start()
+        } else {
+            keystrokeOverlay.stop()
+        }
     }
 
     func requestCamera() {
