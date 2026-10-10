@@ -185,6 +185,69 @@ extension NetworkSuite {
             #expect(seen.values == [0, 0.25, 0.5, 1])
         }
 
+        @Test func directUploadSendsDimensionsOfTheOriginal() async throws {
+            let asked = AskedURLs()
+            let uploader = makeUploader(
+                limitBytes: 100,
+                videoInfo: { url in
+                    asked.add(url)
+                    return VideoInfo(width: 2560, height: 1440, fps: 60, duration: 12.6)
+                })
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 50)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+
+            _ = try await uploader.upload(file: file, title: "T") { _ in }
+
+            let body = String(decoding: StubURLProtocol.requests[0].httpBody ?? Data(), as: UTF8.self)
+            #expect(body.contains("name=\"width\"\r\n\r\n2560\r\n"))
+            #expect(body.contains("name=\"height\"\r\n\r\n1440\r\n"))
+            #expect(body.contains("name=\"duration\"\r\n\r\n13\r\n"))
+            #expect(asked.all == [file])
+        }
+
+        @Test func transcodedUploadSendsDimensionsOfTheTranscodedCopy() async throws {
+            let asked = AskedURLs()
+            let calls = TranscodeCalls()
+            let original = VideoInfo(width: 2560, height: 1440, fps: 60, duration: 60)
+            let uploader = makeUploader(
+                limitBytes: 100,
+                videoInfo: { url in
+                    asked.add(url)
+                    return url.lastPathComponent.hasSuffix(".telegram.mp4")
+                        ? VideoInfo(width: 1280, height: 720, fps: 30, duration: 59.6) : original
+                },
+                transcode: fakeTranscode(bytes: 60, calls: calls))
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 200)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+
+            _ = try await uploader.upload(
+                file: file, title: "T", context: UploadContext(display: "Display")
+            ) { _ in }
+
+            let output = try #require(calls.all.first).output
+            #expect(asked.all == [file, output])
+            let body = String(decoding: StubURLProtocol.requests[0].httpBody ?? Data(), as: UTF8.self)
+            #expect(body.contains("name=\"width\"\r\n\r\n1280\r\n"))
+            #expect(body.contains("name=\"height\"\r\n\r\n720\r\n"))
+            #expect(body.contains("name=\"duration\"\r\n\r\n60\r\n"))
+            // The caption still describes the original recording.
+            #expect(body.contains("Display · 2560×1440 · 60 fps"))
+        }
+
+        @Test func unreadableVideoOmitsDimensions() async throws {
+            let uploader = makeUploader()
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 4)
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            _ = try await uploader.upload(file: file, title: "T") { _ in }
+            let body = String(decoding: StubURLProtocol.requests[0].httpBody ?? Data(), as: UTF8.self)
+            #expect(!body.contains("name=\"width\""))
+        }
+
         @Test func fileUnderTheLimitIsNotTranscoded() async throws {
             let uploader = makeUploader(limitBytes: 100, videoInfo: { _ in Self.info })
             try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
@@ -256,4 +319,11 @@ final class TranscodeCalls: @unchecked Sendable {
     func add(input: URL, plan: TranscodePlan, output: URL) {
         lock.withLock { stored.append(Call(input: input, plan: plan, output: output)) }
     }
+}
+
+final class AskedURLs: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [URL] = []
+    var all: [URL] { lock.withLock { stored } }
+    func add(_ url: URL) { lock.withLock { stored.append(url) } }
 }

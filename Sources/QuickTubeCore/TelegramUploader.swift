@@ -111,6 +111,7 @@ public actor TelegramUploader: VideoUploader {
         if let info { caption += "\n" + RecordingNaming.metadataLine(display: context.display, info: info) }
 
         var sending = file
+        var sendingInfo = info
         var sendProgress = progress
         var transcoded: URL?
         defer { if let transcoded { try? FileManager.default.removeItem(at: transcoded) } }
@@ -127,11 +128,20 @@ public actor TelegramUploader: VideoUploader {
             guard newSize > 0 else { throw UploadError.fileUnreadable }
             guard newSize <= limit else { throw TelegramError.fileTooLarge(limit: limit, actual: newSize) }
             sendProgress = { progress(0.5 + $0 * 0.5) }
+            // The player proportions must match the file that is sent, not the recording.
+            do {
+                sendingInfo = try await videoInfo(sending)
+            } catch {
+                log("Telegram: could not read transcoded video info: \(error)")
+                sendingInfo = VideoInfo(
+                    width: plan.width, height: plan.height, fps: info.fps, duration: info.duration)
+            }
         }
 
         let boundary = "QuickTube-\(UUID().uuidString)"
         let body = try Self.multipartBody(
-            boundary: boundary, chat: configuration.chat, caption: caption, file: sending)
+            boundary: boundary, chat: configuration.chat, caption: caption, file: sending,
+            dimensions: sendingInfo)
         defer { try? FileManager.default.removeItem(at: body) }
 
         var request = URLRequest(url: baseURL.appending(path: "bot\(configuration.botToken)/sendVideo"))
@@ -196,7 +206,11 @@ public actor TelegramUploader: VideoUploader {
     }
 
     /// Streams the video into a temporary multipart file so the request body is never held in memory.
-    static func multipartBody(boundary: String, chat: String, caption: String, file: URL) throws -> URL {
+    static func multipartBody(
+        boundary: String, chat: String, caption: String, file: URL, dimensions: VideoInfo? = nil
+    )
+        throws -> URL
+    {
         let out = FileManager.default.temporaryDirectory.appending(
             path: "quicktube-\(UUID().uuidString).multipart")
         FileManager.default.createFile(atPath: out.path, contents: nil)
@@ -211,6 +225,12 @@ public actor TelegramUploader: VideoUploader {
         try field("chat_id", chat)
         try field("caption", caption)
         try field("supports_streaming", "true")
+        // Without these the Bot API guesses the player proportions and may squeeze wide videos.
+        if let dimensions {
+            try field("width", String(dimensions.width))
+            try field("height", String(dimensions.height))
+            try field("duration", String(Int(dimensions.duration.rounded())))
+        }
         let filename = file.lastPathComponent.replacingOccurrences(of: "\"", with: "")
         try writer.write(
             contentsOf: Data(

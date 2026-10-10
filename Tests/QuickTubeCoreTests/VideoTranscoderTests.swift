@@ -113,6 +113,41 @@ import VideoToolbox
     }
 
     @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
+    func keepsTheNaturalLandscapeSize() async throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appending(path: "wide.mov")
+        try await ClipMaker.make(input, width: 640, height: 360, fps: 30, seconds: 1)
+        let sourceInfo = try await VideoInfo.read(input)
+        let plan = VideoTranscoder.plan(info: sourceInfo, limitBytes: Self.fiftyMB, allowDownscale: false)
+        #expect(plan.width == 640 && plan.height == 360)
+        let output = dir.appending(path: "wide.telegram.mp4")
+
+        _ = try await VideoTranscoder.transcode(input, plan: plan, output: output) { _ in }
+
+        let info = try await VideoInfo.read(output)
+        #expect(info.width == 640 && info.height == 360)
+    }
+
+    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
+    func scalesToThePlanSizeForADifferentAspect() async throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appending(path: "boxy.mov")
+        try await ClipMaker.make(input, width: 640, height: 480, fps: 30, seconds: 1)
+        // Bars versus stretch is not checkable here; the output must have exactly the plan size.
+        let plan = TranscodePlan(width: 640, height: 360, videoBitrate: 300_000, audioBitrate: 64_000)
+        let output = dir.appending(path: "boxy.telegram.mp4")
+
+        _ = try await VideoTranscoder.transcode(input, plan: plan, output: output) { _ in }
+
+        let info = try await VideoInfo.read(output)
+        #expect(info.width == 640 && info.height == 360)
+    }
+
+    @Test(.enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() })
     func keepsTheAudioTrack() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
