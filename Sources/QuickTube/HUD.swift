@@ -50,7 +50,7 @@ final class HUDController {
         switch state.phase {
         case .idle:
             panel.orderOut(nil)
-        case .recording, .uploading:
+        case .recording, .paused, .uploading:
             show()
         case .done:
             show()
@@ -89,7 +89,6 @@ final class HUDController {
 struct HUDView: View {
     let state: AppState
     let maxWidth: CGFloat
-    @State private var recordingStart = Date()
 
     var body: some View {
         HStack(spacing: 10) {
@@ -98,11 +97,13 @@ struct HUDView: View {
                 EmptyView()
             case .recording:
                 Circle().fill(Color.red).frame(width: 10, height: 10)
-                TimelineView(.periodic(from: recordingStart, by: 1)) { context in
-                    Text("Recording \(elapsed(since: recordingStart, now: context.date))")
+                TimelineView(.periodic(from: Date(), by: 1)) { context in
+                    Text("Recording \(clock(state.recordedDuration(at: context.date)))")
                         .monospacedDigit()
                 }
-                .onAppear { recordingStart = Date() }
+            case .paused:
+                // The timer stands still: no TimelineView, the recorded time does not grow while paused.
+                Text("Paused ⏸ \(clock(state.recordedDuration(at: Date())))").monospacedDigit()
             case .uploading(let progress):
                 ProgressView(value: progress).frame(width: 120)
                 Text("Uploading \(Int(progress * 100))%").monospacedDigit()
@@ -124,8 +125,8 @@ struct HUDView: View {
         .padding(6)
     }
 
-    private func elapsed(since start: Date, now: Date) -> String {
-        let seconds = max(0, Int(now.timeIntervalSince(start)))
+    private func clock(_ duration: TimeInterval) -> String {
+        let seconds = max(0, Int(duration))
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 }

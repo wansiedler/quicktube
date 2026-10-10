@@ -30,6 +30,19 @@ struct SettingsView: View {
                     ForEach(RecordingQuality.frameRates, id: \.self) { Text("\($0) fps").tag($0) }
                 }
                 .pickerStyle(.segmented)
+                Toggle(
+                    "Pause and resume (\(AppModel.pauseCombo.label))",
+                    isOn: Binding(
+                        get: { model.settings.pauseEnabled },
+                        set: { model.setPauseEnabled($0) }))
+                Stepper(
+                    "Trim start: \(seconds(model.settings.trimHeadSeconds))",
+                    value: $model.settings.trimHeadSeconds, in: 0...3, step: 0.5)
+                Stepper(
+                    "Trim end: \(seconds(model.settings.trimTailSeconds))",
+                    value: $model.settings.trimTailSeconds, in: 0...3, step: 0.5)
+                Text("Trim end removes the stop-shortcut press. At least half a second is always kept.")
+                    .font(.callout).foregroundStyle(.secondary)
                 TextField("Title template", text: $model.settings.titleTemplate)
                 Text(
                     "Names the file and the upload. {date} is the start time, {app} the frontmost app, {display} the screen name."
@@ -180,6 +193,10 @@ struct SettingsView: View {
             if let height = documentHeight(in: child) { return height }
         }
         return nil
+    }
+
+    private func seconds(_ value: Double) -> String {
+        value.formatted(.number.precision(.fractionLength(1))) + " s"
     }
 
     @ViewBuilder

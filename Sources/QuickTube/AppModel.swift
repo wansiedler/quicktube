@@ -17,6 +17,9 @@ final class AppModel {
         .drive: "hotkey.driveCombo", .slack: "hotkey.slackCombo",
     ]
     private static let slots: [Destination: UInt32] = [.youtube: 1, .telegram: 2, .drive: 3, .slack: 4]
+    /// Pause/resume; registered only while `pauseEnabled` is on.
+    private static let pauseSlot: UInt32 = 5
+    static let pauseCombo = HotkeyManager.Combo.pauseDefault
 
     private(set) var combos: [Destination: HotkeyManager.Combo] = [:]
     var hotkeyMessage: String?
@@ -81,6 +84,10 @@ final class AppModel {
                 .slack: slack,
             ],
             notifier: notifier,
+            trim: {
+                let settings = AppSettings.load(from: .standard)
+                return TrimSettings(head: settings.trimHeadSeconds, tail: settings.trimTailSeconds)
+            },
             titleProvider: { MainActor.assumeIsolated { Self.currentTitleContext() } },
             titleTemplate: { AppSettings.load(from: .standard).titleTemplate },
             log: { DiagnosticsLog.append($0) })
@@ -91,9 +98,12 @@ final class AppModel {
                 .flatMap { try? JSONDecoder().decode(HotkeyManager.Combo.self, from: $0) } ?? fallback
         }
         hotkey.onPress = { [weak self] slot in
-            guard let self, let destination = Self.slots.first(where: { $0.value == slot })?.key else {
+            guard let self else { return }
+            if slot == Self.pauseSlot {
+                Task { await self.state.togglePause() }
                 return
             }
+            guard let destination = Self.slots.first(where: { $0.value == slot })?.key else { return }
             Task { await self.state.toggle(destination: destination) }
         }
         for destination in Destination.allCases {
@@ -102,6 +112,7 @@ final class AppModel {
                 hotkeyMessage = "\(combo.label) is already in use by another app. Choose another shortcut."
             }
         }
+        updatePauseHotkey()
         // A revoked or missing token surfaces during upload; re-read the Keychain so
         // Settings stops showing "Signed in".
         notifier.onFailure = { [weak self] in
@@ -137,6 +148,25 @@ final class AppModel {
         screenRecordingStatus = Permissions.requestScreenRecording()
     }
 
+    /// Turns pause/resume (menu item and hotkey) on or off.
+    func setPauseEnabled(_ enabled: Bool) {
+        settings.pauseEnabled = enabled
+        updatePauseHotkey()
+    }
+
+    private func updatePauseHotkey() {
+        guard settings.pauseEnabled else {
+            hotkey.remove(slot: Self.pauseSlot)
+            return
+        }
+        if combos.values.contains(Self.pauseCombo) {
+            hotkeyMessage =
+                "\(Self.pauseCombo.label) is taken by a destination shortcut; pause has no hotkey."
+        } else if !hotkey.register(Self.pauseCombo, slot: Self.pauseSlot) {
+            hotkeyMessage = "\(Self.pauseCombo.label) is already in use by another app; pause has no hotkey."
+        }
+    }
+
     func combo(for destination: Destination) -> HotkeyManager.Combo {
         combos[destination] ?? .fallback(for: destination)
     }
@@ -147,6 +177,10 @@ final class AppModel {
         let slot = Self.slots[destination]!
         if let other = combos.first(where: { $0.key != destination && $0.value == newCombo }) {
             hotkeyMessage = "\(newCombo.label) is already the \(other.key.label) shortcut."
+            return
+        }
+        if settings.pauseEnabled, newCombo == Self.pauseCombo {
+            hotkeyMessage = "\(newCombo.label) is the pause shortcut."
             return
         }
         if hotkey.register(newCombo, slot: slot) {

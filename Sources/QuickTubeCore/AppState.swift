@@ -1,10 +1,15 @@
 import Foundation
 import Observation
 
+/// A recording is a list of segments: pausing closes one, resuming opens the next.
 public protocol ScreenRecorder: Sendable {
-    func start() async throws
-    /// Returns the finished file.
-    func stop() async throws -> URL
+    func start(target: CaptureTarget) async throws
+    /// Closes the current segment. `RecorderError.notRecording` unless recording.
+    func pause() async throws
+    /// Opens a new segment with the same target. `RecorderError.notPaused` unless paused.
+    func resume() async throws
+    /// Returns the segment files, in order; works while recording or paused.
+    func stop() async throws -> [URL]
 }
 
 public enum RecorderError: Error, Equatable {
@@ -13,8 +18,11 @@ public enum RecorderError: Error, Equatable {
     case noDisplay
     case alreadyRecording
     case notRecording
-    /// The file was not finalized in time; it is kept so the upload can still be retried.
-    case stopTimedOut(file: URL)
+    case notPaused
+    /// The last segment was not finalized in time; all segments are kept so finishing can be retried.
+    case stopTimedOut(segments: [URL])
+    /// Joining or trimming the segments failed; the segments are kept.
+    case finishFailed(String)
 }
 
 /// Side effects of a finished or failed cycle: clipboard, notification.
@@ -71,12 +79,13 @@ public enum DestinationError: Error, Equatable {
 public enum Phase: Equatable, Sendable {
     case idle
     case recording
+    case paused
     case uploading(progress: Double)
     case done(link: URL)
     case failed(message: String, file: URL?)
 }
 
-/// idle → recording → uploading → done; failed keeps the file for a retry.
+/// idle → recording ⇄ paused → (finish) → uploading → done; failed keeps the file or the segments for a retry.
 @MainActor
 @Observable
 public final class AppState {
@@ -91,6 +100,10 @@ public final class AppState {
     private let recorder: ScreenRecorder
     private let uploaders: [Destination: VideoUploader]
     private let notifier: Notifier
+    private let finisher: RecordingFinishing
+    private let trim: @Sendable () -> TrimSettings
+    private let captureTarget: @Sendable () -> CaptureTarget
+    private let clock: @Sendable () -> Date
     private let titleProvider: @Sendable () -> TitleContext
     private let titleTemplate: @Sendable () -> String
     /// Diagnostics sink for failures that are not surfaced to the user.
@@ -100,6 +113,11 @@ public final class AppState {
     /// Title and context of the file being uploaded; `retry()` reuses them.
     private var pendingTitle: String?
     private var pendingUploadContext = UploadContext()
+    /// Segments of a recording whose finishing failed; `retry()` finishes them again.
+    private var pendingSegments: [URL]?
+    /// Recorded time before the current stretch, and when that stretch began (nil while paused).
+    private var recordedBefore: TimeInterval = 0
+    private var stretchStart: Date?
     /// Set while a transition is in flight, so a second hotkey press cannot re-enter it.
     private var busy = false
 
@@ -107,19 +125,26 @@ public final class AppState {
         recorder: ScreenRecorder,
         uploader: VideoUploader,
         notifier: Notifier,
+        finisher: RecordingFinishing = RecordingFinisher(),
+        trim: @escaping @Sendable () -> TrimSettings = { .none },
         titleProvider: @escaping @Sendable () -> TitleContext = { TitleContext() },
         titleTemplate: @escaping @Sendable () -> String = { "{date}" },
         log: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         self.init(
-            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
-            titleProvider: titleProvider, titleTemplate: titleTemplate, log: log)
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, finisher: finisher,
+            trim: trim, titleProvider: titleProvider, titleTemplate: titleTemplate, log: log)
     }
 
+    /// `trim` and `captureTarget` are read at stop and start, so Settings changes apply to the next recording.
     public init(
         recorder: ScreenRecorder,
         uploaders: [Destination: VideoUploader],
         notifier: Notifier,
+        finisher: RecordingFinishing = RecordingFinisher(),
+        trim: @escaping @Sendable () -> TrimSettings = { .none },
+        captureTarget: @escaping @Sendable () -> CaptureTarget = { CaptureTarget.displayUnderCursor() },
+        clock: @escaping @Sendable () -> Date = { Date() },
         titleProvider: @escaping @Sendable () -> TitleContext = { TitleContext() },
         titleTemplate: @escaping @Sendable () -> String = { "{date}" },
         log: @escaping @Sendable (String) -> Void = { _ in }
@@ -127,9 +152,25 @@ public final class AppState {
         self.recorder = recorder
         self.uploaders = uploaders
         self.notifier = notifier
+        self.finisher = finisher
+        self.trim = trim
+        self.captureTarget = captureTarget
+        self.clock = clock
         self.titleProvider = titleProvider
         self.titleTemplate = titleTemplate
         self.log = log
+    }
+
+    /// True while `.failed` left something `retry()` can pick up: a file to upload or segments to finish.
+    public var canRetry: Bool {
+        guard case .failed(_, let file) = phase else { return false }
+        return file != nil || pendingSegments != nil
+    }
+
+    /// Recorded time of the current recording at `now`, excluding pauses.
+    public func recordedDuration(at now: Date) -> TimeInterval {
+        let running = stretchStart.map { max(0, now.timeIntervalSince($0)) } ?? 0
+        return recordedBefore + running
     }
 
     /// The hotkey action; the destination only matters when it stops a recording.
@@ -140,26 +181,75 @@ public final class AppState {
         switch phase {
         case .idle, .done, .failed:
             await startRecording()
-        case .recording:
+        case .recording, .paused:
             await stopAndUpload(to: destination)
         case .uploading:
             break
         }
     }
 
-    public func retry() async {
-        guard !busy else { return }
-        guard case .failed(_, let file?) = phase else { return }
+    /// The pause hotkey: pauses while recording, resumes while paused, otherwise does nothing.
+    public func togglePause() async {
+        switch phase {
+        case .recording: await pause()
+        case .paused: await resume()
+        default: break
+        }
+    }
+
+    /// Closes the current segment. A failure is logged and still ends in `.paused`: the stream is gone
+    /// either way, and stopping from `.paused` hands whatever was recorded to the finisher.
+    public func pause() async {
+        guard !busy, phase == .recording else { return }
         busy = true
         defer { busy = false }
-        await upload(file, to: destination)
+        do {
+            try await recorder.pause()
+        } catch {
+            log("Pause failed: \(error)")
+        }
+        recordedBefore = recordedDuration(at: clock())
+        stretchStart = nil
+        phase = .paused
+    }
+
+    /// Opens a new segment. On failure the recording stays paused (it can still be stopped) and the
+    /// error is reported.
+    public func resume() async {
+        guard !busy, phase == .paused else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            try await recorder.resume()
+            stretchStart = clock()
+            phase = .recording
+        } catch {
+            log("Resume failed: \(error)")
+            notifier.failed(Self.message(for: error, stage: .recording))
+        }
+    }
+
+    public func retry() async {
+        guard !busy, case .failed(_, let file) = phase else { return }
+        if let segments = pendingSegments {
+            busy = true
+            defer { busy = false }
+            await finishAndUpload(segments, to: destination)
+        } else if let file {
+            busy = true
+            defer { busy = false }
+            await upload(file, to: destination)
+        }
     }
 
     private func startRecording() async {
         let context = titleProvider()
         do {
-            try await recorder.start()
+            try await recorder.start(target: captureTarget())
             titleContext = context
+            pendingSegments = nil
+            recordedBefore = 0
+            stretchStart = clock()
             phase = .recording
         } catch {
             fail(error, file: nil, stage: .recording)
@@ -167,45 +257,56 @@ public final class AppState {
     }
 
     private func stopAndUpload(to destination: Destination) async {
-        let title = RecordingNaming.render(template: titleTemplate(), context: titleContext)
-        pendingTitle = title
+        pendingTitle = RecordingNaming.render(template: titleTemplate(), context: titleContext)
         pendingUploadContext = UploadContext(display: titleContext.display)
-        var file: URL
+        self.destination = destination
+        recordedBefore = recordedDuration(at: clock())
+        stretchStart = nil
+        let segments: [URL]
         do {
-            file = try await recorder.stop()
-        } catch RecorderError.stopTimedOut(let kept) {
-            fail(RecorderError.stopTimedOut(file: kept), file: kept, stage: .recording)
-            return
+            segments = try await recorder.stop()
         } catch {
+            // The segments survive a timeout; finishing them may work once the last one is closed.
+            if case RecorderError.stopTimedOut(let kept) = error { pendingSegments = kept }
             fail(error, file: nil, stage: .recording)
             return
         }
-        file = Self.rename(file, toTitle: title, log: log)
+        await finishAndUpload(segments, to: destination)
+    }
+
+    /// Joins and trims the segments into `<recordings folder>/<title>.mp4`, then uploads that file.
+    /// On failure the segments are remembered so `retry()` can finish them again.
+    private func finishAndUpload(_ segments: [URL], to destination: Destination) async {
+        guard let first = segments.first else {
+            pendingSegments = nil
+            fail(RecorderError.finishFailed("No segments were recorded."), file: nil, stage: .recording)
+            return
+        }
+        let title = pendingTitle ?? RecordingNaming.title(for: titleContext.date)
+        let output = Self.availableURL(in: first.deletingLastPathComponent(), title: title)
+        let file: URL
+        do {
+            file = try await finisher.finish(segments: segments, trim: trim(), output: output)
+        } catch {
+            log("Finishing \(segments.map(\.lastPathComponent)) failed: \(error)")
+            pendingSegments = segments
+            fail(error, file: nil, stage: .recording)
+            return
+        }
+        pendingSegments = nil
         await upload(file, to: destination)
     }
 
-    /// Gives the finished recording its title as file name; on a name clash appends " (2)", " (3)", ….
-    /// Only the file name changes: after a clash the file is "Title (2).mp4" while the upload title
-    /// stays "Title". Falls back to the original file (and logs) if the rename is not possible.
-    nonisolated static func rename(
-        _ file: URL, toTitle title: String, log: @Sendable (String) -> Void
-    ) -> URL {
-        let directory = file.deletingLastPathComponent()
-        let ext = file.pathExtension.isEmpty ? "mp4" : file.pathExtension
-        var target = directory.appending(path: "\(title).\(ext)")
-        if target == file { return file }
+    /// `<title>.mp4` in `directory`; on a name clash " (2)", " (3)", … is appended. Only the file name
+    /// changes: after a clash the file is "Title (2).mp4" while the upload title stays "Title".
+    nonisolated static func availableURL(in directory: URL, title: String) -> URL {
+        var target = directory.appending(path: "\(title).mp4")
         var counter = 2
         while FileManager.default.fileExists(atPath: target.path) {
-            target = directory.appending(path: "\(title) (\(counter)).\(ext)")
+            target = directory.appending(path: "\(title) (\(counter)).mp4")
             counter += 1
         }
-        do {
-            try FileManager.default.moveItem(at: file, to: target)
-            return target
-        } catch {
-            log("Rename \(file.path) -> \(target.path) failed: \(error)")
-            return file
-        }
+        return target
     }
 
     private func upload(_ file: URL, to destination: Destination) async {
@@ -296,7 +397,10 @@ public final class AppState {
         case RecorderError.microphonePermissionDenied:
             return "Allow Microphone for QuickTube in System Settings → Privacy & Security."
         case RecorderError.stopTimedOut:
-            return "Recording did not finalize in time; the file was kept. Try Retry Upload."
+            return
+                "Recording did not finalize in time; segments are kept in the recordings folder. Try Retry."
+        case RecorderError.finishFailed:
+            return "Could not finalize the recording; segments are kept in the recordings folder."
         default:
             switch stage {
             case .recording: return "Recording failed: \(error)"

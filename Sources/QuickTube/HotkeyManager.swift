@@ -26,6 +26,10 @@ final class HotkeyManager {
             keyCode: UInt32(kVK_ANSI_S),
             modifiers: UInt32(controlKey | optionKey | cmdKey),
             label: "⌃⌥⌘S")
+        static let pauseDefault = Combo(
+            keyCode: UInt32(kVK_ANSI_P),
+            modifiers: UInt32(controlKey | optionKey | cmdKey),
+            label: "⌃⌥⌘P")
 
         static func fallback(for destination: Destination) -> Combo {
             switch destination {
@@ -116,6 +120,12 @@ final class HotkeyManager {
         refs[slot] = ref
         active[slot] = combo
         return true
+    }
+
+    /// Releases the hotkey in `slot` for good; `resume()` does not bring it back.
+    func remove(slot: UInt32) {
+        unregister(slot)
+        active[slot] = nil
     }
 
     /// Temporarily releases every hotkey, e.g. while Settings records a new combo.

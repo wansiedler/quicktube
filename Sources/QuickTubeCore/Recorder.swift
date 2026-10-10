@@ -3,7 +3,8 @@ import CoreGraphics
 import Foundation
 import ScreenCaptureKit
 
-/// Records the display under the cursor with microphone audio to an HEVC .mp4.
+/// Records a display with microphone audio to HEVC .mp4 segments: `<date>.seg1.mp4`, `.seg2.mp4`, …
+/// Pausing closes the current segment, resuming opens the next one with the same target.
 public actor Recorder: ScreenRecorder {
     public static let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appending(path: "Movies/QuickTube")
@@ -19,7 +20,17 @@ public actor Recorder: ScreenRecorder {
         case idle
         case starting
         case recording(Session)
+        case pausing
+        case paused
+        case resuming
         case stopping
+    }
+
+    /// The recording in progress: where it captures, its file stem, and the closed segments.
+    private struct Take {
+        let target: CaptureTarget
+        let stem: String
+        var segments: [URL] = []
     }
 
     private static let stopTimeout: Duration = .seconds(10)
@@ -27,6 +38,7 @@ public actor Recorder: ScreenRecorder {
     private let directory: URL
     private let quality: @Sendable () -> RecordingQuality
     private var state = State.idle
+    private var take: Take?
 
     /// `quality` is read at the start of every recording, so Settings changes apply to the next one.
     public init(
@@ -37,13 +49,43 @@ public actor Recorder: ScreenRecorder {
         self.quality = quality
     }
 
-    public func start() async throws {
+    public func start(target: CaptureTarget) async throws {
         guard case .idle = state else { throw RecorderError.alreadyRecording }
         state = .starting
+        let take = Take(target: target, stem: RecordingNaming.title(for: Date()))
         do {
-            state = .recording(try await beginSession())
+            state = .recording(try await beginSession(take, index: 1))
+            self.take = take
         } catch {
             state = .idle
+            throw error
+        }
+    }
+
+    /// Closes the current segment. If closing fails the recorder is still paused (the stream is gone),
+    /// keeping the segment file if one was written, and the error is rethrown.
+    public func pause() async throws {
+        guard case .recording(let session) = state else { throw RecorderError.notRecording }
+        state = .pausing
+        defer { state = .paused }
+        do {
+            try await end(session)
+            take?.segments.append(session.fileURL)
+        } catch {
+            if FileManager.default.fileExists(atPath: session.fileURL.path) {
+                take?.segments.append(session.fileURL)
+            }
+            throw error
+        }
+    }
+
+    public func resume() async throws {
+        guard case .paused = state, let take else { throw RecorderError.notPaused }
+        state = .resuming
+        do {
+            state = .recording(try await beginSession(take, index: take.segments.count + 1))
+        } catch {
+            state = .paused
             throw error
         }
     }
@@ -65,7 +107,7 @@ public actor Recorder: ScreenRecorder {
         try await stream.value.stopCapture()
     }
 
-    private func beginSession() async throws -> Session {
+    private func beginSession(_ take: Take, index: Int) async throws -> Session {
         guard await AVCaptureDevice.requestAccess(for: .audio) else {
             throw RecorderError.microphonePermissionDenied
         }
@@ -75,9 +117,8 @@ public actor Recorder: ScreenRecorder {
         } catch {
             throw RecorderError.screenPermissionDenied
         }
-        let cursor = CGEvent(source: nil)?.location ?? .zero
-        guard
-            let display = content.displays.first(where: { CGDisplayBounds($0.displayID).contains(cursor) })
+        guard case .display(let displayID) = take.target,
+            let display = content.displays.first(where: { $0.displayID == displayID })
                 ?? content.displays.first
         else { throw RecorderError.noDisplay }
 
@@ -99,7 +140,7 @@ public actor Recorder: ScreenRecorder {
         configuration.captureMicrophone = true
 
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appending(path: RecordingNaming.fileName(for: Date()))
+        let url = directory.appending(path: "\(take.stem).seg\(index).mp4")
         let recording = SCRecordingOutputConfiguration()
         recording.outputURL = url
         recording.outputFileType = .mp4
@@ -113,14 +154,36 @@ public actor Recorder: ScreenRecorder {
         return Session(stream: stream, output: output, fileURL: url, delegate: delegate)
     }
 
-    public func stop() async throws -> URL {
-        guard case .recording(let session) = state else { throw RecorderError.notRecording }
+    /// Closes the open segment, if any, and returns every segment. A segment that does not close in time
+    /// surfaces as `stopTimedOut` carrying all segments, so finishing them can be retried.
+    public func stop() async throws -> [URL] {
+        let session: Session?
+        switch state {
+        case .recording(let current): session = current
+        case .paused: session = nil
+        default: throw RecorderError.notRecording
+        }
         state = .stopping
-        defer { state = .idle }
+        var segments = take?.segments ?? []
+        defer {
+            state = .idle
+            take = nil
+        }
+        guard let session else { return segments }
+        do {
+            try await end(session)
+        } catch RecorderError.stopTimedOut {
+            throw RecorderError.stopTimedOut(segments: segments + [session.fileURL])
+        }
+        segments.append(session.fileURL)
+        return segments
+    }
+
+    /// Stops the stream and waits (bounded) until the segment file is closed.
+    private func end(_ session: Session) async throws {
         try await Self.stopCapture(Unchecked(value: session.stream))
         try await session.delegate.waitUntilFinished(
-            timeout: Self.stopTimeout, timeoutError: RecorderError.stopTimedOut(file: session.fileURL))
-        return session.fileURL
+            timeout: Self.stopTimeout, timeoutError: RecorderError.stopTimedOut(segments: [session.fileURL]))
     }
 }
 

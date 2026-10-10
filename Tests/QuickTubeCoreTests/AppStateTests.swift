@@ -5,6 +5,10 @@ import Testing
 final class FakeRecorder: ScreenRecorder, @unchecked Sendable {
     var startError: Error?
     var stopError: Error?
+    var pauseError: Error?
+    var resumeError: Error?
+    /// What stop() returns; defaults to the single `file`.
+    var segments: [URL]?
     /// A real empty file in a private temp directory, removed with the fake.
     let directory = FileManager.default.temporaryDirectory.appending(path: "qt-rec-\(UUID().uuidString)")
     var file: URL
@@ -22,21 +26,54 @@ final class FakeRecorder: ScreenRecorder, @unchecked Sendable {
     }
     var starts = 0
     var stops = 0
+    var pauses = 0
+    var resumes = 0
+    var targets: [CaptureTarget] = []
     /// While true, start() and stop() suspend after counting the call.
     var hold = false
 
-    func start() async throws {
+    func start(target: CaptureTarget) async throws {
         starts += 1
+        targets.append(target)
         while hold { await Task.yield() }
         if let startError { throw startError }
     }
 
-    func stop() async throws -> URL {
+    func pause() async throws {
+        pauses += 1
+        if let pauseError { throw pauseError }
+    }
+
+    func resume() async throws {
+        resumes += 1
+        if let resumeError { throw resumeError }
+    }
+
+    func stop() async throws -> [URL] {
         stops += 1
         while hold { await Task.yield() }
         if let stopError { throw stopError }
-        return file
+        return segments ?? [file]
     }
+}
+
+final class FakeFinisher: RecordingFinishing, @unchecked Sendable {
+    var error: Error?
+    var calls: [(segments: [URL], trim: TrimSettings, output: URL)] = []
+
+    func finish(segments: [URL], trim: TrimSettings, output: URL) async throws -> URL {
+        calls.append((segments, trim, output))
+        if let error { throw error }
+        return output
+    }
+}
+
+/// A clock the test moves by hand.
+final class ManualClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = Date(timeIntervalSince1970: 0)
+    var now: Date { lock.withLock { current } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { current += seconds } }
 }
 
 final class FakeUploader: VideoUploader, @unchecked Sendable {
@@ -148,9 +185,9 @@ final class LogLines: @unchecked Sendable {
         #expect(!FileManager.default.fileExists(atPath: recorded.path))
     }
 
-    @Test func renameFailureLogsAndUploadsTheOriginalFile() async throws {
+    @Test func finishFailureKeepsSegmentsAndRetryFinishesAgain() async throws {
         let lines = LogLines()
-        // A read-only directory: the file cannot be renamed inside it.
+        // A read-only directory: the segment cannot be moved to its final name inside it.
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o555], ofItemAtPath: recorder.directory.path)
         let state = AppState(
@@ -159,13 +196,23 @@ final class LogLines: @unchecked Sendable {
         await state.toggle()
         await state.toggle()
 
+        let message = "Could not finalize the recording; segments are kept in the recordings folder."
+        #expect(state.phase == .failed(message: message, file: nil))
+        #expect(state.canRetry)
+        #expect(uploader.uploads.isEmpty)
+        #expect(notifier.failures == [message])
+        #expect(FileManager.default.fileExists(atPath: recorder.file.path))
+        #expect(lines.all.count == 1)
+        #expect(lines.all[0].contains(recorder.file.lastPathComponent))
+
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: recorder.directory.path)
+        await state.retry()
+        #expect(state.phase == .done(link: URL(string: "https://youtu.be/abc123")!))
         #expect(uploader.uploads.count == 1)
-        #expect(uploader.uploads[0].0 == recorder.file)
+        #expect(uploader.uploads[0].0 == renamed)
         #expect(uploader.uploads[0].1 == RecordingNaming.title(for: now))
-        let logged = lines.all
-        #expect(logged.count == 1)
-        #expect(logged[0].contains(recorder.file.path))
-        #expect(logged[0].contains(renamed.path))
+        #expect(!state.canRetry)
     }
 
     /// On a name clash only the file name changes; the upload keeps the plain title.
@@ -312,22 +359,21 @@ final class LogLines: @unchecked Sendable {
         #expect(notifier.failures.count == 1)
     }
 
-    @Test func stopTimeoutKeepsFileForRetry() async {
-        let kept = URL(fileURLWithPath: "/tmp/kept.mp4")
-        recorder.stopError = RecorderError.stopTimedOut(file: kept)
+    @Test func stopTimeoutKeepsSegmentsForRetry() async {
+        recorder.stopError = RecorderError.stopTimedOut(segments: [recorder.file])
         let state = makeState()
         await state.toggle()
         await state.toggle()
         #expect(
             state.phase
                 == .failed(
-                    message: "Recording did not finalize in time; the file was kept. Try Retry Upload.",
-                    file: kept))
+                    message: AppState.message(for: RecorderError.stopTimedOut(segments: [])), file: nil))
+        #expect(state.canRetry)
         #expect(uploader.uploads.isEmpty)
 
         await state.retry()
         #expect(uploader.uploads.count == 1)
-        #expect(uploader.uploads[0].0 == kept)
+        #expect(uploader.uploads[0].0 == renamed)
         #expect(state.phase == .done(link: URL(string: "https://youtu.be/abc123")!))
     }
 
@@ -410,6 +456,165 @@ final class LogLines: @unchecked Sendable {
                     file: renamed))
     }
 
+    // MARK: - Pause, segments and the finisher
+
+    func makePausableState(
+        finisher: RecordingFinishing, trim: TrimSettings = .none, clock: ManualClock = ManualClock(),
+        log: @escaping @Sendable (String) -> Void = { _ in }
+    ) -> AppState {
+        AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, finisher: finisher,
+            trim: { trim }, captureTarget: { .display(7) }, clock: { clock.now },
+            titleProvider: { [now] in TitleContext(date: now) }, log: log)
+    }
+
+    @Test func startPassesTheCaptureTarget() async {
+        let state = makePausableState(finisher: FakeFinisher())
+        await state.toggle()
+        #expect(recorder.targets == [.display(7)])
+    }
+
+    @Test func pauseAndResumeSwitchPhases() async {
+        let state = makePausableState(finisher: FakeFinisher())
+        await state.toggle()
+        await state.pause()
+        #expect(state.phase == .paused)
+        #expect(recorder.pauses == 1)
+        await state.resume()
+        #expect(state.phase == .recording)
+        #expect(recorder.resumes == 1)
+        await state.togglePause()
+        #expect(state.phase == .paused)
+        await state.togglePause()
+        #expect(state.phase == .recording)
+        #expect(recorder.pauses == 2 && recorder.resumes == 2)
+    }
+
+    @Test func pauseAndResumeAreIgnoredInOtherPhases() async {
+        let state = makePausableState(finisher: FakeFinisher())
+        await state.togglePause()
+        await state.pause()
+        await state.resume()
+        #expect(state.phase == .idle)
+        await state.toggle()
+        await state.resume()
+        #expect(state.phase == .recording)
+        #expect(recorder.pauses == 0 && recorder.resumes == 0)
+    }
+
+    @Test func stopWhilePausedFinishesAllSegmentsAndUploads() async {
+        let finisher = FakeFinisher()
+        let first = recorder.directory.appending(path: "x.seg1.mp4")
+        let second = recorder.directory.appending(path: "x.seg2.mp4")
+        recorder.segments = [first, second]
+        let trim = TrimSettings(head: 0.5, tail: 1)
+        let state = makePausableState(finisher: finisher, trim: trim)
+        await state.toggle()
+        await state.pause()
+        await state.toggle(destination: .youtube)
+
+        #expect(recorder.stops == 1)
+        #expect(finisher.calls.count == 1)
+        #expect(finisher.calls[0].segments == [first, second])
+        #expect(finisher.calls[0].trim == trim)
+        #expect(finisher.calls[0].output == renamed)
+        #expect(uploader.uploads.count == 1)
+        #expect(uploader.uploads[0].0 == renamed)
+        #expect(state.phase == .done(link: URL(string: "https://youtu.be/abc123")!))
+    }
+
+    @Test func finisherFailureRetryRerunsTheFinisher() async {
+        let finisher = FakeFinisher()
+        finisher.error = RecorderError.finishFailed("export")
+        let segments = [URL(fileURLWithPath: "/tmp/a.seg1.mp4"), URL(fileURLWithPath: "/tmp/a.seg2.mp4")]
+        recorder.segments = segments
+        let lines = LogLines()
+        let state = makePausableState(finisher: finisher, log: { lines.append($0) })
+        await state.toggle()
+        await state.toggle()
+        #expect(
+            state.phase
+                == .failed(
+                    message: "Could not finalize the recording; segments are kept in the recordings folder.",
+                    file: nil))
+        #expect(state.canRetry)
+        #expect(uploader.uploads.isEmpty)
+        #expect(lines.all.count == 1)
+
+        finisher.error = nil
+        await state.retry()
+        #expect(finisher.calls.count == 2)
+        #expect(finisher.calls[1].segments == segments)
+        #expect(uploader.uploads.count == 1)
+        #expect(uploader.uploads[0].1 == RecordingNaming.title(for: now))
+        #expect(state.phase == .done(link: URL(string: "https://youtu.be/abc123")!))
+    }
+
+    @Test func noSegmentsFailsWithoutRetry() async {
+        recorder.segments = []
+        let finisher = FakeFinisher()
+        let state = makePausableState(finisher: finisher)
+        await state.toggle()
+        await state.toggle()
+        #expect(finisher.calls.isEmpty)
+        #expect(
+            state.phase
+                == .failed(
+                    message: AppState.message(for: RecorderError.finishFailed("")), file: nil))
+        #expect(!state.canRetry)
+        await state.retry()
+        #expect(finisher.calls.isEmpty)
+    }
+
+    @Test func canRetryOnlyWhenSomethingIsKept() async {
+        let state = makePausableState(finisher: FakeFinisher())
+        #expect(!state.canRetry)
+        recorder.startError = RecorderError.noDisplay
+        await state.toggle()
+        #expect(!state.canRetry)
+    }
+
+    @Test func pauseFailureIsLoggedAndStillPauses() async {
+        recorder.pauseError = RecorderError.stopTimedOut(segments: [])
+        let lines = LogLines()
+        let state = makePausableState(finisher: FakeFinisher(), log: { lines.append($0) })
+        await state.toggle()
+        await state.pause()
+        #expect(state.phase == .paused)
+        #expect(lines.all.count == 1)
+        #expect(notifier.failures.isEmpty)
+    }
+
+    @Test func resumeFailureStaysPausedAndReports() async {
+        recorder.resumeError = RecorderError.screenPermissionDenied
+        let lines = LogLines()
+        let state = makePausableState(finisher: FakeFinisher(), log: { lines.append($0) })
+        await state.toggle()
+        await state.pause()
+        await state.resume()
+        #expect(state.phase == .paused)
+        #expect(notifier.failures == [AppState.message(for: RecorderError.screenPermissionDenied)])
+        #expect(lines.all.count == 1)
+    }
+
+    @Test func recordedDurationExcludesPauses() async {
+        let clock = ManualClock()
+        let state = makePausableState(finisher: FakeFinisher(), clock: clock)
+        await state.toggle()
+        clock.advance(10)
+        #expect(state.recordedDuration(at: clock.now) == 10)
+        await state.pause()
+        clock.advance(100)
+        #expect(state.recordedDuration(at: clock.now) == 10)
+        await state.resume()
+        clock.advance(5)
+        #expect(state.recordedDuration(at: clock.now) == 15)
+        await state.toggle()
+        #expect(state.recordedDuration(at: clock.now) == 15)
+        await state.toggle()
+        #expect(state.recordedDuration(at: clock.now) == 0)
+    }
+
     @Test func messagesAreHumanReadable() {
         let signIn = "Sign in to Google in Settings, then retry the upload."
         #expect(AppState.message(for: AuthError.notSignedIn) == signIn)
@@ -439,8 +644,12 @@ final class LogLines: @unchecked Sendable {
             AppState.message(for: AuthError.badCallback, stage: .signIn)
                 == "Sign-in failed: the browser returned an unexpected response.")
         #expect(
-            AppState.message(for: RecorderError.stopTimedOut(file: URL(fileURLWithPath: "/tmp/x.mp4")))
-                == "Recording did not finalize in time; the file was kept. Try Retry Upload.")
+            AppState.message(for: RecorderError.stopTimedOut(segments: [URL(fileURLWithPath: "/tmp/x.mp4")]))
+                == "Recording did not finalize in time; segments are kept in the recordings folder. Try Retry."
+        )
+        #expect(
+            AppState.message(for: RecorderError.finishFailed("x"))
+                == "Could not finalize the recording; segments are kept in the recordings folder.")
         // Fallback names the stage; upload is the default.
         #expect(AppState.message(for: UploadError.badResponse(500)) == "Upload failed: badResponse(500)")
         #expect(
@@ -463,6 +672,33 @@ final class LogLines: @unchecked Sendable {
         (
             TelegramError.fileTooLarge(limit: 50 << 20, actual: 75 << 20) as Error,
             "File is 75 MB; the Telegram limit is 50 MB (Settings → Telegram)."
+        ),
+        (TelegramError.apiError("Bad Request") as Error, "Telegram refused the upload: Bad Request"),
+        (
+            DriveError.insufficientScope as Error,
+            "Google Drive access was not granted. Sign out and sign in again in Settings."
+        ),
+        (
+            SlackError.notConfigured as Error,
+            "Slack is not set up: add the bot token and channel ID in Settings."
+        ),
+        (SlackError.apiError("not_in_channel") as Error, "Slack refused the upload: not_in_channel"),
+        (UploadError.apiError(status: 400, message: "bad") as Error, "Upload failed (HTTP 400): bad"),
+        (
+            UploadError.apiError(status: 400, message: "exceeded the number of videos") as Error,
+            "YouTube's daily upload limit for this channel is reached; the file is kept. Retry tomorrow."
+        ),
+        (
+            DestinationError.unavailable(.slack) as Error,
+            "Slack is not set up in Settings."
+        ),
+        (
+            DestinationError.unavailable(.drive) as Error,
+            "Google Drive is not set up in Settings."
+        ),
+        (
+            DestinationError.unavailable(.youtube) as Error,
+            "YouTube is not set up in Settings."
         ),
     ])
     @MainActor func messages(error: Error, expected: String) {

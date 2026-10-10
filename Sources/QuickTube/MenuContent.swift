@@ -10,7 +10,12 @@ struct MenuContent: View {
         Text(statusText)
         Divider()
         switch model.state.phase {
-        case .recording:
+        case .recording, .paused:
+            if model.state.phase == .paused {
+                Button("Resume") { Task { await model.state.resume() } }
+            } else if model.settings.pauseEnabled {
+                Button("Pause") { Task { await model.state.pause() } }
+            }
             Button("Stop and Upload to YouTube") { Task { await model.state.toggle(destination: .youtube) } }
             Button("Stop and Send to Telegram") { Task { await model.state.toggle(destination: .telegram) } }
             Button("Stop and Upload to Google Drive") {
@@ -23,8 +28,8 @@ struct MenuContent: View {
             Button("Start Recording") { Task { await model.state.toggle() } }
         }
         if case .failed(_, let file) = model.state.phase {
-            if file != nil {
-                Button("Retry Upload") { Task { await model.state.retry() } }
+            if model.state.canRetry {
+                Button(file != nil ? "Retry Upload" : "Retry") { Task { await model.state.retry() } }
             }
             if let pane = privacyPane {
                 Button("Open Privacy Settings…") { NSWorkspace.shared.open(pane) }
@@ -75,6 +80,7 @@ struct MenuContent: View {
         switch model.state.phase {
         case .idle: "Ready — " + shortcutSummary
         case .recording: "Recording… stop with " + shortcutSummary
+        case .paused: "Paused — resume with \(AppModel.pauseCombo.label), stop with " + shortcutSummary
         case .uploading(let progress): "Uploading \(Int(progress * 100))%"
         case .done(let link): "Uploaded: \(link.absoluteString)"
         case .failed(let message, _): "Failed: \(message)"
@@ -87,6 +93,7 @@ extension Phase {
         switch self {
         case .idle, .done: "record.circle"
         case .recording: "stop.circle.fill"
+        case .paused: "pause.circle"
         case .uploading: "arrow.up.circle"
         case .failed: "exclamationmark.circle"
         }
