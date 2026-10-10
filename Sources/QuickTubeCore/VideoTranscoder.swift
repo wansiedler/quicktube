@@ -435,7 +435,7 @@ public enum VideoTranscoder {
             discard()
             throw TranscodeError.failed("transcoding stopped early")
         }
-        await writer.finishWriting()
+        await writer.finishWritingOnce()
         guard writer.status == .completed else {
             let reason = writer.error?.localizedDescription ?? "writing did not complete"
             try? FileManager.default.removeItem(at: output)
@@ -536,6 +536,34 @@ public enum VideoTranscoder {
             }
             continuation?.resume()
             continuation = nil
+        }
+    }
+}
+
+extension AVAssetWriter {
+    /// `finishWriting()` with a hand-written bridge that resumes once. Built with the Xcode 26 SDK and run
+    /// on the macOS 15 CI runner, the completion handler can run twice (from NSOperation's KVO observer),
+    /// and the compiler-generated bridge then resumes its continuation a second time: SIGSEGV in
+    /// `swift_continuation_resume`, or SIGTRAP. Later calls of the handler are ignored here.
+    public func finishWritingOnce() async {
+        let once = ResumeOnce()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            finishWriting {
+                if once.claim() { continuation.resume() }
+            }
+        }
+    }
+}
+
+/// True from `claim()` exactly once.
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.withLock {
+            defer { claimed = true }
+            return !claimed
         }
     }
 }

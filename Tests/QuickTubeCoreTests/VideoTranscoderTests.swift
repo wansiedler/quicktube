@@ -516,7 +516,7 @@ enum ClipMaker {
             throw Failure()
         }
         writer.endSession(atSourceTime: CMTime(value: Int64(fps) * Int64(seconds), timescale: fps))
-        await writer.finishWriting()
+        await writer.finishWritingOnce()
         guard writer.status == .completed else { throw Failure() }
     }
 }

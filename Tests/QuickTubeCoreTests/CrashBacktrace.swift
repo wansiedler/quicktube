@@ -33,7 +33,13 @@ private let crashHandler:
     @convention(c) (Int32, UnsafeMutablePointer<__siginfo>?, UnsafeMutableRawPointer?) -> Void = {
         signal, info, context in
         // A second fault while reporting must end the process, not re-enter here.
-        for other in CrashBacktrace.signals { Darwin.signal(other, SIG_DFL) }
+        // No statics or arrays in here: swift_once and malloc can wedge inside a signal handler.
+        Darwin.signal(SIGSEGV, SIG_DFL)
+        Darwin.signal(SIGBUS, SIG_DFL)
+        Darwin.signal(SIGTRAP, SIG_DFL)
+        Darwin.signal(SIGILL, SIG_DFL)
+        Darwin.signal(SIGFPE, SIG_DFL)
+        Darwin.signal(SIGABRT, SIG_DFL)
         emit("\n=== QuickTubeCoreTests: fatal signal ")
         emitNumber(UInt64(signal))
         emit(" code ")
