@@ -22,17 +22,94 @@ import Testing
     }
 
     @Test func roundTrip() throws {
-        var s = AppSettings()
-        s.captureMode = .selectArea
-        s.cameraEnabled = true
-        s.cameraSize = .large
-        s.cameraCorner = .topRight
-        s.titleTemplate = "Demo {date}"
-        s.trimHeadSeconds = 0.5
-        s.gifFPS = 15
-        s.quality = RecordingQuality(resolution: .fullHD, fps: 30)
+        let s = Self.allNonDefault()
         let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(s))
         #expect(decoded == s)
+    }
+
+    static func allNonDefault() -> AppSettings {
+        var s = AppSettings()
+        s.captureMode = .selectWindow
+        s.cameraEnabled = true
+        s.cameraAlwaysOn = true
+        s.cameraSize = .large
+        s.cameraCorner = .topRight
+        s.pauseEnabled = true
+        s.systemAudioEnabled = true
+        s.microphoneEnabled = false
+        s.historyEnabled = false
+        s.clickHighlightEnabled = true
+        s.keystrokeOverlayEnabled = true
+        s.overlaysInRecording = false
+        s.trimTailSeconds = 2.5
+        s.trimHeadSeconds = 0.5
+        s.titleTemplate = "Demo {date}"
+        s.deleteAfterUpload = true
+        s.deleteOlderThanDays = 14
+        s.automaticUpdates = false
+        s.gifEnabled = true
+        s.gifFPS = 15
+        s.gifMaxWidth = 640
+        s.gifMaxSeconds = 12
+        s.quality = RecordingQuality(resolution: .fullHD, fps: 30)
+        return s
+    }
+
+    @Test func unknownEnumValueResetsOnlyThatField() throws {
+        let json = #"{"captureMode":"hologram","gifFPS":15,"cameraSize":"large","titleTemplate":7}"#
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8))
+        var expected = AppSettings()
+        expected.gifFPS = 15
+        expected.cameraSize = .large
+        #expect(decoded == expected)
+    }
+
+    // MARK: load(from:)
+
+    private func withSuite(_ body: (UserDefaults) throws -> Void) rethrows {
+        let name = "test-\(UUID())"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        try body(defaults)
+    }
+
+    @Test func loadSeedsQualityFromLegacyKey() throws {
+        try withSuite { defaults in
+            let legacy = RecordingQuality(resolution: .uhd4K, fps: 30)
+            defaults.set(try JSONEncoder().encode(legacy), forKey: AppSettings.legacyQualityKey)
+            var expected = AppSettings()
+            expected.quality = legacy
+            #expect(AppSettings.load(from: defaults) == expected)
+        }
+    }
+
+    @Test func loadPrefersV2OverLegacy() throws {
+        try withSuite { defaults in
+            defaults.set(
+                try JSONEncoder().encode(RecordingQuality(resolution: .uhd4K, fps: 30)),
+                forKey: AppSettings.legacyQualityKey)
+            let v2 = Self.allNonDefault()
+            defaults.set(try JSONEncoder().encode(v2), forKey: AppSettings.storageKey)
+            #expect(AppSettings.load(from: defaults) == v2)
+        }
+    }
+
+    @Test func loadWithNothingStoredGivesDefaults() {
+        withSuite { defaults in
+            #expect(AppSettings.load(from: defaults) == AppSettings())
+        }
+    }
+
+    @Test func loadWithCorruptBlobFallsBackAndLogs() {
+        withSuite { defaults in
+            defaults.set(Data("not json".utf8), forKey: AppSettings.storageKey)
+            var logged: [String] = []
+            let loaded = AppSettings.load(from: defaults, log: { logged.append($0) })
+            #expect(loaded == AppSettings())
+            #expect(logged.count == 1)
+            // The corrupt blob is left untouched by load.
+            #expect(defaults.data(forKey: AppSettings.storageKey) == Data("not json".utf8))
+        }
     }
 
     @Test func emptyObjectDecodesToDefaults() throws {

@@ -85,40 +85,40 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = AppSettings()
-        captureMode = try c.decodeIfPresent(CaptureMode.self, forKey: .captureMode) ?? d.captureMode
-        cameraEnabled = try c.decodeIfPresent(Bool.self, forKey: .cameraEnabled) ?? d.cameraEnabled
-        cameraAlwaysOn = try c.decodeIfPresent(Bool.self, forKey: .cameraAlwaysOn) ?? d.cameraAlwaysOn
-        cameraSize = try c.decodeIfPresent(CameraSize.self, forKey: .cameraSize) ?? d.cameraSize
-        cameraCorner = try c.decodeIfPresent(Corner.self, forKey: .cameraCorner) ?? d.cameraCorner
-        pauseEnabled = try c.decodeIfPresent(Bool.self, forKey: .pauseEnabled) ?? d.pauseEnabled
+        captureMode = c.lenient(CaptureMode.self, .captureMode) ?? d.captureMode
+        cameraEnabled = c.lenient(Bool.self, .cameraEnabled) ?? d.cameraEnabled
+        cameraAlwaysOn = c.lenient(Bool.self, .cameraAlwaysOn) ?? d.cameraAlwaysOn
+        cameraSize = c.lenient(CameraSize.self, .cameraSize) ?? d.cameraSize
+        cameraCorner = c.lenient(Corner.self, .cameraCorner) ?? d.cameraCorner
+        pauseEnabled = c.lenient(Bool.self, .pauseEnabled) ?? d.pauseEnabled
         systemAudioEnabled =
-            try c.decodeIfPresent(Bool.self, forKey: .systemAudioEnabled) ?? d.systemAudioEnabled
+            c.lenient(Bool.self, .systemAudioEnabled) ?? d.systemAudioEnabled
         microphoneEnabled =
-            try c.decodeIfPresent(Bool.self, forKey: .microphoneEnabled) ?? d.microphoneEnabled
-        historyEnabled = try c.decodeIfPresent(Bool.self, forKey: .historyEnabled) ?? d.historyEnabled
+            c.lenient(Bool.self, .microphoneEnabled) ?? d.microphoneEnabled
+        historyEnabled = c.lenient(Bool.self, .historyEnabled) ?? d.historyEnabled
         clickHighlightEnabled =
-            try c.decodeIfPresent(Bool.self, forKey: .clickHighlightEnabled) ?? d.clickHighlightEnabled
+            c.lenient(Bool.self, .clickHighlightEnabled) ?? d.clickHighlightEnabled
         keystrokeOverlayEnabled =
-            try c.decodeIfPresent(Bool.self, forKey: .keystrokeOverlayEnabled)
+            c.lenient(Bool.self, .keystrokeOverlayEnabled)
             ?? d.keystrokeOverlayEnabled
         overlaysInRecording =
-            try c.decodeIfPresent(Bool.self, forKey: .overlaysInRecording) ?? d.overlaysInRecording
+            c.lenient(Bool.self, .overlaysInRecording) ?? d.overlaysInRecording
         trimTailSeconds =
-            try c.decodeIfPresent(Double.self, forKey: .trimTailSeconds) ?? d.trimTailSeconds
+            c.lenient(Double.self, .trimTailSeconds) ?? d.trimTailSeconds
         trimHeadSeconds =
-            try c.decodeIfPresent(Double.self, forKey: .trimHeadSeconds) ?? d.trimHeadSeconds
-        titleTemplate = try c.decodeIfPresent(String.self, forKey: .titleTemplate) ?? d.titleTemplate
+            c.lenient(Double.self, .trimHeadSeconds) ?? d.trimHeadSeconds
+        titleTemplate = c.lenient(String.self, .titleTemplate) ?? d.titleTemplate
         deleteAfterUpload =
-            try c.decodeIfPresent(Bool.self, forKey: .deleteAfterUpload) ?? d.deleteAfterUpload
+            c.lenient(Bool.self, .deleteAfterUpload) ?? d.deleteAfterUpload
         deleteOlderThanDays =
-            try c.decodeIfPresent(Int.self, forKey: .deleteOlderThanDays) ?? d.deleteOlderThanDays
+            c.lenient(Int.self, .deleteOlderThanDays) ?? d.deleteOlderThanDays
         automaticUpdates =
-            try c.decodeIfPresent(Bool.self, forKey: .automaticUpdates) ?? d.automaticUpdates
-        gifEnabled = try c.decodeIfPresent(Bool.self, forKey: .gifEnabled) ?? d.gifEnabled
-        gifFPS = try c.decodeIfPresent(Int.self, forKey: .gifFPS) ?? d.gifFPS
-        gifMaxWidth = try c.decodeIfPresent(Int.self, forKey: .gifMaxWidth) ?? d.gifMaxWidth
-        gifMaxSeconds = try c.decodeIfPresent(Int.self, forKey: .gifMaxSeconds) ?? d.gifMaxSeconds
-        quality = try c.decodeIfPresent(RecordingQuality.self, forKey: .quality) ?? d.quality
+            c.lenient(Bool.self, .automaticUpdates) ?? d.automaticUpdates
+        gifEnabled = c.lenient(Bool.self, .gifEnabled) ?? d.gifEnabled
+        gifFPS = c.lenient(Int.self, .gifFPS) ?? d.gifFPS
+        gifMaxWidth = c.lenient(Int.self, .gifMaxWidth) ?? d.gifMaxWidth
+        gifMaxSeconds = c.lenient(Int.self, .gifMaxSeconds) ?? d.gifMaxSeconds
+        quality = c.lenient(RecordingQuality.self, .quality) ?? d.quality
     }
 
     /// UserDefaults key holding the JSON-encoded settings.
@@ -127,11 +127,16 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public static let legacyQualityKey = "recording.quality"
 
     /// Stored settings, else defaults seeded from the legacy quality key.
-    public static func load(from defaults: UserDefaults) -> AppSettings {
-        if let data = defaults.data(forKey: storageKey),
-            let stored = try? JSONDecoder().decode(AppSettings.self, from: data)
-        {
-            return stored
+    /// An undecodable `settings.v2` blob is reported through `log` and falls back like an absent one.
+    public static func load(
+        from defaults: UserDefaults, log: (String) -> Void = { _ in }
+    ) -> AppSettings {
+        if let data = defaults.data(forKey: storageKey) {
+            do {
+                return try JSONDecoder().decode(AppSettings.self, from: data)
+            } catch {
+                log("settings.v2 could not be decoded, using defaults: \(error)")
+            }
         }
         var settings = AppSettings()
         if let data = defaults.data(forKey: legacyQualityKey),
@@ -140,5 +145,12 @@ public struct AppSettings: Codable, Sendable, Equatable {
             settings.quality = legacy
         }
         return settings
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// A missing key or a value of the wrong type/unknown enum case yields nil, so one bad field resets only itself.
+    fileprivate func lenient<T: Decodable>(_ type: T.Type, _ key: Key) -> T? {
+        (try? decodeIfPresent(type, forKey: key)) ?? nil
     }
 }

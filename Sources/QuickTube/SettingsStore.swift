@@ -16,9 +16,10 @@ final class SettingsStore {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        self.settings = AppSettings.load(from: defaults)
-        // Writing the migrated value makes the Recorder's UserDefaults handoff see it at once.
-        persist()
+        let hadStored = defaults.data(forKey: Self.key) != nil
+        self.settings = AppSettings.load(from: defaults, log: { DiagnosticsLog.append($0) })
+        // Persist only a fresh/migrated value; never overwrite a stored blob that failed to decode.
+        if !hadStored { persist() }
     }
 
     private func persist() {
