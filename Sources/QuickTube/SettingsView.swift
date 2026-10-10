@@ -80,7 +80,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(minWidth: 480, idealWidth: 520, minHeight: 420, idealHeight: 760)
+        .frame(minWidth: 480, idealWidth: 520, minHeight: 420, idealHeight: Self.idealHeight)
         .onAppear {
             model.refreshAuth()
             model.refreshTelegram()
@@ -88,6 +88,12 @@ struct SettingsView: View {
             model.refreshPermissions()
         }
         .onDisappear { stopListening() }
+    }
+
+    /// As tall as the screen allows; the grouped form scrolls if the content is taller.
+    private static var idealHeight: CGFloat {
+        let screen = NSScreen.main?.visibleFrame.height ?? 900
+        return max(420, screen - 60)
     }
 
     @ViewBuilder
