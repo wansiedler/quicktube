@@ -71,6 +71,13 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var gifMaxWidth = 800
     public var gifMaxSeconds = 30
     public var quality = RecordingQuality.default
+    /// Re-encode recordings over `telegramLimitMB` so they still go through.
+    public var telegramCompressToFit = true
+    /// The Bot API accepts 50 MB; self-hosted Bot API servers allow up to 2000 MB.
+    public var telegramLimitMB = 50
+
+    /// The Telegram limit in bytes, clamped to the range Settings offers.
+    public var telegramLimitBytes: Int { min(max(telegramLimitMB, 10), 2000) << 20 }
 
     public init() {}
 
@@ -80,6 +87,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         case keystrokeOverlayEnabled, overlaysInRecording, trimTailSeconds, trimHeadSeconds
         case titleTemplate, deleteAfterUpload, deleteOlderThanDays, automaticUpdates
         case gifEnabled, gifFPS, gifMaxWidth, gifMaxSeconds, quality
+        case telegramCompressToFit, telegramLimitMB
     }
 
     public init(from decoder: Decoder) throws {
@@ -119,6 +127,9 @@ public struct AppSettings: Codable, Sendable, Equatable {
         gifMaxWidth = c.lenient(Int.self, .gifMaxWidth) ?? d.gifMaxWidth
         gifMaxSeconds = c.lenient(Int.self, .gifMaxSeconds) ?? d.gifMaxSeconds
         quality = c.lenient(RecordingQuality.self, .quality) ?? d.quality
+        telegramCompressToFit =
+            c.lenient(Bool.self, .telegramCompressToFit) ?? d.telegramCompressToFit
+        telegramLimitMB = c.lenient(Int.self, .telegramLimitMB) ?? d.telegramLimitMB
     }
 
     /// UserDefaults key holding the JSON-encoded settings.

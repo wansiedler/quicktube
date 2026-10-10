@@ -93,8 +93,9 @@ public final class AppState {
     private let notifier: Notifier
     private let titleProvider: @Sendable () -> TitleContext
     private let titleTemplate: @Sendable () -> String
-    /// Captured when a recording starts: the app and display it was made of.
+    /// Diagnostics sink for failures that are not surfaced to the user.
     private let log: @Sendable (String) -> Void
+    /// Captured when a recording starts: the app and display it was made of.
     private var titleContext = TitleContext()
     /// Title and context of the file being uploaded; `retry()` reuses them.
     private var pendingTitle: String?
@@ -252,7 +253,14 @@ public final class AppState {
         case TelegramError.notConfigured:
             return "Telegram is not set up: add the bot token and channel in Settings."
         case TelegramError.fileTooLarge(let limit, let actual):
-            return "File is \(actual / (1 << 20)) MB; Telegram bots accept at most \(limit / (1 << 20)) MB."
+            return "File is \(actual / (1 << 20)) MB; the Telegram limit is \(limit / (1 << 20)) MB "
+                + "(Settings → Telegram)."
+        case TranscodeError.cannotRead:
+            return "Could not read the recording to compress it for Telegram."
+        case TranscodeError.cannotWrite:
+            return "Could not write the compressed copy for Telegram."
+        case TranscodeError.failed(let reason):
+            return "Compressing for Telegram failed: \(reason)"
         case TelegramError.apiError(let description):
             return "Telegram refused the upload: \(description)"
         case DriveError.insufficientScope:

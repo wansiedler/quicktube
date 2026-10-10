@@ -7,16 +7,35 @@ extension NetworkSuite {
         let store = InMemorySecretStore()
 
         func makeUploader(
-            maxBytes: Int = TelegramUploader.botAPILimit,
+            limitBytes: Int = TelegramUploader.botAPILimit,
+            compressToFit: Bool = true,
             videoInfo: @escaping @Sendable (URL) async throws -> VideoInfo = {
                 _ in throw VideoInfo.ReadError.noVideoTrack
+            },
+            transcode: @escaping TelegramUploader.Transcode = { _, _, _, _ in
+                Issue.record("transcode must not run")
+                throw TranscodeError.failed("unexpected")
             }
         ) -> TelegramUploader {
             StubURLProtocol.reset()
             return TelegramUploader(
                 store: store, session: StubURLProtocol.makeSession(),
-                baseURL: URL(string: "https://tg.example")!, maxBytes: maxBytes, videoInfo: videoInfo)
+                baseURL: URL(string: "https://tg.example")!, limitBytes: { limitBytes },
+                compressToFit: { compressToFit }, videoInfo: videoInfo, transcode: transcode)
         }
+
+        /// A transcode stub that writes `bytes` bytes of 0xEE to the requested output.
+        func fakeTranscode(bytes: Int, calls: TranscodeCalls) -> TelegramUploader.Transcode {
+            { input, plan, output, progress in
+                calls.add(input: input, plan: plan, output: output)
+                try Data(repeating: 0xEE, count: bytes).write(to: output)
+                progress(0.5)
+                progress(1)
+                return output
+            }
+        }
+
+        static let info = VideoInfo(width: 2560, height: 1440, fps: 60, duration: 60)
 
         func makeFile(bytes: Int) throws -> URL {
             let url = FileManager.default.temporaryDirectory.appending(path: "tg-\(UUID().uuidString).mp4")
@@ -108,11 +127,75 @@ extension NetworkSuite {
             #expect(StubURLProtocol.requests.isEmpty)
         }
 
-        @Test func oversizedFileIsRejectedBeforeSending() async throws {
-            let uploader = makeUploader(maxBytes: 10)
+        @Test func oversizedFileIsRejectedWhenCompressionIsOff() async throws {
+            let uploader = makeUploader(limitBytes: 10, compressToFit: false)
             try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
             let file = try makeFile(bytes: 11)
             await #expect(throws: TelegramError.fileTooLarge(limit: 10, actual: 11)) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+            #expect(StubURLProtocol.requests.isEmpty)
+        }
+
+        @Test func oversizedFileIsTranscodedAndTheCopySent() async throws {
+            let calls = TranscodeCalls()
+            let uploader = makeUploader(
+                limitBytes: 100, videoInfo: { _ in Self.info },
+                transcode: fakeTranscode(bytes: 60, calls: calls))
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 200)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            let seen = ProgressLog()
+
+            _ = try await uploader.upload(file: file, title: "T") { seen.add($0) }
+
+            let call = try #require(calls.all.first)
+            #expect(calls.all.count == 1)
+            #expect(call.input == file)
+            #expect(call.plan == VideoTranscoder.plan(info: Self.info, limitBytes: 100))
+            let stem = file.deletingPathExtension().lastPathComponent
+            #expect(call.output.lastPathComponent == "\(stem).telegram.mp4")
+            #expect(call.output.deletingLastPathComponent() == file.deletingLastPathComponent())
+            let body = StubURLProtocol.requests[0].httpBody ?? Data()
+            #expect(String(decoding: body, as: UTF8.self).contains("filename=\"\(stem).telegram.mp4\""))
+            #expect(body.contains(Data(repeating: 0xEE, count: 60)))
+            #expect(!body.contains(Data(repeating: 0xCD, count: 200)))
+            #expect(!FileManager.default.fileExists(atPath: call.output.path))
+            #expect(FileManager.default.fileExists(atPath: file.path))
+            #expect(seen.values == [0, 0.25, 0.5, 1])
+        }
+
+        @Test func fileUnderTheLimitIsNotTranscoded() async throws {
+            let uploader = makeUploader(limitBytes: 100, videoInfo: { _ in Self.info })
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 100)
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            _ = try await uploader.upload(file: file, title: "T") { _ in }
+            let body = StubURLProtocol.requests[0].httpBody ?? Data()
+            #expect(body.contains(Data(repeating: 0xCD, count: 100)))
+        }
+
+        @Test func transcodedFileStillTooLargeIsRejected() async throws {
+            let calls = TranscodeCalls()
+            let uploader = makeUploader(
+                limitBytes: 100, videoInfo: { _ in Self.info },
+                transcode: fakeTranscode(bytes: 150, calls: calls))
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 200)
+            await #expect(throws: TelegramError.fileTooLarge(limit: 100, actual: 150)) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+            #expect(StubURLProtocol.requests.isEmpty)
+            let output = try #require(calls.all.first?.output)
+            #expect(!FileManager.default.fileExists(atPath: output.path))
+        }
+
+        @Test func oversizedUnreadableVideoCannotBeTranscoded() async throws {
+            let uploader = makeUploader(limitBytes: 100)
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 200)
+            await #expect(throws: TranscodeError.cannotRead) {
                 _ = try await uploader.upload(file: file, title: "T") { _ in }
             }
             #expect(StubURLProtocol.requests.isEmpty)
@@ -139,5 +222,19 @@ extension NetworkSuite {
             try await uploader.clearConfiguration()
             #expect(try await uploader.configuration() == nil)
         }
+    }
+}
+
+final class TranscodeCalls: @unchecked Sendable {
+    struct Call {
+        let input: URL
+        let plan: TranscodePlan
+        let output: URL
+    }
+    private let lock = NSLock()
+    private var stored: [Call] = []
+    var all: [Call] { lock.withLock { stored } }
+    func add(input: URL, plan: TranscodePlan, output: URL) {
+        lock.withLock { stored.append(Call(input: input, plan: plan, output: output)) }
     }
 }

@@ -42,8 +42,11 @@ channel instead of YouTube; the message link goes on the clipboard.
 3. QuickTube → Settings → Telegram: paste the token and the channel
    (`@name` for a public channel, or the `-100…` id for a private one) → Save.
 
-Bots accept files up to 50 MB (roughly 1–2 minutes of HEVC screen video);
-larger recordings fail with a clear message and stay on disk.
+The Bot API accepts files up to 50 MB. Longer recordings are re-encoded
+(HEVC + AAC, lower bitrate and, if needed, lower resolution) into a temporary
+`<name>.telegram.mp4` that is sent and then deleted; the original stays on disk.
+Settings → Telegram can turn compression off or change the limit — raise it
+only if you run a self-hosted Bot API server (up to 2000 MB).
 
 ## Google Drive (optional)
 

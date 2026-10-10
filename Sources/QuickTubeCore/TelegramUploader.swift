@@ -31,24 +31,39 @@ public actor TelegramUploader: VideoUploader {
     private let store: SecretStore
     private let session: URLSession
     private let baseURL: URL
-    private let maxBytes: Int
+    private let limitBytes: @Sendable () -> Int
+    private let compressToFit: @Sendable () -> Bool
     private let log: @Sendable (String) -> Void
     private let videoInfo: @Sendable (URL) async throws -> VideoInfo
+    private let transcode: Transcode
 
+    /// `VideoTranscoder.transcode`'s shape: input, plan, output, progress → written file.
+    public typealias Transcode =
+        @Sendable (
+            URL, TranscodePlan, URL, @escaping @Sendable (Double) -> Void
+        ) async throws -> URL
+
+    /// `limitBytes` and `compressToFit` are read at each upload, so Settings changes apply immediately.
     public init(
         store: SecretStore,
         session: URLSession = .shared,
         baseURL: URL = URL(string: "https://api.telegram.org")!,
-        maxBytes: Int = TelegramUploader.botAPILimit,
+        limitBytes: @escaping @Sendable () -> Int = { TelegramUploader.botAPILimit },
+        compressToFit: @escaping @Sendable () -> Bool = { true },
         log: @escaping @Sendable (String) -> Void = { _ in },
-        videoInfo: @escaping @Sendable (URL) async throws -> VideoInfo = { try await VideoInfo.read($0) }
+        videoInfo: @escaping @Sendable (URL) async throws -> VideoInfo = { try await VideoInfo.read($0) },
+        transcode: @escaping Transcode = {
+            try await VideoTranscoder.transcode($0, plan: $1, output: $2, progress: $3)
+        }
     ) {
         self.store = store
         self.session = session
         self.baseURL = baseURL
-        self.maxBytes = maxBytes
+        self.limitBytes = limitBytes
+        self.compressToFit = compressToFit
         self.log = log
         self.videoInfo = videoInfo
+        self.transcode = transcode
     }
 
     public func configuration() throws -> TelegramConfiguration? {
@@ -73,29 +88,54 @@ public actor TelegramUploader: VideoUploader {
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> UploadResult {
         guard let configuration = try configuration() else { throw TelegramError.notConfigured }
-        let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int) ?? 0
+        let size = Self.fileSize(file)
         guard size > 0 else { throw UploadError.fileUnreadable }
-        guard size <= maxBytes else { throw TelegramError.fileTooLarge(limit: maxBytes, actual: size) }
+        let limit = limitBytes()
+        let oversized = size > limit
+        guard !oversized || compressToFit() else {
+            throw TelegramError.fileTooLarge(limit: limit, actual: size)
+        }
 
-        // The caption is a nicety; an unreadable clip must not block the upload.
-        var caption = title
+        // The caption describes the recording as captured, even when a smaller copy is sent.
+        // It is a nicety; an unreadable clip must not block an upload that needs no transcode.
+        var info: VideoInfo?
         do {
-            let info = try await videoInfo(file)
-            caption += "\n" + RecordingNaming.metadataLine(display: context.display, info: info)
+            info = try await videoInfo(file)
         } catch {
-            log("Telegram caption: could not read video info: \(error)")
+            log("Telegram: could not read video info: \(error)")
+        }
+        var caption = title
+        if let info { caption += "\n" + RecordingNaming.metadataLine(display: context.display, info: info) }
+
+        var sending = file
+        var sendProgress = progress
+        var transcoded: URL?
+        defer { if let transcoded { try? FileManager.default.removeItem(at: transcoded) } }
+        if oversized {
+            guard let info else { throw TranscodeError.cannotRead }
+            let plan = VideoTranscoder.plan(info: info, limitBytes: limit)
+            let output = Self.transcodeURL(for: file)
+            transcoded = output
+            log("Telegram: \(size) bytes over the \(limit)-byte limit, transcoding with \(plan)")
+            progress(0)
+            sending = try await transcode(file, plan, output) { progress($0 * 0.5) }
+            transcoded = sending
+            let newSize = Self.fileSize(sending)
+            guard newSize > 0 else { throw UploadError.fileUnreadable }
+            guard newSize <= limit else { throw TelegramError.fileTooLarge(limit: limit, actual: newSize) }
+            sendProgress = { progress(0.5 + $0 * 0.5) }
         }
 
         let boundary = "QuickTube-\(UUID().uuidString)"
         let body = try Self.multipartBody(
-            boundary: boundary, chat: configuration.chat, caption: caption, file: file)
+            boundary: boundary, chat: configuration.chat, caption: caption, file: sending)
         defer { try? FileManager.default.removeItem(at: body) }
 
         var request = URLRequest(url: baseURL.appending(path: "bot\(configuration.botToken)/sendVideo"))
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         let (data, response) = try await session.upload(
-            for: request, fromFile: body, delegate: ProgressDelegate(progress))
+            for: request, fromFile: body, delegate: ProgressDelegate(sendProgress))
         guard let http = response as? HTTPURLResponse else { throw TelegramError.badResponse(0) }
         let reply = try? JSONDecoder().decode(Reply.self, from: data)
         guard http.statusCode == 200, let result = reply?.result, reply?.ok == true else {
@@ -106,6 +146,15 @@ public actor TelegramUploader: VideoUploader {
         }
         progress(1)
         return UploadResult(link: Self.messageLink(chat: result.chat, messageID: result.messageID))
+    }
+
+    static func fileSize(_ url: URL) -> Int {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+    }
+
+    /// `<stem>.telegram.mp4` next to the recording.
+    static func transcodeURL(for file: URL) -> URL {
+        file.deletingPathExtension().appendingPathExtension("telegram.mp4")
     }
 
     // MARK: - Wire format

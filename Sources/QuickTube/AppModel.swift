@@ -59,7 +59,11 @@ final class AppModel {
         self.settingsStore = SettingsStore()
         let auth = GoogleAuth(store: store)
         self.auth = auth
-        let telegram = TelegramUploader(store: store, log: { DiagnosticsLog.append($0) })
+        let telegram = TelegramUploader(
+            store: store,
+            limitBytes: { AppSettings.load(from: .standard).telegramLimitBytes },
+            compressToFit: { AppSettings.load(from: .standard).telegramCompressToFit },
+            log: { DiagnosticsLog.append($0) })
         self.telegram = telegram
         let slack = SlackUploader(store: store, log: { DiagnosticsLog.append($0) })
         self.slack = slack

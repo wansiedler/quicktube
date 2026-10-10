@@ -19,6 +19,16 @@ import Testing
         #expect(s.automaticUpdates)
         #expect(!s.gifEnabled && s.gifFPS == 10 && s.gifMaxWidth == 800 && s.gifMaxSeconds == 30)
         #expect(s.quality == .default)
+        #expect(s.telegramCompressToFit && s.telegramLimitMB == 50)
+        #expect(s.telegramLimitBytes == 50 << 20)
+    }
+
+    @Test func telegramLimitBytesIsClamped() {
+        var s = AppSettings()
+        s.telegramLimitMB = 2
+        #expect(s.telegramLimitBytes == 10 << 20)
+        s.telegramLimitMB = 5000
+        #expect(s.telegramLimitBytes == 2000 << 20)
     }
 
     @Test func roundTrip() throws {
@@ -52,6 +62,8 @@ import Testing
         s.gifMaxWidth = 640
         s.gifMaxSeconds = 12
         s.quality = RecordingQuality(resolution: .fullHD, fps: 30)
+        s.telegramCompressToFit = false
+        s.telegramLimitMB = 2000
         return s
     }
 

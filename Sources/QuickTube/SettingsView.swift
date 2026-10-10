@@ -78,8 +78,14 @@ struct SettingsView: View {
                     Spacer()
                     Text(model.telegramConfigured ? "Configured" : "Not set up").foregroundStyle(.secondary)
                 }
+                Toggle("Compress to fit the limit", isOn: $model.settings.telegramCompressToFit)
+                Stepper(
+                    "Limit (MB): \(model.settings.telegramLimitMB)", value: $model.settings.telegramLimitMB,
+                    in: 10...2000, step: 10)
                 Text(
-                    "Create a bot with @BotFather, add it to your channel as admin. Bots accept files up to 50 MB."
+                    "Create a bot with @BotFather, add it to your channel as admin. The Bot API accepts files "
+                        + "up to 50 MB; raise the limit only for a self-hosted Bot API server. Larger recordings "
+                        + "are re-encoded to fit when compression is on."
                 )
                 .font(.callout).foregroundStyle(.secondary)
                 if let message = model.telegramMessage {
