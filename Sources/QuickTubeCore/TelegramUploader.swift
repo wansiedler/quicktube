@@ -107,9 +107,6 @@ public actor TelegramUploader: VideoUploader {
         } catch {
             log("Telegram: could not read video info: \(error)")
         }
-        var caption = title
-        if let info { caption += "\n" + RecordingNaming.metadataLine(display: context.display, info: info) }
-
         var sending = file
         var sendingInfo = info
         var transcoded: URL?
@@ -137,6 +134,16 @@ public actor TelegramUploader: VideoUploader {
                 sendingInfo = VideoInfo(
                     width: plan.width, height: plan.height, fps: info.fps, duration: info.duration)
             }
+        }
+
+        // The caption names the file as captured and, after a transcode, the size that was sent.
+        var caption = title
+        if let info {
+            let sent = sending == file ? nil : Self.fileSize(sending)
+            caption +=
+                "\n"
+                + RecordingNaming.metadataLine(
+                    display: context.display, info: info, sizeBytes: size, sentBytes: sent)
         }
 
         // Each stage reports 0 → 1 on its own; the status switch tells the UI which one is running.

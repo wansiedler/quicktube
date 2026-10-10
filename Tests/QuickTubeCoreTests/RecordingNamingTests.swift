@@ -81,6 +81,21 @@ import Testing
                 == "Compressing · 1280×720 60 MB → 1280×720 ~50 MB")
     }
 
+    @Test func metadataLineIncludesSizes() {
+        let info = VideoInfo(width: 6016, height: 3384, fps: 43, duration: 10)
+        let mb = 1_048_576
+        #expect(
+            RecordingNaming.metadataLine(display: "Pro Display XDR", info: info, sizeBytes: 138 * mb)
+                == "Pro Display XDR · 6016×3384 · 43 fps · 138 MB")
+        #expect(
+            RecordingNaming.metadataLine(
+                display: nil, info: info, sizeBytes: 138 * mb, sentBytes: 49 * mb + mb / 3)
+                == "6016×3384 · 43 fps · 138 MB → 49 MB")
+        #expect(
+            RecordingNaming.metadataLine(display: nil, info: info, sizeBytes: 20 * mb, sentBytes: 20 * mb)
+                == "6016×3384 · 43 fps · 20 MB")
+    }
+
     @Test func metadataLineSkipsUnknownFps() {
         let info = VideoInfo(width: 1280, height: 720, fps: nil, duration: 2)
         #expect(RecordingNaming.metadataLine(display: "Display", info: info) == "Display · 1280×720")

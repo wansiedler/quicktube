@@ -80,7 +80,7 @@ extension NetworkSuite {
                 VideoInfo(width: 2560, height: 1440, fps: 60, duration: 3)
             })
             try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
-            let file = try makeFile(bytes: 4)
+            let file = try makeFile(bytes: 3 * 1_048_576)
             StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
             _ = try await uploader.upload(
                 file: file, title: "Demo", context: UploadContext(display: "Studio Display")
@@ -88,7 +88,7 @@ extension NetworkSuite {
             let body = String(decoding: StubURLProtocol.requests[0].httpBody ?? Data(), as: UTF8.self)
             #expect(
                 body.contains(
-                    "name=\"caption\"\r\n\r\nDemo\nStudio Display · 2560×1440 · 60 fps\r\n"))
+                    "name=\"caption\"\r\n\r\nDemo\nStudio Display · 2560×1440 · 60 fps · 3 MB\r\n"))
         }
 
         @Test func unreadableVideoKeepsPlainTitleCaption() async throws {

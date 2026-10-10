@@ -52,12 +52,26 @@ public enum RecordingNaming {
     }
 
     /// "Built-in Retina Display · 1920×1080 · 30 fps"; the display is left out when unknown.
-    public static func metadataLine(display: String?, info: VideoInfo) -> String {
+    /// "Pro Display XDR · 6016×3384 · 43 fps · 138 MB", or "… · 138 MB → 49 MB" when a smaller
+    /// copy was sent (`sentBytes` is the size of the transcoded file).
+    public static func metadataLine(
+        display: String?, info: VideoInfo, sizeBytes: Int? = nil, sentBytes: Int? = nil
+    ) -> String {
         var parts: [String] = []
         if let display, !display.isEmpty { parts.append(display) }
         parts.append("\(info.width)×\(info.height)")
         if let fps = info.fps { parts.append("\(Int(fps.rounded())) fps") }
+        if let sizeBytes {
+            var size = "\(megabytes(sizeBytes)) MB"
+            if let sentBytes, sentBytes != sizeBytes { size += " → \(megabytes(sentBytes)) MB" }
+            parts.append(size)
+        }
         return parts.joined(separator: " · ")
+    }
+
+    /// Whole mebibytes, rounded — the unit every size in the UI uses.
+    public static func megabytes(_ bytes: Int) -> Int {
+        Int((Double(bytes) / 1_048_576).rounded())
     }
 
     /// "Compressing · 6016×3384 60 fps 120 MB → 6016×3384 60 fps ~48 MB"; the after size is the target.
@@ -67,8 +81,7 @@ public enum RecordingNaming {
         func format(width: Int, height: Int, fps: Double?, bytes: Int, approximate: Bool) -> String {
             var text = "\(width)×\(height)"
             if let fps { text += " \(Int(fps.rounded())) fps" }
-            let megabytes = Int((Double(bytes) / 1_048_576).rounded())
-            return text + " \(approximate ? "~" : "")\(megabytes) MB"
+            return text + " \(approximate ? "~" : "")\(megabytes(bytes)) MB"
         }
         let before = format(
             width: info.width, height: info.height, fps: info.fps, bytes: sizeBytes, approximate: false)
