@@ -18,5 +18,6 @@ struct QuickTubeApp: App {
         Settings {
             SettingsView(model: model)
         }
+        .windowResizability(.contentMinSize)
     }
 }

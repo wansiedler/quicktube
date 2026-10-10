@@ -80,7 +80,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440)
+        .frame(minWidth: 480, idealWidth: 520, minHeight: 420, idealHeight: 760)
         .onAppear {
             model.refreshAuth()
             model.refreshTelegram()
