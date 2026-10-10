@@ -61,7 +61,8 @@ public actor SlackUploader: VideoUploader {
     }
 
     public func upload(
-        file: URL, title: String, progress: @escaping @Sendable (Double) -> Void
+        file: URL, title: String, context: UploadContext = UploadContext(),
+        progress: @escaping @Sendable (Double) -> Void
     ) async throws -> UploadResult {
         guard let configuration = try configuration() else { throw SlackError.notConfigured }
         let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int) ?? 0

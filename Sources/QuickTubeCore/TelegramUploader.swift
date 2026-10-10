@@ -33,19 +33,22 @@ public actor TelegramUploader: VideoUploader {
     private let baseURL: URL
     private let maxBytes: Int
     private let log: @Sendable (String) -> Void
+    private let videoInfo: @Sendable (URL) async throws -> VideoInfo
 
     public init(
         store: SecretStore,
         session: URLSession = .shared,
         baseURL: URL = URL(string: "https://api.telegram.org")!,
         maxBytes: Int = TelegramUploader.botAPILimit,
-        log: @escaping @Sendable (String) -> Void = { _ in }
+        log: @escaping @Sendable (String) -> Void = { _ in },
+        videoInfo: @escaping @Sendable (URL) async throws -> VideoInfo = { try await VideoInfo.read($0) }
     ) {
         self.store = store
         self.session = session
         self.baseURL = baseURL
         self.maxBytes = maxBytes
         self.log = log
+        self.videoInfo = videoInfo
     }
 
     public func configuration() throws -> TelegramConfiguration? {
@@ -66,16 +69,26 @@ public actor TelegramUploader: VideoUploader {
     }
 
     public func upload(
-        file: URL, title: String, progress: @escaping @Sendable (Double) -> Void
+        file: URL, title: String, context: UploadContext = UploadContext(),
+        progress: @escaping @Sendable (Double) -> Void
     ) async throws -> UploadResult {
         guard let configuration = try configuration() else { throw TelegramError.notConfigured }
         let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int) ?? 0
         guard size > 0 else { throw UploadError.fileUnreadable }
         guard size <= maxBytes else { throw TelegramError.fileTooLarge(limit: maxBytes, actual: size) }
 
+        // The caption is a nicety; an unreadable clip must not block the upload.
+        var caption = title
+        do {
+            let info = try await videoInfo(file)
+            caption += "\n" + RecordingNaming.metadataLine(display: context.display, info: info)
+        } catch {
+            log("Telegram caption: could not read video info: \(error)")
+        }
+
         let boundary = "QuickTube-\(UUID().uuidString)"
         let body = try Self.multipartBody(
-            boundary: boundary, chat: configuration.chat, caption: title, file: file)
+            boundary: boundary, chat: configuration.chat, caption: caption, file: file)
         defer { try? FileManager.default.removeItem(at: body) }
 
         var request = URLRequest(url: baseURL.appending(path: "bot\(configuration.botToken)/sendVideo"))

@@ -30,6 +30,11 @@ struct SettingsView: View {
                     ForEach(RecordingQuality.frameRates, id: \.self) { Text("\($0) fps").tag($0) }
                 }
                 .pickerStyle(.segmented)
+                TextField("Title template", text: $model.settings.titleTemplate)
+                Text(
+                    "Names the file and the upload. {date} is the start time, {app} the frontmost app, {display} the screen name."
+                )
+                .font(.callout).foregroundStyle(.secondary)
                 Text(
                     "Applies to the next recording. 1080p at 30 fps is about 12 MB per minute; native 6K at 60 fps about 55 MB."
                 )

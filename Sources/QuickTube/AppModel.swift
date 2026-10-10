@@ -45,6 +45,15 @@ final class AppModel {
     private(set) var microphoneStatus = Permissions.microphone
     private(set) var screenRecordingStatus = Permissions.screenRecording
 
+    /// The frontmost app and the screen under the cursor, read when a recording starts.
+    private static func currentTitleContext() -> TitleContext {
+        let cursor = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { NSMouseInRect(cursor, $0.frame, false) } ?? NSScreen.main
+        return TitleContext(
+            app: NSWorkspace.shared.frontmostApplication?.localizedName,
+            display: screen?.localizedName)
+    }
+
     init() {
         let store = KeychainStore()
         self.settingsStore = SettingsStore()
@@ -67,7 +76,9 @@ final class AppModel {
                 .drive: GoogleDriveUploader(tokens: auth, log: { DiagnosticsLog.append($0) }),
                 .slack: slack,
             ],
-            notifier: notifier)
+            notifier: notifier,
+            titleProvider: { MainActor.assumeIsolated { Self.currentTitleContext() } },
+            titleTemplate: { AppSettings.load(from: .standard).titleTemplate })
         for destination in Destination.allCases {
             let fallback = HotkeyManager.Combo.fallback(for: destination)
             combos[destination] =

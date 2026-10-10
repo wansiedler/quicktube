@@ -6,11 +6,16 @@ extension NetworkSuite {
     @Suite struct TelegramUploaderTests {
         let store = InMemorySecretStore()
 
-        func makeUploader(maxBytes: Int = TelegramUploader.botAPILimit) -> TelegramUploader {
+        func makeUploader(
+            maxBytes: Int = TelegramUploader.botAPILimit,
+            videoInfo: @escaping @Sendable (URL) async throws -> VideoInfo = {
+                _ in throw VideoInfo.ReadError.noVideoTrack
+            }
+        ) -> TelegramUploader {
             StubURLProtocol.reset()
             return TelegramUploader(
                 store: store, session: StubURLProtocol.makeSession(),
-                baseURL: URL(string: "https://tg.example")!, maxBytes: maxBytes)
+                baseURL: URL(string: "https://tg.example")!, maxBytes: maxBytes, videoInfo: videoInfo)
         }
 
         func makeFile(bytes: Int) throws -> URL {
@@ -47,6 +52,32 @@ extension NetworkSuite {
             #expect(body.contains("name=\"video\"; filename=\"\(file.lastPathComponent)\""))
             #expect(body.contains("Content-Type: video/mp4"))
             #expect((request.httpBody ?? Data()).count > 16)
+        }
+
+        @Test func captionCarriesTheMetadataLine() async throws {
+            let uploader = makeUploader(videoInfo: { _ in
+                VideoInfo(width: 2560, height: 1440, fps: 60, duration: 3)
+            })
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 4)
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            _ = try await uploader.upload(
+                file: file, title: "Demo", context: UploadContext(display: "Studio Display")
+            ) { _ in }
+            let body = String(decoding: StubURLProtocol.requests[0].httpBody ?? Data(), as: UTF8.self)
+            #expect(
+                body.contains(
+                    "name=\"caption\"\r\n\r\nDemo\nStudio Display · 2560×1440 · 60 fps\r\n"))
+        }
+
+        @Test func unreadableVideoKeepsPlainTitleCaption() async throws {
+            let uploader = makeUploader()
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 4)
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            _ = try await uploader.upload(file: file, title: "Demo") { _ in }
+            let body = String(decoding: StubURLProtocol.requests[0].httpBody ?? Data(), as: UTF8.self)
+            #expect(body.contains("name=\"caption\"\r\n\r\nDemo\r\n"))
         }
 
         @Test func privateChannelLinksById() async throws {

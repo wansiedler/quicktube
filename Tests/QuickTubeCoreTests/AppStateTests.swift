@@ -30,14 +30,17 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
     var error: Error?
     var progressValues: [Double] = []
     var uploads: [(URL, String)] = []
+    var contexts: [UploadContext] = []
     /// Called on the main actor after each progress value has had time to land.
     var onProgress: (@MainActor @Sendable (Double) -> Void)?
     var lastProgress: (@Sendable (Double) -> Void)?
 
     func upload(
-        file: URL, title: String, progress: @escaping @Sendable (Double) -> Void
+        file: URL, title: String, context: UploadContext,
+        progress: @escaping @Sendable (Double) -> Void
     ) async throws -> UploadResult {
         uploads.append((file, title))
+        contexts.append(context)
         lastProgress = progress
         for value in progressValues {
             progress(value)
@@ -81,7 +84,9 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
 
     @Test func secondToggleStopsUploadsAndPublishesLink() async {
         recorder.file = URL(fileURLWithPath: "/tmp").appending(path: RecordingNaming.fileName(for: now))
-        let state = makeState()
+        let state = AppState(
+            recorder: recorder, uploader: uploader, notifier: notifier,
+            titleProvider: { [now] in TitleContext(date: now) })
         await state.toggle()
         await state.toggle()
         let link = URL(string: "https://youtu.be/abc123")!
@@ -94,6 +99,50 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         #expect(uploader.uploads[0].1 == RecordingNaming.title(for: now))
         #expect(notifier.links.count == 1)
         #expect(notifier.links[0].1 == true)
+    }
+
+    @Test func renderedTitleNamesTheFileAndTheUpload() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "qt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let recorded = directory.appending(path: RecordingNaming.fileName(for: now))
+        try Data([1, 2, 3]).write(to: recorded)
+        recorder.file = recorded
+        let context = TitleContext(
+            date: now, app: "Xcode", display: "Studio Display", timeZone: TimeZone(identifier: "UTC")!)
+        let state = AppState(
+            recorder: recorder, uploader: uploader, notifier: notifier,
+            titleProvider: { context }, titleTemplate: { "{date} {app} {display}" })
+        await state.toggle()
+        await state.toggle()
+
+        let title = "2026-10-10 09.30.00 Xcode Studio Display"
+        let renamed = directory.appending(path: "\(title).mp4")
+        #expect(uploader.uploads.count == 1)
+        #expect(uploader.uploads[0].1 == title)
+        #expect(uploader.uploads[0].0 == renamed)
+        #expect(uploader.contexts[0] == UploadContext(display: "Studio Display"))
+        #expect(FileManager.default.fileExists(atPath: renamed.path))
+        #expect(!FileManager.default.fileExists(atPath: recorded.path))
+    }
+
+    @Test func titleCollisionAppendsCounter() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "qt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([9]).write(to: directory.appending(path: "Talk.mp4"))
+        let recorded = directory.appending(path: "raw.mp4")
+        try Data([1]).write(to: recorded)
+        recorder.file = recorded
+        let state = AppState(
+            recorder: recorder, uploader: uploader, notifier: notifier,
+            titleProvider: { TitleContext() }, titleTemplate: { "Talk" })
+        await state.toggle()
+        await state.toggle()
+
+        #expect(uploader.uploads[0].0 == directory.appending(path: "Talk (2).mp4"))
+        #expect(uploader.uploads[0].1 == "Talk")
+        #expect(FileManager.default.fileExists(atPath: directory.appending(path: "Talk.mp4").path))
     }
 
     @Test func progressUpdatesPhaseWhileUploading() async {

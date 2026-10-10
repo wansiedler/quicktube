@@ -36,9 +36,30 @@ public enum UploadError: Error, Equatable {
     case sessionExpired
 }
 
+/// Extra facts about a recording that some destinations put in their post.
+public struct UploadContext: Sendable, Equatable {
+    /// Name of the screen that was recorded.
+    public var display: String?
+
+    public init(display: String? = nil) {
+        self.display = display
+    }
+}
+
 public protocol VideoUploader: Sendable {
-    func upload(file: URL, title: String, progress: @escaping @Sendable (Double) -> Void) async throws
-        -> UploadResult
+    func upload(
+        file: URL, title: String, context: UploadContext,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> UploadResult
+}
+
+extension VideoUploader {
+    /// For callers (and fakes) that have no context to pass.
+    public func upload(
+        file: URL, title: String, progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> UploadResult {
+        try await upload(file: file, title: title, context: UploadContext(), progress: progress)
+    }
 }
 
 /// Resumable `videos.insert`: one session, fixed-size chunks, resume on failure.
@@ -71,7 +92,8 @@ public actor YouTubeUploader: VideoUploader {
     }
 
     public func upload(
-        file: URL, title: String, progress: @escaping @Sendable (Double) -> Void
+        file: URL, title: String, context: UploadContext = UploadContext(),
+        progress: @escaping @Sendable (Double) -> Void
     ) async throws -> UploadResult {
         let size: Int
         let handle: FileHandle

@@ -91,25 +91,40 @@ public final class AppState {
     private let recorder: ScreenRecorder
     private let uploaders: [Destination: VideoUploader]
     private let notifier: Notifier
+    private let titleProvider: @Sendable () -> TitleContext
+    private let titleTemplate: @Sendable () -> String
+    /// Captured when a recording starts: the app and display it was made of.
+    private var titleContext = TitleContext()
+    /// Title and context of the file being uploaded; `retry()` reuses them.
+    private var pendingTitle: String?
+    private var pendingUploadContext = UploadContext()
     /// Set while a transition is in flight, so a second hotkey press cannot re-enter it.
     private var busy = false
 
     public convenience init(
         recorder: ScreenRecorder,
         uploader: VideoUploader,
-        notifier: Notifier
+        notifier: Notifier,
+        titleProvider: @escaping @Sendable () -> TitleContext = { TitleContext() },
+        titleTemplate: @escaping @Sendable () -> String = { "{date}" }
     ) {
-        self.init(recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier)
+        self.init(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            titleProvider: titleProvider, titleTemplate: titleTemplate)
     }
 
     public init(
         recorder: ScreenRecorder,
         uploaders: [Destination: VideoUploader],
-        notifier: Notifier
+        notifier: Notifier,
+        titleProvider: @escaping @Sendable () -> TitleContext = { TitleContext() },
+        titleTemplate: @escaping @Sendable () -> String = { "{date}" }
     ) {
         self.recorder = recorder
         self.uploaders = uploaders
         self.notifier = notifier
+        self.titleProvider = titleProvider
+        self.titleTemplate = titleTemplate
     }
 
     /// The hotkey action; the destination only matters when it stops a recording.
@@ -136,8 +151,10 @@ public final class AppState {
     }
 
     private func startRecording() async {
+        let context = titleProvider()
         do {
             try await recorder.start()
+            titleContext = context
             phase = .recording
         } catch {
             fail(error, file: nil, stage: .recording)
@@ -145,7 +162,10 @@ public final class AppState {
     }
 
     private func stopAndUpload(to destination: Destination) async {
-        let file: URL
+        let title = RecordingNaming.render(template: titleTemplate(), context: titleContext)
+        pendingTitle = title
+        pendingUploadContext = UploadContext(display: titleContext.display)
+        var file: URL
         do {
             file = try await recorder.stop()
         } catch RecorderError.stopTimedOut(let kept) {
@@ -155,7 +175,28 @@ public final class AppState {
             fail(error, file: nil, stage: .recording)
             return
         }
+        file = Self.rename(file, toTitle: title)
         await upload(file, to: destination)
+    }
+
+    /// Gives the finished recording its title as file name; on a name clash appends " (2)", " (3)", ….
+    /// Falls back to the original file if the rename is not possible.
+    nonisolated static func rename(_ file: URL, toTitle title: String) -> URL {
+        let directory = file.deletingLastPathComponent()
+        let ext = file.pathExtension.isEmpty ? "mp4" : file.pathExtension
+        var target = directory.appending(path: "\(title).\(ext)")
+        if target == file { return file }
+        var counter = 2
+        while FileManager.default.fileExists(atPath: target.path) {
+            target = directory.appending(path: "\(title) (\(counter)).\(ext)")
+            counter += 1
+        }
+        do {
+            try FileManager.default.moveItem(at: file, to: target)
+            return target
+        } catch {
+            return file
+        }
     }
 
     private func upload(_ file: URL, to destination: Destination) async {
@@ -165,10 +206,11 @@ public final class AppState {
             fail(DestinationError.unavailable(destination), file: file, stage: .upload)
             return
         }
-        // The Recorder names files after the start time, so the stem is the recording's timestamp.
-        let title = file.deletingPathExtension().lastPathComponent
+        let title = pendingTitle ?? file.deletingPathExtension().lastPathComponent
         do {
-            let result = try await uploader.upload(file: file, title: title) {
+            let result = try await uploader.upload(
+                file: file, title: title, context: pendingUploadContext
+            ) {
                 value in
                 Task { @MainActor in self.setProgress(value) }
             }
