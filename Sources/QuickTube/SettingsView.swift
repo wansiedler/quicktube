@@ -115,7 +115,10 @@ struct SettingsView: View {
                 Toggle("Highlight clicks", isOn: $model.settings.clickHighlightEnabled)
                 HStack {
                     Toggle("Show keystrokes", isOn: $model.settings.keystrokeOverlayEnabled)
-                        .disabled(model.inputMonitoringStatus != .granted)
+                        // Turning it on needs the grant; turning it off never does (grant revoked later).
+                        .disabled(
+                            model.inputMonitoringStatus != .granted && !model.settings.keystrokeOverlayEnabled
+                        )
                     Spacer()
                     switch model.inputMonitoringStatus {
                     case .granted:
