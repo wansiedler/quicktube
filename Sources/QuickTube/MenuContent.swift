@@ -34,10 +34,13 @@ struct MenuContent: View {
             Button("Copy Last Link") { model.copyLastLink() }
         }
         Divider()
-        Picker("Quality: \(model.quality.resolution.label)", selection: $model.quality.resolution) {
+        Picker(
+            "Quality: \(model.settings.quality.resolution.label)",
+            selection: $model.settings.quality.resolution
+        ) {
             ForEach(RecordingQuality.Resolution.allCases, id: \.self) { Text($0.label).tag($0) }
         }
-        Picker("Frame rate: \(model.quality.fps) fps", selection: $model.quality.fps) {
+        Picker("Frame rate: \(model.settings.quality.fps) fps", selection: $model.settings.quality.fps) {
             ForEach(RecordingQuality.frameRates, id: \.self) { Text("\($0) fps").tag($0) }
         }
         Divider()

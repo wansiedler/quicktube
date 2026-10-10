@@ -22,11 +22,11 @@ struct SettingsView: View {
                 }
             }
             Section("Recording") {
-                Picker("Quality", selection: $model.quality.resolution) {
+                Picker("Quality", selection: $model.settings.quality.resolution) {
                     ForEach(RecordingQuality.Resolution.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                Picker("Frame rate", selection: $model.quality.fps) {
+                Picker("Frame rate", selection: $model.settings.quality.fps) {
                     ForEach(RecordingQuality.frameRates, id: \.self) { Text("\($0) fps").tag($0) }
                 }
                 .pickerStyle(.segmented)

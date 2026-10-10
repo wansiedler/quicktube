@@ -35,13 +35,10 @@ final class AppModel {
     var signingIn = false
     var authMessage: String?
     private var signInTask: Task<Void, Never>?
-    private static let qualityKey = "recording.quality"
-    var quality: RecordingQuality {
-        didSet {
-            if let data = try? JSONEncoder().encode(quality) {
-                UserDefaults.standard.set(data, forKey: Self.qualityKey)
-            }
-        }
+    let settingsStore: SettingsStore
+    var settings: AppSettings {
+        get { settingsStore.settings }
+        set { settingsStore.settings = newValue }
     }
     private(set) var launchAtLogin = false
     var launchAtLoginMessage: String?
@@ -50,12 +47,7 @@ final class AppModel {
 
     init() {
         let store = KeychainStore()
-        let storedQuality =
-            UserDefaults.standard.data(forKey: Self.qualityKey)
-            .flatMap { try? JSONDecoder().decode(RecordingQuality.self, from: $0) } ?? .default
-        self.quality = storedQuality
-        // The recorder reads the preset at every start; UserDefaults is the handoff.
-        let qualityKey = Self.qualityKey
+        self.settingsStore = SettingsStore()
         let auth = GoogleAuth(store: store)
         self.auth = auth
         let telegram = TelegramUploader(store: store, log: { DiagnosticsLog.append($0) })
@@ -66,8 +58,8 @@ final class AppModel {
         self.notifier = notifier
         self.state = AppState(
             recorder: Recorder(quality: {
-                UserDefaults.standard.data(forKey: qualityKey)
-                    .flatMap { try? JSONDecoder().decode(RecordingQuality.self, from: $0) } ?? .default
+                // The store persists every change to UserDefaults; read it back at each start.
+                AppSettings.load(from: .standard).quality
             }),
             uploaders: [
                 .youtube: YouTubeUploader(tokens: auth, log: { DiagnosticsLog.append($0) }),
