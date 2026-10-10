@@ -112,6 +112,88 @@ extension NetworkSuite {
             #expect(result.videoID == "123")
         }
 
+        @Test func progressNeverGoesBackWhenHeadReportsFewerBytes() async throws {
+            let uploader = makeUploader(chunkSize: 4)
+            let file = try makeFile(bytes: 10)
+            let bytes = try Data(contentsOf: file)
+            StubURLProtocol.enqueue(.init(status: 200, body: Self.created))
+            StubURLProtocol.enqueue(Self.accepted(offset: 4))
+            StubURLProtocol.enqueue(Self.accepted(offset: 8))
+            StubURLProtocol.enqueue(.init(status: 502))
+            // The server dropped an uncommitted tail: only 6 bytes are kept.
+            StubURLProtocol.enqueue(.init(status: 200, headers: ["Upload-Offset": "6"]))
+            StubURLProtocol.enqueue(Self.accepted(offset: 10))
+
+            let progress = ProgressLog()
+            _ = try await uploader.upload(file: file, title: "T") { progress.add($0) }
+
+            #expect(progress.values == progress.values.sorted())
+            #expect(progress.values == [0.4, 0.8, 1.0])
+            let requests = StubURLProtocol.requests
+            #expect(requests[5].value(forHTTPHeaderField: "Upload-Offset") == "6")
+            #expect(requests[5].httpBody == bytes.suffix(4))
+        }
+
+        @Test func conflictOnPatchResyncsThroughHead() async throws {
+            let uploader = makeUploader(chunkSize: 4)
+            let file = try makeFile(bytes: 8)
+            StubURLProtocol.enqueue(.init(status: 200, body: Self.created))
+            StubURLProtocol.enqueue(Self.accepted(offset: 4))
+            StubURLProtocol.enqueue(.init(status: 409))
+            StubURLProtocol.enqueue(.init(status: 200, headers: ["Upload-Offset": "8"]))
+
+            let progress = ProgressLog()
+            let result = try await uploader.upload(file: file, title: "T") { progress.add($0) }
+            #expect(result.videoID == "123")
+            let requests = StubURLProtocol.requests
+            #expect(requests.count == 4)
+            #expect(requests[3].httpMethod == "HEAD")
+            #expect(progress.values == [0.5, 1.0])
+        }
+
+        @Test func conflictsCountTowardTheRetryBound() async throws {
+            let uploader = makeUploader(chunkSize: 16)
+            let file = try makeFile(bytes: 10)
+            StubURLProtocol.enqueue(.init(status: 200, body: Self.created))
+            StubURLProtocol.enqueue(.init(status: 409))
+            for _ in 0..<3 {
+                StubURLProtocol.enqueue(.init(status: 200, headers: ["Upload-Offset": "0"]))
+                StubURLProtocol.enqueue(.init(status: 409))
+            }
+            await #expect(throws: VimeoError.uploadIncomplete(offset: 0, size: 10)) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+            #expect(StubURLProtocol.requests.count == 8)
+        }
+
+        @Test func lowercaseUploadOffsetHeaderIsRead() async throws {
+            let uploader = makeUploader(chunkSize: 6)
+            let file = try makeFile(bytes: 10)
+            StubURLProtocol.enqueue(.init(status: 200, body: Self.created))
+            StubURLProtocol.enqueue(.init(status: 204, headers: ["upload-offset": "6"]))
+            StubURLProtocol.enqueue(.init(status: 500))
+            StubURLProtocol.enqueue(.init(status: 200, headers: ["upload-offset": "10"]))
+
+            let result = try await uploader.upload(file: file, title: "T") { _ in }
+            #expect(result.videoID == "123")
+            #expect(StubURLProtocol.requests.count == 4)
+        }
+
+        @Test func failingHeadEndsInUploadIncomplete() async throws {
+            let uploader = makeUploader(chunkSize: 4)
+            let file = try makeFile(bytes: 10)
+            StubURLProtocol.enqueue(.init(status: 200, body: Self.created))
+            StubURLProtocol.enqueue(Self.accepted(offset: 4))
+            StubURLProtocol.enqueue(.init(status: 500))
+            StubURLProtocol.enqueue(.init(status: 503))  // HEAD fails
+            StubURLProtocol.enqueue(.init(status: 200))  // HEAD without Upload-Offset
+            StubURLProtocol.enqueue(.init(status: 0, error: URLError(.timedOut)))  // HEAD fails
+            await #expect(throws: VimeoError.uploadIncomplete(offset: 4, size: 10)) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+            #expect(StubURLProtocol.requests.count == 6)
+        }
+
         @Test func networkErrorIsRetriedThroughHead() async throws {
             let uploader = makeUploader(chunkSize: 16)
             let file = try makeFile(bytes: 10)
@@ -250,7 +332,7 @@ extension NetworkSuite {
         #expect(VimeoPrivacy.nobody.rawValue == "nobody")
         #expect(VimeoPrivacy.allCases == [.unlisted, .anybody, .nobody])
         #expect(VimeoPrivacy.unlisted.label == "Unlisted")
-        #expect(VimeoPrivacy.anybody.label == "Anyone with the link")
+        #expect(VimeoPrivacy.anybody.label == "Public")
         #expect(VimeoPrivacy.nobody.label == "Only me")
     }
 

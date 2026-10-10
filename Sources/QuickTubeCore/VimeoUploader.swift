@@ -19,7 +19,7 @@ public enum VimeoPrivacy: String, Codable, CaseIterable, Sendable {
     public var label: String {
         switch self {
         case .unlisted: "Unlisted"
-        case .anybody: "Anyone with the link"
+        case .anybody: "Public"
         case .nobody: "Only me"
         }
     }
@@ -170,13 +170,20 @@ public actor VimeoUploader: VideoUploader {
     // MARK: - tus
 
     /// PATCHes from the server's offset until it has all `size` bytes; up to `maxRetries` HEAD-and-resume
-    /// rounds per chunk.
+    /// rounds per chunk. Progress never goes back, even when HEAD reports fewer bytes than a PATCH did.
     private func send(
         _ handle: FileHandle, size: Int, to uploadLink: URL, progress: @escaping @Sendable (Double) -> Void
     ) async throws {
         var offset = 0
         var retries = 0
         var needsHead = false
+        var reported = 0.0
+        func report(_ offset: Int) {
+            let value = Double(offset) / Double(size)
+            guard value > reported else { return }
+            reported = value
+            progress(value)
+        }
         while offset < size {
             try Task.checkCancellation()
             do {
@@ -189,7 +196,7 @@ public actor VimeoUploader: VideoUploader {
                     if committed > offset { retries = 0 }
                     offset = committed
                     needsHead = false
-                    progress(Double(offset) / Double(size))
+                    report(offset)
                     continue
                 }
                 let end = min(offset + chunkSize, size)
@@ -205,8 +212,8 @@ public actor VimeoUploader: VideoUploader {
                 guard committed > offset, committed <= size else { throw Retry() }
                 offset = committed
                 retries = 0
-                progress(Double(offset) / Double(size))
-            } catch  where Self.isRetryable(error) {
+                report(offset)
+            } catch let error where Self.isRetryable(error) {
                 retries += 1
                 log(
                     "Vimeo upload: transient failure at \(offset) of \(size) bytes (retry \(retries)): \(error)"
@@ -235,7 +242,8 @@ public actor VimeoUploader: VideoUploader {
                 throw Retry()
             }
             return committed
-        case 500...599:
+        // 409: the PATCH's offset is not the server's (e.g. a replay after a lost 204); HEAD resyncs.
+        case 409, 500...599:
             throw Retry()
         default:
             throw fail(http, body: body, step: "PATCH")

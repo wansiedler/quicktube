@@ -114,8 +114,9 @@ transcoded it.
 2. QuickTube → Settings → Vimeo: paste the token → Save Vimeo. The token is
    kept in the Keychain (service `com.wansiedler.quicktube`, account
    `vimeo.token`); an empty field clears it.
-3. Pick the privacy: Unlisted (`unlisted`, link includes a hash), Anyone with
-   the link (`anybody`, i.e. public) or Only me (`nobody`).
+3. Pick the privacy: Unlisted (`unlisted`: only people with the link, which
+   includes a hash), Public (`anybody`: listed on your profile and
+   searchable) or Only me (`nobody`).
 
 Free (Basic) plans have weekly/total upload quotas and may refuse `unlisted`;
 Vimeo's error text is shown as is ("Vimeo: …"), so pick another privacy or

@@ -174,13 +174,20 @@ final class AppModel {
             }
             Task { await self.state.toggle(destination: destination) }
         }
+        var registered: [Destination] = []
         for destination in Destination.allCases where destination != .gif {
             let combo = combos[destination]!
             if destination != .local, combo == combos[.local] {
                 hotkeyMessage =
                     "\(combo.label) is already the Save only shortcut; \(destination.label) has no hotkey."
+            } else if let other = registered.first(where: { combos[$0] == combo }) {
+                // A new destination's default can equal a combo the user gave another destination.
+                hotkeyMessage =
+                    "\(combo.label) is already the \(other.label) shortcut; \(destination.label) has no hotkey."
             } else if !hotkey.register(combo, slot: Self.slots[destination]!) {
                 hotkeyMessage = "\(combo.label) is already in use by another app. Choose another shortcut."
+            } else {
+                registered.append(destination)
             }
         }
         updatePauseHotkey()
@@ -538,6 +545,7 @@ final class AppModel {
                 vimeoToken = token
                 vimeoConfigured = true
             } else {
+                vimeoToken = ""
                 vimeoConfigured = false
             }
         } catch {
