@@ -29,6 +29,7 @@ struct MenuContent: View {
             Button("Copy Last Link") { model.copyLastLink() }
         }
         Button("Open Recordings Folder") { model.openRecordingsFolder() }
+        Button("Open Log File") { NSWorkspace.shared.open(DiagnosticsLog.url) }
         Divider()
         Button("Settings…") {
             // A menu bar app is never active, so the window would open behind others.

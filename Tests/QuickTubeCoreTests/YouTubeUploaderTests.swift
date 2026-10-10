@@ -97,6 +97,16 @@ extension NetworkSuite {
             }
         }
 
+        @Test func googleErrorMessageIsSurfaced() async throws {
+            let uploader = makeUploader()
+            let file = try makeFile(bytes: 2)
+            let body = Data("{\"error\":{\"code\":400,\"message\":\"Invalid video metadata\"}}".utf8)
+            StubURLProtocol.enqueue(.init(status: 400, body: body))
+            await #expect(throws: UploadError.apiError(status: 400, message: "Invalid video metadata")) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+        }
+
         @Test func quotaExceededIsReported() async throws {
             let uploader = makeUploader()
             let file = try makeFile(bytes: 2)

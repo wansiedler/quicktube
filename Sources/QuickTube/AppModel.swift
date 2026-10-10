@@ -33,7 +33,7 @@ final class AppModel {
         self.notifier = notifier
         self.state = AppState(
             recorder: Recorder(),
-            uploader: YouTubeUploader(tokens: auth),
+            uploader: YouTubeUploader(tokens: auth, log: { DiagnosticsLog.append($0) }),
             notifier: notifier)
         self.combo =
             UserDefaults.standard.data(forKey: Self.comboKey)

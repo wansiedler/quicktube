@@ -19,6 +19,8 @@ public enum UploadError: Error, Equatable {
     case quotaExceeded
     case exhaustedRetries
     case badResponse(Int)
+    /// A non-2xx answer whose body carried a Google error message.
+    case apiError(status: Int, message: String)
     case unauthorized
     case sessionExpired
 }
@@ -39,19 +41,22 @@ public actor YouTubeUploader: VideoUploader {
     private let chunkSize: Int
     private let maxAttempts: Int
     private let sleep: @Sendable (Duration) async throws -> Void
+    private let log: @Sendable (String) -> Void
 
     public init(
         tokens: TokenProvider,
         session: URLSession = .shared,
         chunkSize: Int = 8 << 20,
         maxAttempts: Int = 5,
-        sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+        sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        log: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         self.tokens = tokens
         self.session = session
         self.chunkSize = chunkSize
         self.maxAttempts = maxAttempts
         self.sleep = sleep
+        self.log = log
     }
 
     public func upload(
@@ -123,7 +128,7 @@ public actor YouTubeUploader: VideoUploader {
                 case 500...599:
                     throw Retry()
                 default:
-                    throw Self.error(status: http.statusCode, body: body)
+                    throw fail(http, body: body)
                 }
             } catch  where Self.isRetryable(error) {
                 attempt += 1
@@ -159,7 +164,7 @@ public actor YouTubeUploader: VideoUploader {
                 status: .init(privacyStatus: "unlisted", selfDeclaredMadeForKids: false)))
         let (body, response) = try await session.data(for: request)
         let http = try Self.http(response)
-        guard http.statusCode == 200 else { throw Self.error(status: http.statusCode, body: body) }
+        guard http.statusCode == 200 else { throw fail(http, body: body) }
         guard let location = http.value(forHTTPHeaderField: "Location"), let url = URL(string: location)
         else {
             throw UploadError.missingSessionURL
@@ -187,7 +192,7 @@ public actor YouTubeUploader: VideoUploader {
         case 500...599:
             throw Retry()
         default:
-            throw Self.error(status: http.statusCode, body: body)
+            throw fail(http, body: body)
         }
     }
 
@@ -237,14 +242,33 @@ public actor YouTubeUploader: VideoUploader {
         return UploadResult(videoID: video.id, privacyStatus: video.status.privacyStatus)
     }
 
-    private static func error(status: Int, body: Data) -> UploadError {
+    private func fail(_ http: HTTPURLResponse, body: Data) -> UploadError {
+        let text = String(decoding: body.prefix(4000), as: UTF8.self)
+        log("HTTP \(http.statusCode) \(http.url?.absoluteString ?? "") \(text)")
+        return Self.error(status: http.statusCode, body: body)
+    }
+
+    private struct GoogleError: Decodable {
+        struct Inner: Decodable {
+            let message: String?
+        }
+        let error: Inner
+    }
+
+    static func error(status: Int, body: Data) -> UploadError {
         if status == 403, String(decoding: body, as: UTF8.self).contains("quotaExceeded") {
             return .quotaExceeded
         }
         switch status {
         case 401: return .unauthorized
         case 404, 410: return .sessionExpired
-        default: return .badResponse(status)
+        default:
+            if let message = (try? JSONDecoder().decode(GoogleError.self, from: body))?.error.message,
+                !message.isEmpty
+            {
+                return .apiError(status: status, message: message)
+            }
+            return .badResponse(status)
         }
     }
 }

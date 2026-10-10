@@ -160,6 +160,8 @@ public final class AppState {
         switch error {
         case AuthError.notSignedIn, UploadError.unauthorized:
             return "Sign in to Google in Settings, then retry the upload."
+        case UploadError.apiError(let status, let message):
+            return "Upload failed (HTTP \(status)): \(message)"
         case AuthError.missingClient:
             return "Enter and save the OAuth client ID and secret in Settings."
         case AuthError.tokenRevoked:
