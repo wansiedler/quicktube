@@ -89,7 +89,8 @@ public actor Recorder: ScreenRecorder {
         state = .stopping
         defer { state = .idle }
         try await session.stream.stopCapture()
-        try await session.delegate.waitUntilFinished(timeout: Self.stopTimeout)
+        try await session.delegate.waitUntilFinished(
+            timeout: Self.stopTimeout, timeoutError: RecorderError.stopTimedOut(file: session.fileURL))
         return session.fileURL
     }
 }
@@ -103,10 +104,10 @@ private final class RecorderDelegate: NSObject, SCStreamDelegate, SCRecordingOut
     private var failure: Error?
     private var waiter: CheckedContinuation<Void, Error>?
 
-    func waitUntilFinished(timeout: Duration) async throws {
+    func waitUntilFinished(timeout: Duration, timeoutError: Error) async throws {
         let timer = Task {
             try await Task.sleep(for: timeout)
-            finish(RecorderError.stopTimedOut)
+            finish(timeoutError)
         }
         defer { timer.cancel() }
         try await withTaskCancellationHandler {

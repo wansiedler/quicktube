@@ -13,7 +13,8 @@ public enum RecorderError: Error, Equatable {
     case noDisplay
     case alreadyRecording
     case notRecording
-    case stopTimedOut
+    /// The file was not finalized in time; it is kept so the upload can still be retried.
+    case stopTimedOut(file: URL)
 }
 
 /// Side effects of a finished or failed cycle: clipboard, notification.
@@ -93,6 +94,9 @@ public final class AppState {
         let file: URL
         do {
             file = try await recorder.stop()
+        } catch RecorderError.stopTimedOut(let kept) {
+            fail(RecorderError.stopTimedOut(file: kept), file: kept)
+            return
         } catch {
             fail(error, file: nil)
             return
@@ -141,6 +145,8 @@ public final class AppState {
             return "Allow Screen Recording for QuickTube in System Settings → Privacy & Security."
         case RecorderError.microphonePermissionDenied:
             return "Allow Microphone for QuickTube in System Settings → Privacy & Security."
+        case RecorderError.stopTimedOut:
+            return "Recording did not finalize in time; the file was kept. Try Retry Upload."
         default:
             return "Upload failed: \(error)"
         }

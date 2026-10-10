@@ -183,6 +183,25 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         #expect(notifier.failures.count == 1)
     }
 
+    @Test func stopTimeoutKeepsFileForRetry() async {
+        let kept = URL(fileURLWithPath: "/tmp/kept.mp4")
+        recorder.stopError = RecorderError.stopTimedOut(file: kept)
+        let state = makeState()
+        await state.toggle()
+        await state.toggle()
+        #expect(
+            state.phase
+                == .failed(
+                    message: "Recording did not finalize in time; the file was kept. Try Retry Upload.",
+                    file: kept))
+        #expect(uploader.uploads.isEmpty)
+
+        await state.retry()
+        #expect(uploader.uploads.count == 1)
+        #expect(uploader.uploads[0].0 == kept)
+        #expect(state.phase == .done(link: URL(string: "https://youtu.be/abc123")!))
+    }
+
     @Test func secondToggleWhileStartIsPendingIsIgnored() async {
         recorder.hold = true
         let state = makeState()
