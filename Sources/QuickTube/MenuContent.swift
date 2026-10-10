@@ -22,6 +22,9 @@ struct MenuContent: View {
                 Task { await model.state.toggle(destination: .drive) }
             }
             Button("Stop and Send to Slack") { Task { await model.state.toggle(destination: .slack) } }
+            if model.settings.gifEnabled {
+                Button("Stop and Make GIF") { Task { await model.state.toggle(destination: .gif) } }
+            }
         case .uploading:
             Button("Uploading…") {}.disabled(true)
         default:
@@ -93,7 +96,7 @@ struct MenuContent: View {
     }
 
     private var shortcutSummary: String {
-        Destination.allCases.map { "\(model.combo(for: $0).label) \($0.label)" }.joined(separator: " · ")
+        model.visibleDestinations.map { "\(model.combo(for: $0).label) \($0.label)" }.joined(separator: " · ")
     }
 
     private var statusText: String {
@@ -102,6 +105,7 @@ struct MenuContent: View {
         case .recording: "Recording… stop with " + shortcutSummary
         case .paused: "Paused — resume with \(AppModel.pauseCombo.label), stop with " + shortcutSummary
         case .uploading(let progress): AppState.uploadText(stage: model.state.uploadStage, progress: progress)
+        case .done(let link) where link.isFileURL: "GIF saved: \(link.lastPathComponent)"
         case .done(let link): "Uploaded: \(link.absoluteString)"
         case .failed(let message, _): "Failed: \(message)"
         }

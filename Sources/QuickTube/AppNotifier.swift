@@ -1,5 +1,6 @@
 import AppKit
 import QuickTubeCore
+import UniformTypeIdentifiers
 import UserNotifications
 
 /// Clipboard plus a user notification. Without a bundle (swift run) it logs instead.
@@ -11,6 +12,10 @@ final class AppNotifier: NSObject, Notifier, UNUserNotificationCenterDelegate {
     func linkReady(_ url: URL, isUnlisted: Bool) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
+        if url.isFileURL {
+            fileReady(url, on: pasteboard)
+            return
+        }
         pasteboard.setString(url.absoluteString, forType: .string)
         if isUnlisted {
             post(title: "Link copied", body: url.absoluteString)
@@ -20,6 +25,19 @@ final class AppNotifier: NSObject, Notifier, UNUserNotificationCenterDelegate {
                 body: "YouTube locked the video to private because the API project is unverified. "
                     + url.absoluteString)
         }
+    }
+
+    /// A local file (the GIF): its file URL plus the GIF data go on the pasteboard, so it pastes as a file
+    /// in Finder and as an image in chat apps; Finder shows it selected.
+    private func fileReady(_ url: URL, on pasteboard: NSPasteboard) {
+        let item = NSPasteboardItem()
+        item.setString(url.absoluteString, forType: .fileURL)
+        if let data = try? Data(contentsOf: url) {
+            item.setData(data, forType: NSPasteboard.PasteboardType(UTType.gif.identifier))
+        }
+        pasteboard.writeObjects([item])
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+        post(title: AppState.doneText(link: url, destination: .gif), body: url.lastPathComponent)
     }
 
     func failed(_ message: String) {

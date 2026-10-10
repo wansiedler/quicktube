@@ -63,6 +63,8 @@ public enum Destination: String, Sendable, CaseIterable, Codable {
     case telegram
     case drive
     case slack
+    /// Not an upload: a GIF next to the recording; the link is its file URL.
+    case gif
 
     public var label: String {
         switch self {
@@ -70,6 +72,7 @@ public enum Destination: String, Sendable, CaseIterable, Codable {
         case .telegram: "Telegram"
         case .drive: "Google Drive"
         case .slack: "Slack"
+        case .gif: "GIF"
         }
     }
 }
@@ -402,7 +405,8 @@ public final class AppState {
             phase = .done(link: link)
             record(link: link, destination: destination, title: title)
             notifier.linkReady(link, isUnlisted: result.isUnlisted)
-            runAfterUpload(file)
+            // The GIF is made from the recording; the recording itself was not uploaded anywhere.
+            if destination != .gif { runAfterUpload(file) }
         } catch {
             fail(error, file: file, stage: .upload)
         }
@@ -427,6 +431,17 @@ public final class AppState {
     public func clearHistory() {
         history = []
         onHistoryChange?(history)
+    }
+
+    /// The HUD's done line: "GIF ready · 1.5 MB" for a GIF, otherwise "Link copied · host/path".
+    public static func doneText(link: URL, destination: Destination) -> String {
+        guard destination == .gif, link.isFileURL else {
+            return "Link copied · \(link.host ?? "")\(link.path)"
+        }
+        let bytes = (try? FileManager.default.attributesOfItem(atPath: link.path)[.size] as? Int) ?? 0
+        let megabytes = Double(bytes) / Double(1 << 20)
+        return
+            "GIF ready · \(megabytes.formatted(.number.precision(.fractionLength(1)).locale(Locale(identifier: "en_US_POSIX")))) MB"
     }
 
     /// "Compressing · details" at 21% → "Compressing 21% · details"; a plain stage → "Uploading 60%".
@@ -480,6 +495,12 @@ public final class AppState {
             return "Slack is not set up: add the bot token and channel ID in Settings."
         case SlackError.apiError(let code):
             return "Slack refused the upload: \(code)"
+        case GIFError.cannotRead:
+            return "Could not read the recording to make a GIF."
+        case GIFError.cannotWrite:
+            return "Could not write the GIF next to the recording."
+        case GIFError.noFrames:
+            return "The recording has no frames to make a GIF from."
         case UploadError.apiError(let status, let message):
             if message.contains("exceeded the number of videos") {
                 return "YouTube's daily upload limit for this channel is reached; "

@@ -123,8 +123,14 @@ struct HUDView: View {
                 Text(AppState.uploadText(stage: state.uploadStage, progress: progress)).monospacedDigit()
             case .done(let link):
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                Text("Link copied · \(link.host ?? "")\(link.path)")
-                    .onTapGesture { NSWorkspace.shared.open(link) }
+                Text(AppState.doneText(link: link, destination: state.destination))
+                    .onTapGesture {
+                        if link.isFileURL {
+                            NSWorkspace.shared.activateFileViewerSelecting([link])
+                        } else {
+                            NSWorkspace.shared.open(link)
+                        }
+                    }
             case .failed(let message, _):
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
                 Text(message).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)

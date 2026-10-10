@@ -933,6 +933,69 @@ final class LogLines: @unchecked Sendable {
         #expect(notifier.failures.isEmpty)
         #expect(logs.all.contains { $0.contains("Cleanup after upload") })
     }
+
+    // MARK: GIF
+
+    @Test func gifDestinationFinishesThroughTheNormalDonePath() async {
+        let gif = FakeUploader()
+        let gifURL = URL(filePath: "/tmp/rec/clip.gif")
+        gif.result = UploadResult(link: gifURL)
+        gif.stages = ["Rendering GIF"]
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader, .gif: gif], notifier: notifier,
+            titleProvider: { [now] in TitleContext(date: now) })
+        await record(state, to: .gif)
+        #expect(state.phase == .done(link: gifURL))
+        #expect(state.destination == .gif)
+        #expect(state.lastLink == gifURL)
+        #expect(gif.uploads.count == 1)
+        #expect(uploader.uploads.isEmpty)
+        #expect(notifier.links.count == 1)
+        #expect(notifier.links.first?.0 == gifURL)
+        #expect(state.history.first?.destination == .gif)
+        #expect(state.history.first?.link == gifURL)
+    }
+
+    @Test func afterUploadIsSkippedForGIF() async {
+        let gif = FakeUploader()
+        gif.result = UploadResult(link: URL(filePath: "/tmp/rec/clip.gif"))
+        let called = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.gif: gif], notifier: notifier,
+            afterUpload: { called.append($0.path) })
+        await record(state, to: .gif)
+        guard case .done = state.phase else {
+            Issue.record("expected .done, got \(state.phase)")
+            return
+        }
+        #expect(called.all.isEmpty)
+    }
+
+    @Test func gifLabelIsGIF() {
+        #expect(Destination.gif.label == "GIF")
+        #expect(Destination(rawValue: "gif") == .gif)
+    }
+
+    @Test func doneTextNamesTheGIFSize() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "done-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appending(path: "clip.gif")
+        try Data(count: 3 << 19).write(to: file)  // 1.5 MB
+        #expect(AppState.doneText(link: file, destination: .gif) == "GIF ready · 1.5 MB")
+    }
+
+    @Test func doneTextForOtherDestinationsIsUnchanged() {
+        let link = URL(string: "https://youtu.be/abc123")!
+        #expect(AppState.doneText(link: link, destination: .youtube) == "Link copied · youtu.be/abc123")
+    }
+
+    @Test func gifErrorsAreHumanReadable() {
+        #expect(AppState.message(for: GIFError.cannotRead) == "Could not read the recording to make a GIF.")
+        #expect(
+            AppState.message(for: GIFError.cannotWrite) == "Could not write the GIF next to the recording.")
+        #expect(AppState.message(for: GIFError.noFrames) == "The recording has no frames to make a GIF from.")
+    }
 }
 
 @Suite struct TranscodeMessageTests {

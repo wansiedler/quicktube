@@ -208,6 +208,11 @@ enum ClipMaker {
         canEncode(kCMVideoCodecType_H264) && canEncode(kCMVideoCodecType_HEVC)
     }
 
+    /// False on hosts without an H.264 encoder for the source clip; tests that only read the clip skip there.
+    static func h264Available() -> Bool {
+        canEncode(kCMVideoCodecType_H264)
+    }
+
     private static func canEncode(_ codec: CMVideoCodecType) -> Bool {
         var session: VTCompressionSession?
         let status = VTCompressionSessionCreate(

@@ -137,6 +137,26 @@ struct SettingsView: View {
                 )
                 .font(.callout).foregroundStyle(.secondary)
             }
+            Section("GIF") {
+                Toggle(
+                    "Make GIFs (\(model.combo(for: .gif).label))",
+                    isOn: Binding(
+                        get: { model.settings.gifEnabled },
+                        set: { model.setGIFEnabled($0) }))
+                Stepper(
+                    "Frame rate: \(model.settings.gifFPS) fps", value: $model.settings.gifFPS, in: 5...30)
+                Stepper(
+                    "Max width: \(model.settings.gifMaxWidth) px", value: $model.settings.gifMaxWidth,
+                    in: 320...1920, step: 80)
+                Stepper(
+                    "Max length: \(model.settings.gifMaxSeconds) s", value: $model.settings.gifMaxSeconds,
+                    in: 5...120, step: 5)
+                Text(
+                    "Stopping with the GIF shortcut saves a GIF next to the recording instead of uploading, "
+                        + "copies it and shows it in Finder. Long recordings are cut after the maximum length."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+            }
             Section("Permissions") {
                 permissionRow(
                     "Microphone", status: model.microphoneStatus, pane: Permissions.microphonePane,
@@ -227,6 +247,9 @@ struct SettingsView: View {
                 shortcutRow("Record → Telegram", destination: .telegram)
                 shortcutRow("Record → Google Drive", destination: .drive)
                 shortcutRow("Record → Slack", destination: .slack)
+                if model.settings.gifEnabled {
+                    shortcutRow("Record → GIF", destination: .gif)
+                }
                 Text(
                     "Hold ⌘ or ⌃ (plus any other modifiers). Either shortcut starts a recording; the one you press to stop picks the destination."
                 )
