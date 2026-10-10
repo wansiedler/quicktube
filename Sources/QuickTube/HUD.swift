@@ -3,7 +3,7 @@ import QuickTubeCore
 import SwiftUI
 
 /// Small always-on-top status pill at the bottom of the screen under the cursor.
-/// It never takes focus, and the recorder excludes QuickTube's own windows from capture.
+/// It never takes focus, and the recorder excludes it from capture by `windowNumber`.
 @MainActor
 final class HUDController {
     private let state: AppState
@@ -18,7 +18,8 @@ final class HUDController {
             contentRect: NSRect(x: 0, y: 0, width: 320, height: 44),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
-            defer: true)
+            // Not deferred: the window exists (and has a number to exclude) before it is first shown.
+            defer: false)
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
@@ -29,6 +30,11 @@ final class HUDController {
         panel.isMovableByWindowBackground = false
         panel.contentView = hosting
         observe()
+    }
+
+    /// The panel's window-server ID, for the recorder's exclusion list.
+    var windowNumber: CGWindowID? {
+        panel.windowNumber > 0 ? CGWindowID(panel.windowNumber) : nil
     }
 
     /// Re-arms after every change: `withObservationTracking` fires once per mutation.

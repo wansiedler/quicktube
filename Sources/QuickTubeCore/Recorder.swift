@@ -53,16 +53,22 @@ public actor Recorder: ScreenRecorder {
 
     private let directory: URL
     private let options: @Sendable () -> RecorderOptions
+    private let excludedWindows: @Sendable @MainActor () -> [CGWindowID]
     private var state = State.idle
     private var take: Take?
 
     /// `options` is read at the start of every recording, so Settings changes apply to the next one.
+    /// `excludedWindows` lists the app's windows to keep out of display and region recordings (the HUD,
+    /// the selection overlay); it is read for every segment. Any other window, the camera bubble
+    /// included, is recorded.
     public init(
         directory: URL = Recorder.defaultDirectory,
-        options: @escaping @Sendable () -> RecorderOptions = { RecorderOptions() }
+        options: @escaping @Sendable () -> RecorderOptions = { RecorderOptions() },
+        excludedWindows: @escaping @Sendable @MainActor () -> [CGWindowID] = { [] }
     ) {
         self.directory = directory
         self.options = options
+        self.excludedWindows = excludedWindows
     }
 
     public func start(target: CaptureTarget) async throws {
@@ -113,8 +119,10 @@ public actor Recorder: ScreenRecorder {
 
     /// Swift 6.2 refuses to hand the non-Sendable `SCShareableContent` from the SDK's async
     /// method straight into an actor; fetching it in a nonisolated helper sidesteps that.
+    /// Off-screen windows are listed too: the HUD is ordered in only after capture has started,
+    /// and it must already be in the exclusion list then.
     private nonisolated static func shareableContent() async throws -> Unchecked<SCShareableContent> {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         return Unchecked(value: content)
     }
 
@@ -124,20 +132,19 @@ public actor Recorder: ScreenRecorder {
     }
 
     /// Builds the content filter for `target`; for a region also returns its source rect (display points).
+    /// `excluded` are window IDs kept out of display and region recordings; IDs not in `content` are ignored.
     private static func filter(
-        for target: CaptureTarget, in content: SCShareableContent
+        for target: CaptureTarget, in content: SCShareableContent, excluding excluded: [CGWindowID]
     ) throws -> (filter: SCContentFilter, sourceRect: CGRect?) {
-        // Keep QuickTube's own windows (the status HUD, the selection overlay) out of display recordings.
-        let ownApps = content.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
+        let ids = Set(excluded)
+        let excludedWindows = content.windows.filter { ids.contains($0.windowID) }
         switch target {
         case .display(let displayID):
             guard
                 let display = content.displays.first(where: { $0.displayID == displayID })
                     ?? content.displays.first
             else { throw RecorderError.noDisplay }
-            return (
-                SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: []), nil
-            )
+            return (SCContentFilter(display: display, excludingWindows: excludedWindows), nil)
         case .window(let windowID):
             guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
                 throw RecorderError.windowGone
@@ -147,8 +154,7 @@ public actor Recorder: ScreenRecorder {
             guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
                 throw RecorderError.noDisplay
             }
-            let filter = SCContentFilter(
-                display: display, excludingApplications: ownApps, exceptingWindows: [])
+            let filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
             guard let source = CaptureTarget.sourceRect(rect, displaySize: filter.contentRect.size) else {
                 throw RecorderError.noDisplay
             }
@@ -169,7 +175,8 @@ public actor Recorder: ScreenRecorder {
         } catch {
             throw RecorderError.screenPermissionDenied
         }
-        let (filter, sourceRect) = try Self.filter(for: take.target, in: content)
+        let (filter, sourceRect) = try Self.filter(
+            for: take.target, in: content, excluding: await excludedWindows())
         let scale = CGFloat(filter.pointPixelScale)
         let configuration = SCStreamConfiguration()
         let captured = sourceRect?.size ?? filter.contentRect.size

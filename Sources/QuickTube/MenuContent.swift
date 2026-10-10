@@ -51,6 +51,11 @@ struct MenuContent: View {
         Picker("Frame rate: \(model.settings.quality.fps) fps", selection: $model.settings.quality.fps) {
             ForEach(RecordingQuality.frameRates, id: \.self) { Text("\($0) fps").tag($0) }
         }
+        Toggle(
+            "Camera",
+            isOn: Binding(
+                get: { model.settings.cameraEnabled },
+                set: { model.setCameraEnabled($0) }))
         Divider()
         Button("Open Recordings Folder") { model.openRecordingsFolder() }
         Button("Open Log File") { NSWorkspace.shared.open(DiagnosticsLog.url) }

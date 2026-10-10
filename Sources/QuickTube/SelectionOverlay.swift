@@ -4,8 +4,8 @@ import ScreenCaptureKit
 
 /// Full-screen chooser on the display under the cursor: drag an area, or click a highlighted window.
 /// Esc, a right click, a QuickTube recording hotkey or a display change cancels. The overlay is a
-/// non-activating panel, so it takes key input without activating QuickTube. QuickTube's own windows are excluded from capture, so the overlay
-/// never shows up in a recording.
+/// non-activating panel, so it takes key input without activating QuickTube. The recorder excludes it
+/// by `windowNumber`, so the overlay never shows up in a recording.
 @MainActor
 final class SelectionOverlay: CaptureTargetPicker {
     private var window: OverlayPanel?
@@ -15,6 +15,12 @@ final class SelectionOverlay: CaptureTargetPicker {
     /// Set by `cancel()` while the window list loads, before the overlay exists.
     private var cancelled = false
     private var screenObserver: NSObjectProtocol?
+
+    /// The overlay's window-server ID while it is up, for the recorder's exclusion list.
+    var windowNumber: CGWindowID? {
+        guard let window, window.windowNumber > 0 else { return nil }
+        return CGWindowID(window.windowNumber)
+    }
 
     /// Ends a pick in flight as cancelled; does nothing otherwise.
     func cancel() {

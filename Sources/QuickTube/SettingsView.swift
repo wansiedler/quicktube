@@ -64,6 +64,27 @@ struct SettingsView: View {
                 )
                 .font(.callout).foregroundStyle(.secondary)
             }
+            Section("Camera") {
+                Toggle(
+                    "Camera bubble",
+                    isOn: Binding(
+                        get: { model.settings.cameraEnabled },
+                        set: { model.setCameraEnabled($0) }))
+                Toggle("Always on", isOn: $model.settings.cameraAlwaysOn)
+                    .disabled(!model.settings.cameraEnabled)
+                Picker("Size", selection: $model.settings.cameraSize) {
+                    ForEach(CameraSize.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Picker("Corner", selection: $model.settings.cameraCorner) {
+                    ForEach(Corner.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                Text(
+                    "A round camera view shown while recording, or all the time with Always on. "
+                        + "It is part of the recording; drag it anywhere."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+            }
             Section("Permissions") {
                 permissionRow(
                     "Microphone", status: model.microphoneStatus, pane: Permissions.microphonePane,
@@ -72,6 +93,9 @@ struct SettingsView: View {
                     "Screen Recording", status: model.screenRecordingStatus,
                     pane: Permissions.screenRecordingPane,
                     request: { model.requestScreenRecording() })
+                permissionRow(
+                    "Camera", status: model.cameraStatus, pane: Permissions.cameraPane,
+                    request: { model.requestCamera() })
                 Text("macOS applies a new Screen Recording grant after QuickTube is relaunched.")
                     .font(.callout).foregroundStyle(.secondary)
             }

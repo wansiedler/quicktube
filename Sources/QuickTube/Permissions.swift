@@ -2,7 +2,8 @@ import AVFoundation
 import CoreGraphics
 import Foundation
 
-/// The two TCC grants a recording needs, asked for up front instead of on the first hotkey press.
+/// The TCC grants QuickTube uses. Microphone and screen recording are asked for up front instead of on
+/// the first hotkey press; the camera only when the camera bubble is first turned on.
 @MainActor
 enum Permissions {
     enum Status: Equatable {
@@ -23,9 +24,14 @@ enum Permissions {
     private static let securityPane = "x-apple.systempreferences:com.apple.preference.security?"
     static let microphonePane = URL(string: securityPane + "Privacy_Microphone")!
     static let screenRecordingPane = URL(string: securityPane + "Privacy_ScreenCapture")!
+    static let cameraPane = URL(string: securityPane + "Privacy_Camera")!
 
-    static var microphone: Status {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+    static var microphone: Status { status(for: .audio) }
+
+    static var camera: Status { status(for: .video) }
+
+    private static func status(for media: AVMediaType) -> Status {
+        switch AVCaptureDevice.authorizationStatus(for: media) {
         case .authorized: .granted
         case .notDetermined: .notDetermined
         default: .denied
@@ -41,6 +47,11 @@ enum Permissions {
     static func requestMicrophone() async -> Status {
         _ = await AVCaptureDevice.requestAccess(for: .audio)
         return microphone
+    }
+
+    static func requestCamera() async -> Status {
+        _ = await AVCaptureDevice.requestAccess(for: .video)
+        return camera
     }
 
     /// Shows the system prompt once per install; later calls only report the state.

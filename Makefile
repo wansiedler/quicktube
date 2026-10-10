@@ -1,7 +1,7 @@
 APP      := QuickTube.app
 BIN      := .build/release/QuickTube
 PLIST    := Sources/QuickTube/Info.plist
-# Hardened runtime needs QuickTube.entitlements (audio-input) or the microphone is denied silently.
+# Hardened runtime needs QuickTube.entitlements (audio-input, camera) or the microphone and camera are denied silently.
 ENTITLEMENTS := QuickTube.entitlements
 # First "Apple Development" identity in the login keychain; ad-hoc ("-") otherwise.
 # A stable identity keeps the Screen Recording grant across rebuilds.

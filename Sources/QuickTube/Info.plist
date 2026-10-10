@@ -24,6 +24,8 @@
     <string>15.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>QuickTube shows your camera in a bubble that is recorded with the screen.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>QuickTube records your voice with the screen.</string>
     <key>NSScreenCaptureUsageDescription</key>

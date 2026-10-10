@@ -13,6 +13,9 @@ final class AppModel {
     private let notifier: AppNotifier
     private var hud: HUDController?
     private let selectionOverlay = SelectionOverlay()
+    private let camera = CameraPanel()
+    /// The windows the recorder leaves out; filled in once the HUD exists.
+    private let exclusions = WindowExclusions()
     private static let comboKeys: [Destination: String] = [
         .youtube: "hotkey.combo", .telegram: "hotkey.telegramCombo",
         .drive: "hotkey.driveCombo", .slack: "hotkey.slackCombo",
@@ -48,6 +51,7 @@ final class AppModel {
     var launchAtLoginMessage: String?
     private(set) var microphoneStatus = Permissions.microphone
     private(set) var screenRecordingStatus = Permissions.screenRecording
+    private(set) var cameraStatus = Permissions.camera
 
     /// The frontmost app and the screen under the cursor, read when a recording starts.
     private static func currentTitleContext() -> TitleContext {
@@ -74,14 +78,16 @@ final class AppModel {
         self.slack = slack
         let notifier = AppNotifier()
         self.notifier = notifier
+        let exclusions = exclusions
         self.state = AppState(
-            recorder: Recorder(options: {
-                // The store persists every change to UserDefaults; read it back at each start.
-                let settings = AppSettings.load(from: .standard)
-                return RecorderOptions(
-                    quality: settings.quality, systemAudio: settings.systemAudioEnabled,
-                    microphone: settings.microphoneEnabled)
-            }),
+            recorder: Recorder(
+                options: {
+                    // The store persists every change to UserDefaults; read it back at each start.
+                    let settings = AppSettings.load(from: .standard)
+                    return RecorderOptions(
+                        quality: settings.quality, systemAudio: settings.systemAudioEnabled,
+                        microphone: settings.microphoneEnabled)
+                }, excludedWindows: { exclusions.windows() }),
             uploaders: [
                 .youtube: YouTubeUploader(tokens: auth, log: { DiagnosticsLog.append($0) }),
                 .telegram: telegram,
@@ -131,7 +137,13 @@ final class AppModel {
             guard let self, self.state.failureKind == .auth else { return }
             self.refreshAuth()
         }
-        hud = HUDController(state: state)
+        let hud = HUDController(state: state)
+        self.hud = hud
+        // Only the HUD and the selection overlay stay out of recordings; the camera bubble is recorded.
+        exclusions.windows = { [weak hud, selectionOverlay] in
+            [hud?.windowNumber, selectionOverlay.windowNumber].compactMap { $0 }
+        }
+        observeCamera()
         notifier.requestPermission()
         refreshAuth()
         refreshTelegram()
@@ -148,6 +160,48 @@ final class AppModel {
     func refreshPermissions() {
         microphoneStatus = Permissions.microphone
         screenRecordingStatus = Permissions.screenRecording
+        cameraStatus = Permissions.camera
+    }
+
+    func requestCamera() {
+        Task {
+            cameraStatus = await Permissions.requestCamera()
+            updateCamera()
+        }
+    }
+
+    /// Turns the camera bubble on or off; the first time on asks for the camera grant.
+    func setCameraEnabled(_ enabled: Bool) {
+        settings.cameraEnabled = enabled
+        if enabled, Permissions.camera == .notDetermined {
+            requestCamera()
+        }
+    }
+
+    /// Re-arms after every change, like `HUDController`: recording phase and settings drive the bubble.
+    private func observeCamera() {
+        withObservationTracking {
+            updateCamera()
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.observeCamera() }
+        }
+    }
+
+    /// Shown while recording (or paused) when the camera is on, always when it is also "always on";
+    /// never without the camera grant.
+    private func updateCamera() {
+        let settings = settings
+        let recording: Bool
+        switch state.phase {
+        case .recording, .paused: recording = true
+        default: recording = false
+        }
+        let wanted = settings.cameraEnabled && (settings.cameraAlwaysOn || recording)
+        guard wanted, Permissions.camera == .granted else {
+            camera.hide()
+            return
+        }
+        camera.show(size: settings.cameraSize.points, corner: settings.cameraCorner)
     }
 
     func requestMicrophone() {
@@ -384,4 +438,10 @@ final class AppModel {
             at: Recorder.defaultDirectory, withIntermediateDirectories: true)
         NSWorkspace.shared.open(Recorder.defaultDirectory)
     }
+}
+
+/// A late-bound list of window IDs, readable from the recorder's closure before the HUD exists.
+@MainActor
+private final class WindowExclusions {
+    var windows: () -> [CGWindowID] = { [] }
 }
