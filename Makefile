@@ -10,16 +10,34 @@ ifeq ($(IDENTITY),)
 IDENTITY := -
 endif
 
-.PHONY: build app install test lint clean
+# App icon: Resources/AppIcon.svg -> build/AppIcon.icns. Needs rsvg-convert (brew install librsvg).
+ICON_SVG  := Resources/AppIcon.svg
+ICONSET   := build/AppIcon.iconset
+ICNS      := build/AppIcon.icns
+ICON_SIZES := 16 32 128 256 512
+
+.PHONY: build app icon install test lint clean
 
 build:
 	swift build -c release --product QuickTube
 
-app: build
+icon: $(ICNS)
+
+$(ICNS): $(ICON_SVG)
+	rm -rf $(ICONSET)
+	mkdir -p $(ICONSET)
+	for s in $(ICON_SIZES); do \
+	  rsvg-convert -w $$s -h $$s $(ICON_SVG) -o $(ICONSET)/icon_$${s}x$${s}.png; \
+	  rsvg-convert -w $$((s*2)) -h $$((s*2)) $(ICON_SVG) -o $(ICONSET)/icon_$${s}x$${s}@2x.png; \
+	done
+	iconutil -c icns $(ICONSET) -o $(ICNS)
+
+app: build $(ICNS)
 	rm -rf $(APP)
-	mkdir -p $(APP)/Contents/MacOS
+	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	cp $(BIN) $(APP)/Contents/MacOS/QuickTube
 	cp $(PLIST) $(APP)/Contents/Info.plist
+	cp $(ICNS) $(APP)/Contents/Resources/AppIcon.icns
 	codesign --force --sign "$(IDENTITY)" --options runtime --entitlements $(ENTITLEMENTS) --timestamp=none $(APP)
 	@echo "Signed with: $(IDENTITY)"
 

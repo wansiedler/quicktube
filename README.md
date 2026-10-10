@@ -11,7 +11,8 @@ open /Applications/QuickTube.app
 ```
 
 `make app` builds `QuickTube.app` in the repo; `make install` copies it to
-`/Applications`. The bundle is signed with the first "Apple Development"
+`/Applications`. The app icon is rendered from `Resources/AppIcon.svg`, which
+needs `rsvg-convert` (`brew install librsvg`). The bundle is signed with the first "Apple Development"
 identity in your keychain, or ad-hoc if there is none (then macOS re-asks
 for Screen Recording after each rebuild).
 

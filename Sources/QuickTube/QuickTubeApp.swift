@@ -12,7 +12,7 @@ struct QuickTubeApp: App {
             if case .uploading(let progress) = model.state.phase {
                 Label("\(Int(progress * 100))%", systemImage: model.state.phase.symbolName)
             } else {
-                Image(systemName: model.state.phase.symbolName)
+                MenuBarIcon.image(for: model.state.phase)
             }
         }
         Settings {
