@@ -77,13 +77,17 @@ enum Permissions {
         return screenRecording
     }
 
-    /// First-launch sequence: microphone, then screen recording, one prompt at a time.
+    /// First-launch sequence: microphone, screen recording, then input monitoring (for the keystroke
+    /// overlay), one prompt at a time. Each is asked once; later launches only report the state.
     static func requestMissing() async {
         if microphone == .notDetermined {
             _ = await requestMicrophone()
         }
         if screenRecording == .notDetermined {
             _ = requestScreenRecording()
+        }
+        if inputMonitoring == .notDetermined {
+            _ = requestInputMonitoring()
         }
     }
 }
