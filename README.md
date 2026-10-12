@@ -159,6 +159,20 @@ modifiers).
   display under the cursor, a selected area (drag a rectangle; the pixel size
   is shown) or a selected window (click it). Esc cancels the chooser.
 - **Quality**: Native / 4K / 1080p at 30 or 60 fps, for the next recording.
+- **Bitrate** (Settings → Recording, also in the menu): QuickTube encodes the
+  capture itself (hardware HEVC) at width × height × fps × a per-preset bits per
+  pixel, clamped to 2–80 Mbit/s. Approximate video size per minute at 60 fps
+  (30 fps is half, down to the 2 Mbit/s floor ≈ 14 MB/min); still screens take less:
+
+  | Preset | bits/pixel/frame | 6K (6016×3384) | 4K | 1080p |
+  | --- | --- | --- | --- | --- |
+  | High | 0.032 | ≈ 280 MB/min (39 Mbit/s) | ≈ 114 MB/min | ≈ 28 MB/min |
+  | Balanced (default) | 0.012 | ≈ 105 MB/min (15 Mbit/s) | ≈ 43 MB/min | ≈ 14 MB/min |
+  | Compact | 0.006 | ≈ 52 MB/min (7 Mbit/s) | ≈ 21 MB/min | ≈ 14 MB/min |
+
+  ScreenCaptureKit's built-in recording output, used before, wrote ≈ 21 Mbit/s
+  (≈ 158 MB/min) at 6K with no control. Audio adds ≈ 2 MB/min (system stereo
+  160 kbit/s and microphone 128 kbit/s, two separate AAC tracks).
 - **System audio** next to the microphone; QuickTube's own sounds are never
   recorded.
 - **Pause and resume**: each pause starts a new segment; on stop the segments
@@ -199,7 +213,7 @@ modifiers).
 
 ### Settings
 
-General (launch at login, updates) · Recording (capture, quality, frame rate,
+General (launch at login, updates) · Recording (capture, quality, frame rate, bitrate,
 system audio, microphone, pause, trimming, title template) · Camera · History ·
 Overlays · Files (cleanup) · GIF · Permissions · Google · Telegram · Google
 Drive · Slack · Vimeo · Shortcuts.

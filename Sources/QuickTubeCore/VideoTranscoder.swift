@@ -94,15 +94,6 @@ public enum VideoTranscoder {
         return .passthrough(bitrate: Int(rate.rounded(.up)))
     }
 
-    /// Requires the hardware encoder so a slow software fallback cannot happen silently; `transcode` retries
-    /// without it (and logs that) when the machine has none.
-    public static func encoderSpecification() -> [String: Any] {
-        [
-            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: true,
-            kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String: true,
-        ]
-    }
-
     /// "transcoded 2640 frames in 61.2 s (43 fps)".
     public static func throughputLine(frames: Int, seconds: Double) -> String {
         let fps = seconds > 0 ? Int((Double(frames) / seconds).rounded()) : 0
@@ -113,76 +104,6 @@ public enum VideoTranscoder {
     public static func throughputLine(frames: Int, seconds: Double, plan: TranscodePlan) -> String {
         throughputLine(frames: frames, seconds: seconds)
             + ", \(plan.codec.rawValue) \(plan.width)×\(plan.height)"
-    }
-
-    /// The software encoder's spec: hardware explicitly off, so "using software" is what actually happens.
-    static func softwareEncoderSpecification() -> [String: Any] {
-        [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: false]
-    }
-
-    /// The encoder settings: the bitrate and no frame reordering (no B-frame delay), since a Telegram copy
-    /// only has to fit the limit, not look its best; H.264 also gets the High profile (auto level). The
-    /// `hardware` encoder also gets speed over quality and a hard bitrate cap (bitrate/8 bytes per 1 s window,
-    /// because the average alone overshoots at 6K). Apple's software HEVC and H.264 encoders reject both
-    /// VideoToolbox keys with an uncatchable exception, so they get only the AVFoundation ones.
-    public static func compressionProperties(
-        bitrate: Int, fps: Double, hardware: Bool, codec: VideoCodec = .hevc
-    ) -> [String: Any] {
-        var properties: [String: Any] = [
-            AVVideoAverageBitRateKey: bitrate,
-            AVVideoAllowFrameReorderingKey: false,
-        ]
-        if codec == .h264 { properties[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel }
-        if hardware {
-            properties[kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String] = true
-            properties[kVTCompressionPropertyKey_DataRateLimits as String] = [
-                NSNumber(value: bitrate / 8), NSNumber(value: 1.0),
-            ]
-        }
-        if fps > 0 { properties[AVVideoExpectedSourceFrameRateKey] = Int(fps.rounded()) }
-        return properties
-    }
-
-    /// OSStatus / AVError codes that mean "this encoder cannot be used here": none on the machine
-    /// (kVTCouldNotFindVideoEncoderErr -12908), none free now (kVTVideoEncoderNotAvailableNowErr -12915), no
-    /// instance could be created (kVTCouldNotCreateInstanceErr -12907), or the hardware one refusing the session,
-    /// as for sizes beyond its limit (kVTInvalidSessionErr -12903, seen under AVFoundation -11800).
-    static let encoderUnavailableCodes: Set<Int> = [
-        Int(kVTCouldNotFindVideoEncoderErr), Int(kVTVideoEncoderNotAvailableNowErr),
-        Int(kVTCouldNotCreateInstanceErr), Int(kVTInvalidSessionErr),
-        AVError.Code.encoderNotFound.rawValue, AVError.Code.encoderTemporarilyUnavailable.rawValue,
-    ]
-
-    /// Pure: true when `error` or one of its underlying errors says the video encoder is unavailable.
-    public static func isEncoderUnavailable(_ error: Error?) -> Bool {
-        var current = error.map { $0 as NSError }
-        while let nsError = current {
-            let osStatusLike =
-                nsError.domain == NSOSStatusErrorDomain || nsError.domain == AVFoundationErrorDomain
-            if osStatusLike && encoderUnavailableCodes.contains(nsError.code) { return true }
-            current = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
-        }
-        return false
-    }
-
-    /// Pure: whether a failed start of the writer is retried with the software encoder. Only the hardware attempt
-    /// retries, when the writer rejected its video input (the hardware settings) or `startWriting` failed with an
-    /// encoder-unavailable error; the software attempt's failures are final.
-    public static func shouldRetryInSoftware(hardware: Bool, inputRejected: Bool, error: Error?) -> Bool {
-        hardware && (inputRejected || isEncoderUnavailable(error))
-    }
-
-    /// The error and its underlying chain as one line, e.g. "Cannot Encode (AVFoundationErrorDomain -11800
-    /// ← NSOSStatusErrorDomain -12903)".
-    static func describe(_ error: Error?) -> String {
-        guard let error else { return "unknown error" }
-        var codes: [String] = []
-        var current: NSError? = error as NSError
-        while let nsError = current {
-            codes.append("\(nsError.domain) \(nsError.code)")
-            current = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
-        }
-        return "\(error.localizedDescription) (\(codes.joined(separator: " ← ")))"
     }
 
     /// Pure: pick an output size and bitrates so the file fits `limitBytes` with 8 % headroom.
@@ -372,18 +293,18 @@ public enum VideoTranscoder {
                 AVVideoWidthKey: rotated ? plan.height : plan.width,
                 AVVideoHeightKey: rotated ? plan.width : plan.height,
                 AVVideoScalingModeKey: AVVideoScalingModeResizeAspect,
-                AVVideoCompressionPropertiesKey: compressionProperties(
+                AVVideoCompressionPropertiesKey: VideoEncoding.compressionProperties(
                     bitrate: plan.videoBitrate, fps: Double(nominalFPS), hardware: hardware,
                     codec: plan.codec),
                 AVVideoEncoderSpecificationKey: hardware
-                    ? encoderSpecification() : softwareEncoderSpecification(),
+                    ? VideoEncoding.encoderSpecification() : VideoEncoding.softwareEncoderSpecification(),
             ]
             let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
             videoInput.transform = transform
             videoInput.expectsMediaDataInRealTime = false
             guard writer.canAdd(videoInput) else {
                 try? FileManager.default.removeItem(at: output)
-                if shouldRetryInSoftware(hardware: hardware, inputRejected: true, error: nil) {
+                if VideoEncoding.shouldRetryInSoftware(hardware: hardware, inputRejected: true, error: nil) {
                     return .encoderUnavailable(
                         "the writer rejected the hardware \(plan.codec.label) settings")
                 }
@@ -421,8 +342,9 @@ public enum VideoTranscoder {
                 let error = writer.error
                 writer.cancelWriting()
                 try? FileManager.default.removeItem(at: output)
-                let reason = describe(error)
-                if shouldRetryInSoftware(hardware: hardware, inputRejected: false, error: error) {
+                let reason = VideoEncoding.describe(error)
+                if VideoEncoding.shouldRetryInSoftware(hardware: hardware, inputRejected: false, error: error)
+                {
                     return .encoderUnavailable(reason)
                 }
                 log?("could not start writing: \(reason)")
@@ -597,34 +519,6 @@ public enum VideoTranscoder {
             }
             continuation?.resume()
             continuation = nil
-        }
-    }
-}
-
-extension AVAssetWriter {
-    /// `finishWriting()` with a hand-written bridge that resumes once. Built with the Xcode 26 SDK and run
-    /// on the macOS 15 CI runner, the completion handler can run twice (from NSOperation's KVO observer),
-    /// and the compiler-generated bridge then resumes its continuation a second time: SIGSEGV in
-    /// `swift_continuation_resume`, or SIGTRAP. Later calls of the handler are ignored here.
-    public func finishWritingOnce() async {
-        let once = ResumeOnce()
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            finishWriting {
-                if once.claim() { continuation.resume() }
-            }
-        }
-    }
-}
-
-/// True from `claim()` exactly once.
-private final class ResumeOnce: @unchecked Sendable {
-    private let lock = NSLock()
-    private var claimed = false
-
-    func claim() -> Bool {
-        lock.withLock {
-            defer { claimed = true }
-            return !claimed
         }
     }
 }
