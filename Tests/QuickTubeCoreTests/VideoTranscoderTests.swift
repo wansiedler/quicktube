@@ -243,6 +243,42 @@ import VideoToolbox
         #expect(small.width == 1280 && small.height == 720)
     }
 
+    @Test func h264BitrateIsCappedForShortClips() {
+        let six = VideoInfo(width: 6016, height: 3384, fps: 45, duration: 10, audioTrackCount: 0)
+        let fast = VideoTranscoder.plan(info: six, limitBytes: Self.fiftyMB, maxLongSide: 1920, codec: .h264)
+        #expect(fast.width == 1920 && fast.height == 1080)
+        #expect(fast.videoBitrate == 16_000_000)
+        let thirty = VideoInfo(width: 6016, height: 3384, fps: 30, duration: 10, audioTrackCount: 0)
+        let slow = VideoTranscoder.plan(
+            info: thirty, limitBytes: Self.fiftyMB, maxLongSide: 1920, codec: .h264)
+        #expect(slow.videoBitrate == 12_000_000)
+        // HEVC keeps filling the limit.
+        let hevc = VideoTranscoder.plan(info: six, limitBytes: Self.fiftyMB)
+        #expect(hevc.videoBitrate > 30_000_000)
+        // A long recording is below the cap and unchanged.
+        let long = VideoInfo(width: 6016, height: 3384, fps: 45, duration: 60, audioTrackCount: 0)
+        let longH264 = VideoTranscoder.plan(
+            info: long, limitBytes: Self.fiftyMB, maxLongSide: 1920, codec: .h264)
+        #expect(
+            longH264.videoBitrate == VideoTranscoder.plan(info: long, limitBytes: Self.fiftyMB).videoBitrate)
+        // The cap is applied after the size is chosen, so it never forces a downscale step.
+        let sixty = VideoInfo(width: 1920, height: 1080, fps: 60, duration: 10, audioTrackCount: 0)
+        let kept = VideoTranscoder.plan(
+            info: sixty, limitBytes: Self.fiftyMB, allowDownscale: true, maxLongSide: 1920, codec: .h264)
+        #expect(kept.width == 1920 && kept.height == 1080)
+        #expect(kept.videoBitrate == 16_000_000)
+    }
+
+    @Test func h264BitrateCapScalesWithThePixelCount() {
+        #expect(VideoTranscoder.h264BitrateCap(width: 1920, height: 1080, fps: 30) == 12_000_000)
+        #expect(VideoTranscoder.h264BitrateCap(width: 1920, height: 1080, fps: 60) == 16_000_000)
+        #expect(VideoTranscoder.h264BitrateCap(width: 1280, height: 720, fps: 30) == 5_333_333)
+        #expect(VideoTranscoder.h264BitrateCap(width: 1080, height: 1920, fps: 30) == 12_000_000)
+        #expect(
+            VideoTranscoder.h264BitrateCap(width: 64, height: 36, fps: 30)
+                == VideoTranscoder.minimumVideoBitrate)
+    }
+
     @Test func h264CompressionPropertiesUseHighProfile() {
         let hardware = VideoTranscoder.compressionProperties(
             bitrate: 4_000_000, fps: 45, hardware: true, codec: .h264)
@@ -410,7 +446,7 @@ import VideoToolbox
         let output = dir.appending(path: "clip.telegram.mp4")
 
         _ = try await VideoTranscoder.transcode(input, plan: plan, output: output, hardwareEncoder: false) {
-            _ in
+            _ in /* progress not checked here */
         }
 
         let info = try await VideoInfo.read(output)
@@ -493,7 +529,7 @@ import VideoToolbox
         let logged = AskedStrings()
 
         _ = try await VideoTranscoder.transcode(input, plan: plan, output: output, log: { logged.add($0) }) {
-            _ in
+            _ in /* progress not checked here */
         }
 
         let info = try await VideoInfo.read(output)
@@ -519,7 +555,7 @@ import VideoToolbox
         let output = dir.appending(path: "clip.telegram.mp4")
 
         _ = try await VideoTranscoder.transcode(input, plan: plan, output: output, hardwareEncoder: false) {
-            _ in
+            _ in /* progress not checked here */
         }
 
         let info = try await VideoInfo.read(output)

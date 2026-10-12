@@ -91,10 +91,20 @@ public actor TelegramUploader: VideoUploader {
             codec: plan.codec)
     }
 
-    /// Pure: true when phones can play `info` as is: H.264 with the long side at most 1920 (1080p).
+    /// Pure: true when phones can play `info` as is: H.264 with the long side at most 1920 (1080p) and at most
+    /// 60 fps (an unknown rate passes).
     public static func isMobileReady(_ info: VideoInfo) -> Bool {
         info.codec == kCMVideoCodecType_H264
             && max(info.width, info.height) <= VideoTranscoder.mobileMaxLongSide
+            && (info.fps ?? 0) <= 60
+    }
+
+    /// Pure: the size the HUD announces for `plan`. HEVC fills the limit; a capped H.264 plan announces its own
+    /// estimate, (video + audio bitrate) × duration / 8, at most `limit`.
+    public static func targetBytes(for plan: TranscodePlan, duration: TimeInterval, limit: Int) -> Int {
+        guard plan.codec == .h264, duration > 0 else { return limit }
+        let estimate = Double(plan.videoBitrate + plan.audioBitrate) * duration / 8
+        return min(limit, Int(estimate.rounded()))
     }
 
     /// Pure: a file over `limit` is always transcoded; with `mobileFriendly` so is one that is not already
@@ -155,6 +165,9 @@ public actor TelegramUploader: VideoUploader {
         var sendingInfo = info
         var transcoded: URL?
         defer { if let transcoded { try? FileManager.default.removeItem(at: transcoded) } }
+        if mobile && info == nil && !oversized {
+            log("Telegram: mobile-friendly check skipped (video info unreadable), sending as is")
+        }
         if Self.shouldTranscode(info: info, size: size, limit: limit, mobileFriendly: mobile) {
             guard let info else { throw TranscodeError.cannotRead }
             // Mobile-friendly: H.264 capped at 1080p, the whole size budget spent on that.
@@ -164,7 +177,9 @@ public actor TelegramUploader: VideoUploader {
             let output = Self.transcodeURL(for: file)
             transcoded = output
             context.onStatus(
-                RecordingNaming.compressionLine(from: info, sizeBytes: size, to: plan, targetBytes: limit))
+                RecordingNaming.compressionLine(
+                    from: info, sizeBytes: size, to: plan,
+                    targetBytes: Self.targetBytes(for: plan, duration: info.duration, limit: limit)))
             let reason =
                 oversized
                 ? "\(size) bytes over the \(limit)-byte limit"
@@ -180,7 +195,8 @@ public actor TelegramUploader: VideoUploader {
             if newSize > limit {
                 plan = Self.retryPlan(after: plan, actualBytes: newSize, limitBytes: limit)
                 let line = RecordingNaming.compressionLine(
-                    from: info, sizeBytes: size, to: plan, targetBytes: limit)
+                    from: info, sizeBytes: size, to: plan,
+                    targetBytes: Self.targetBytes(for: plan, duration: info.duration, limit: limit))
                 context.onStatus(line.replacingOccurrences(of: "Compressing", with: "Compressing again"))
                 log(
                     "Telegram: \(newSize) bytes still over the \(limit)-byte limit, transcoding again with \(plan)"

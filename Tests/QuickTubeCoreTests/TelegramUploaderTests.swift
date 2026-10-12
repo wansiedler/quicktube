@@ -443,6 +443,10 @@ extension NetworkSuite {
             let portrait = VideoInfo(
                 width: 1080, height: 1920, fps: 30, duration: 1, codec: kCMVideoCodecType_H264)
             #expect(!should(portrait, size: 50, mobile: true))
+            // 1080p H.264 above 60 fps is not phone-safe either.
+            let fast = VideoInfo(
+                width: 1920, height: 1080, fps: 120, duration: 1, codec: kCMVideoCodecType_H264)
+            #expect(should(fast, size: 50, mobile: true))
             // Nothing is known about an unreadable file: only the size decides.
             #expect(!should(nil, size: 50, mobile: true))
             #expect(should(nil, size: 150, mobile: true))
@@ -453,16 +457,16 @@ extension NetworkSuite {
             let statuses = AskedStrings()
             let uploader = makeUploader(
                 limitBytes: 50 << 20, mobileFriendly: true, videoInfo: { _ in Self.hevc4K },
-                transcode: fakeTranscode(bytes: 60, calls: calls))
+                transcode: fakeTranscode(bytes: 1_048_576, calls: calls))
             try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
-            let file = try makeFile(bytes: 200)
+            let file = try makeFile(bytes: 3 * 1_048_576)
             defer { try? FileManager.default.removeItem(at: file) }
             StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
 
             _ = try await uploader.upload(
                 file: file, title: "T",
                 context: UploadContext(display: "Display", onStatus: { statuses.add($0) })
-            ) { _ in }
+            ) { _ in /* progress not checked here */ }
 
             let call = try #require(calls.all.first)
             #expect(calls.all.count == 1)
@@ -473,12 +477,27 @@ extension NetworkSuite {
                     == VideoTranscoder.plan(
                         info: Self.hevc4K, limitBytes: 50 << 20, maxLongSide: 1920, codec: .h264))
             #expect(statuses.all.first?.hasPrefix("Compressing · 6016×3384 45 fps ") == true)
-            #expect(statuses.all.first?.contains("→ 1920×1080 45 fps ~") == true)
+            // The HUD announces the capped plan's estimate (about 48 MB here), not the limit.
+            let target = TelegramUploader.targetBytes(for: call.plan, duration: 60, limit: 50 << 20)
+            #expect(target < 50 << 20)
+            #expect(
+                statuses.all.first?.hasSuffix(
+                    "→ 1920×1080 45 fps ~\(RecordingNaming.megabytes(target)) MB") == true)
             let body = StubURLProtocol.requests[0].httpBody ?? Data()
-            #expect(body.contains(Data(repeating: 0xEE, count: 60)))
+            #expect(body.contains(Data(repeating: 0xEE, count: 1_048_576)))
             // The caption describes the recording and the size actually sent.
-            #expect(String(decoding: body, as: UTF8.self).contains("Display · 6016×3384 · 45 fps"))
-            #expect(String(decoding: body, as: UTF8.self).contains(" → "))
+            #expect(
+                String(decoding: body, as: UTF8.self).contains(
+                    "T\nDisplay · 6016×3384 · 45 fps · 3 MB → 1 MB\r\n"))
+        }
+
+        @Test func targetBytesIsTheH264EstimateAndTheLimitForHEVC() {
+            let h264 = TranscodePlan(
+                width: 1920, height: 1080, videoBitrate: 16_000_000, audioBitrate: 160_000, codec: .h264)
+            #expect(TelegramUploader.targetBytes(for: h264, duration: 10, limit: 50 << 20) == 20_200_000)
+            #expect(TelegramUploader.targetBytes(for: h264, duration: 600, limit: 50 << 20) == 50 << 20)
+            let hevc = TranscodePlan(width: 1920, height: 1080, videoBitrate: 1_000_000, audioBitrate: 0)
+            #expect(TelegramUploader.targetBytes(for: hevc, duration: 10, limit: 50 << 20) == 50 << 20)
         }
 
         @Test func mobileFriendlySendsAnAlreadySafeH264AsIs() async throws {
@@ -488,7 +507,7 @@ extension NetworkSuite {
             let file = try makeFile(bytes: 100)
             defer { try? FileManager.default.removeItem(at: file) }
             StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
-            _ = try await uploader.upload(file: file, title: "T") { _ in }
+            _ = try await uploader.upload(file: file, title: "T") { _ in /* progress not checked here */ }
             let body = StubURLProtocol.requests[0].httpBody ?? Data()
             #expect(body.contains(Data(repeating: 0xCD, count: 100)))
         }
@@ -500,28 +519,28 @@ extension NetworkSuite {
             let file = try makeFile(bytes: 100)
             defer { try? FileManager.default.removeItem(at: file) }
             StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
-            _ = try await uploader.upload(file: file, title: "T") { _ in }
+            _ = try await uploader.upload(file: file, title: "T") { _ in /* progress not checked here */ }
             let body = StubURLProtocol.requests[0].httpBody ?? Data()
             #expect(body.contains(Data(repeating: 0xCD, count: 100)))
         }
 
         @Test func mobileFriendlyRetryKeepsH264() async throws {
             let calls = TranscodeCalls()
-            let limit = 10 << 20
+            let limit = 10 * 1_048_576
             let uploader = makeUploader(
                 limitBytes: limit, mobileFriendly: true, videoInfo: { _ in Self.hevc4K },
                 transcode: { input, plan, output, progress in
                     calls.add(input: input, plan: plan, output: output)
-                    let bytes = calls.all.count == 1 ? 13 << 20 : 9 << 20
+                    let bytes = (calls.all.count == 1 ? 13 : 9) * 1_048_576
                     try Data(repeating: 0xEE, count: bytes).write(to: output)
                     return output
                 })
             try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
-            let file = try makeFile(bytes: 20 << 20)
+            let file = try makeFile(bytes: 20 * 1_048_576)
             defer { try? FileManager.default.removeItem(at: file) }
             StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
 
-            _ = try await uploader.upload(file: file, title: "T") { _ in }
+            _ = try await uploader.upload(file: file, title: "T") { _ in /* progress not checked here */ }
 
             #expect(calls.all.map(\.plan.codec) == [.h264, .h264])
             #expect(calls.all.map(\.plan.width) == [1920, 1920])

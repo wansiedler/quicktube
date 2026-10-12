@@ -69,8 +69,10 @@ HEVC shows a white screen; desktop plays it). So "Mobile-friendly (H.264, up
 to 1080p)" in Settings → Telegram is on by default: every recording is sent as
 H.264 High profile with the long side at most 1920 (1920×1080 for a 16:9
 screen, aspect kept, never upscaled, frame rate unchanged), even when it is
-under the size limit; a recording that already is H.264 at 1080p or less is
-sent as is. The bitrate still fills the size limit, with the retry pass below.
+under the size limit; a recording that already is H.264 at 1080p and 60 fps
+or less is sent as is. The bitrate fits the size limit but stays at most 12 Mbit/s (up to
+30 fps) or 16 Mbit/s (above), scaled down for smaller frames, so short clips
+are not inflated; the retry pass below still applies.
 Turn it off to get the behaviour described next (HEVC at full size,
 re-encoded only when over the limit).
 

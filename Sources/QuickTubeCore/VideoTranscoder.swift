@@ -75,6 +75,10 @@ public enum VideoTranscoder {
     static let aacBitrateRange = 64_000...320_000
     /// Long side of the mobile-friendly (H.264) copy: 1080p.
     public static let mobileMaxLongSide = 1920
+    /// H.264 bitrate ceiling at 1080p up to 30 fps: keeps the copy inside High@4.0 and quick to upload.
+    public static let h264MaxBitrate30 = 12_000_000
+    /// H.264 bitrate ceiling at 1080p above 30 fps (High@4.2).
+    public static let h264MaxBitrateHigh = 16_000_000
 
     /// Pure: one track is passed through (budgeted at its estimated data rate, else 160 kbit/s), several are
     /// mixed to AAC at 160 kbit/s, none means no audio. `canPassThrough` false (a track the MP4 writer cannot
@@ -187,8 +191,9 @@ public enum VideoTranscoder {
     /// The natural (even-rounded) size is always kept unless `allowDownscale` is true; then it is kept while the
     /// video bitrate gives at least 0.1 bit/pixel/frame, otherwise the long side steps down
     /// 1920 → 1280 → 960 → 640 (never up), keeping aspect and even dimensions.
-    /// `maxLongSide` caps the starting size first (see `mobileSize`), so the whole budget goes to the capped
-    /// size; `codec` is passed through to the plan.
+    /// `maxLongSide` caps the starting size first (see `mobileSize`), so the budget goes to the capped size;
+    /// `codec` is passed through to the plan. For `.h264` the video bitrate is then capped at
+    /// `h264BitrateCap` (after the size is chosen, so the cap never forces a downscale step); HEVC is uncapped.
     public static func plan(
         info: VideoInfo, limitBytes: Int, audioBitrate: Int? = nil, allowDownscale: Bool = false,
         maxLongSide: Int? = nil, codec: VideoCodec = .hevc
@@ -216,8 +221,21 @@ public enum VideoTranscoder {
                 if enough(size) { break }
             }
         }
+        var videoBitrate = video
+        if codec == .h264 {
+            videoBitrate = min(video, h264BitrateCap(width: size.0, height: size.1, fps: fps))
+        }
         return TranscodePlan(
-            width: size.0, height: size.1, videoBitrate: video, audioBitrate: audioBitrate, codec: codec)
+            width: size.0, height: size.1, videoBitrate: videoBitrate, audioBitrate: audioBitrate,
+            codec: codec)
+    }
+
+    /// Pure: the most an H.264 copy may use: 12 Mbit/s up to 30 fps, 16 Mbit/s above, scaled by the pixel count
+    /// for sizes below 1920×1080, never below `minimumVideoBitrate`.
+    public static func h264BitrateCap(width: Int, height: Int, fps: Double) -> Int {
+        let base = fps > 30 ? h264MaxBitrateHigh : h264MaxBitrate30
+        let share = min(1, Double(width * height) / Double(1920 * 1080))
+        return max(minimumVideoBitrate, Int((Double(base) * share).rounded(.down)))
     }
 
     /// Pure: `info`'s size with the long side capped at `maxLongSide` (6016×3384 → 1920×1080 for 1920), aspect
