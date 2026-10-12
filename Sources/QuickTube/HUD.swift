@@ -112,12 +112,15 @@ struct HUDView: View {
             case .recording:
                 Circle().fill(Color.red).frame(width: 10, height: 10)
                 TimelineView(.periodic(from: Date(), by: 1)) { context in
-                    Text("Recording \(clock(state.recordedDuration(at: context.date)))")
-                        .monospacedDigit()
+                    reserving("Recording 888:88") {
+                        Text("Recording \(clock(state.recordedDuration(at: context.date)))")
+                    }
                 }
             case .paused:
                 // The timer stands still: no TimelineView, the recorded time does not grow while paused.
-                Text("Paused ⏸ \(clock(state.recordedDuration(at: Date())))").monospacedDigit()
+                reserving("Paused ⏸ 888:88") {
+                    Text("Paused ⏸ \(clock(state.recordedDuration(at: Date())))")
+                }
             case .uploading(let progress):
                 ProgressView(value: progress).frame(width: 120)
                 Text(AppState.uploadText(stage: state.uploadStage, progress: progress)).monospacedDigit()
@@ -143,6 +146,15 @@ struct HUDView: View {
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(.white.opacity(0.12)))
         .padding(6)
+    }
+
+    /// The panel is sized once when shown; the clock grows later ("9:59" → "10:00"), so the
+    /// label reserves the width of the widest value it can reach instead of truncating.
+    private func reserving(_ widest: String, @ViewBuilder _ label: () -> Text) -> some View {
+        ZStack(alignment: .leading) {
+            Text(widest).monospacedDigit().hidden()
+            label().monospacedDigit()
+        }
     }
 
     private func clock(_ duration: TimeInterval) -> String {
