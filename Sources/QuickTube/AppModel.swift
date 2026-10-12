@@ -90,6 +90,7 @@ final class AppModel {
             limitBytes: { AppSettings.load(from: .standard).telegramLimitBytes },
             compressToFit: { AppSettings.load(from: .standard).telegramCompressToFit },
             allowDownscale: { AppSettings.load(from: .standard).telegramAllowDownscale },
+            mobileFriendly: { AppSettings.load(from: .standard).telegramMobileFriendly },
             log: { DiagnosticsLog.append($0) })
         self.telegram = telegram
         let slack = SlackUploader(store: store, log: { DiagnosticsLog.append($0) })

@@ -23,6 +23,7 @@ import Testing
         #expect(s.telegramCompressToFit && s.telegramLimitMB == 50)
         #expect(s.telegramLimitBytes == 50 << 20)
         #expect(!s.telegramAllowDownscale)
+        #expect(s.telegramMobileFriendly)
         #expect(s.vimeoPrivacy == .unlisted)
     }
 
@@ -69,6 +70,7 @@ import Testing
         s.telegramCompressToFit = false
         s.telegramLimitMB = 2000
         s.telegramAllowDownscale = true
+        s.telegramMobileFriendly = false
         s.vimeoPrivacy = .nobody
         return s
     }
@@ -151,6 +153,18 @@ import Testing
         let bad = try JSONDecoder().decode(
             AppSettings.self, from: Data(#"{"vimeoPrivacy":"password","gifFPS":12}"#.utf8))
         #expect(bad.vimeoPrivacy == .unlisted)
+        #expect(bad.gifFPS == 12)
+    }
+
+    @Test func telegramMobileFriendlyDecodesLeniently() throws {
+        let off = try JSONDecoder().decode(
+            AppSettings.self, from: Data(#"{"telegramMobileFriendly":false}"#.utf8))
+        #expect(!off.telegramMobileFriendly)
+        let missing = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"gifFPS":12}"#.utf8))
+        #expect(missing.telegramMobileFriendly)
+        let bad = try JSONDecoder().decode(
+            AppSettings.self, from: Data(#"{"telegramMobileFriendly":"yes","gifFPS":12}"#.utf8))
+        #expect(bad.telegramMobileFriendly)
         #expect(bad.gifFPS == 12)
     }
 

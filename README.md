@@ -64,14 +64,24 @@ channel instead of YouTube; the message link goes on the clipboard.
 3. QuickTube → Settings → Telegram: paste the token and the channel
    (`@name` for a public channel, or the `-100…` id for a private one) → Save.
 
+Telegram's phone apps cannot play a full-resolution recording (6016×3384
+HEVC shows a white screen; desktop plays it). So "Mobile-friendly (H.264, up
+to 1080p)" in Settings → Telegram is on by default: every recording is sent as
+H.264 High profile with the long side at most 1920 (1920×1080 for a 16:9
+screen, aspect kept, never upscaled, frame rate unchanged), even when it is
+under the size limit; a recording that already is H.264 at 1080p or less is
+sent as is. The bitrate still fills the size limit, with the retry pass below.
+Turn it off to get the behaviour described next (HEVC at full size,
+re-encoded only when over the limit).
+
 The Bot API accepts files up to 50 MB. Longer recordings are re-encoded into a
 temporary `<name>.telegram.mp4` that is sent and then deleted; the original
 stays on disk:
 
-- By default only the bitrate drops: the video is re-encoded to HEVC (hardware
-  encoder first, software fallback logged if it is unavailable), the frame size
-  and length are kept. Enable "Allow downscaling when compressing" in
-  Settings → Telegram to let it shrink the frame size too.
+- With mobile-friendly off, only the bitrate drops: the video is re-encoded to
+  HEVC (hardware encoder first, software fallback logged if it is
+  unavailable), the frame size and length are kept. Enable "Allow downscaling
+  when compressing" in Settings → Telegram to let it shrink the frame size too.
 - Audio is not degraded: a single track is copied untouched; microphone plus
   system audio are mixed into one 160 kbit/s AAC track.
 - If the encoder overshoots the limit, one retry pass re-encodes at a

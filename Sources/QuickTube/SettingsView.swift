@@ -225,6 +225,14 @@ struct SettingsView: View {
                     Spacer()
                     Text(model.telegramConfigured ? "Configured" : "Not set up").foregroundStyle(.secondary)
                 }
+                Toggle(
+                    "Mobile-friendly (H.264, up to 1080p) — needed for phones",
+                    isOn: $model.settings.telegramMobileFriendly)
+                Text(
+                    "Telegram's phone apps show a white screen for large HEVC recordings. On: every recording is "
+                        + "sent as H.264 at most 1920×1080 (frame rate kept), re-encoded unless it already is one."
+                )
+                .font(.callout).foregroundStyle(.secondary)
                 Toggle("Compress to fit the limit", isOn: $model.settings.telegramCompressToFit)
                 Toggle("Allow downscaling when compressing", isOn: $model.settings.telegramAllowDownscale)
                 Text("Off: compression only lowers video and audio quality, the frame size stays.")

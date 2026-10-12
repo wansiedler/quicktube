@@ -1,3 +1,4 @@
+import CoreMedia
 import Foundation
 import QuickTubeCore
 import Testing
@@ -10,6 +11,7 @@ extension NetworkSuite {
             limitBytes: Int = TelegramUploader.botAPILimit,
             compressToFit: Bool = true,
             allowDownscale: Bool = false,
+            mobileFriendly: Bool = false,
             videoInfo: @escaping @Sendable (URL) async throws -> VideoInfo = {
                 _ in throw VideoInfo.ReadError.noVideoTrack
             },
@@ -22,7 +24,8 @@ extension NetworkSuite {
             return TelegramUploader(
                 store: store, session: StubURLProtocol.makeSession(),
                 baseURL: URL(string: "https://tg.example")!, limitBytes: { limitBytes },
-                compressToFit: { compressToFit }, allowDownscale: { allowDownscale }, videoInfo: videoInfo,
+                compressToFit: { compressToFit }, allowDownscale: { allowDownscale },
+                mobileFriendly: { mobileFriendly }, videoInfo: videoInfo,
                 transcode: transcode)
         }
 
@@ -413,6 +416,115 @@ extension NetworkSuite {
             #expect(
                 TelegramUploader.retryPlan(after: tiny, actualBytes: 1000, limitBytes: 100).videoBitrate
                     == VideoTranscoder.minimumVideoBitrate)
+        }
+
+        // MARK: - Mobile-friendly
+
+        static let hevc4K = VideoInfo(
+            width: 6016, height: 3384, fps: 45, duration: 60, codec: kCMVideoCodecType_HEVC)
+        static let h264HD = VideoInfo(
+            width: 1920, height: 1080, fps: 45, duration: 60, codec: kCMVideoCodecType_H264)
+
+        @Test func shouldTranscodeMatrix() {
+            func should(_ info: VideoInfo?, size: Int, mobile: Bool) -> Bool {
+                TelegramUploader.shouldTranscode(info: info, size: size, limit: 100, mobileFriendly: mobile)
+            }
+            #expect(!should(Self.h264HD, size: 50, mobile: true))
+            #expect(should(Self.hevc4K, size: 50, mobile: true))
+            #expect(!should(Self.hevc4K, size: 50, mobile: false))
+            #expect(should(Self.h264HD, size: 150, mobile: true))
+            #expect(should(Self.h264HD, size: 150, mobile: false))
+            #expect(should(Self.hevc4K, size: 150, mobile: false))
+            // H.264 but above 1080p, and an unknown codec, are not phone-safe.
+            let h264Big = VideoInfo(
+                width: 3840, height: 2160, fps: 30, duration: 1, codec: kCMVideoCodecType_H264)
+            #expect(should(h264Big, size: 50, mobile: true))
+            #expect(should(VideoInfo(width: 1280, height: 720, fps: 30, duration: 1), size: 50, mobile: true))
+            let portrait = VideoInfo(
+                width: 1080, height: 1920, fps: 30, duration: 1, codec: kCMVideoCodecType_H264)
+            #expect(!should(portrait, size: 50, mobile: true))
+            // Nothing is known about an unreadable file: only the size decides.
+            #expect(!should(nil, size: 50, mobile: true))
+            #expect(should(nil, size: 150, mobile: true))
+        }
+
+        @Test func mobileFriendlyTranscodesASmallHEVCRecordingToH264() async throws {
+            let calls = TranscodeCalls()
+            let statuses = AskedStrings()
+            let uploader = makeUploader(
+                limitBytes: 50 << 20, mobileFriendly: true, videoInfo: { _ in Self.hevc4K },
+                transcode: fakeTranscode(bytes: 60, calls: calls))
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 200)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+
+            _ = try await uploader.upload(
+                file: file, title: "T",
+                context: UploadContext(display: "Display", onStatus: { statuses.add($0) })
+            ) { _ in }
+
+            let call = try #require(calls.all.first)
+            #expect(calls.all.count == 1)
+            #expect(call.plan.codec == .h264)
+            #expect(call.plan.width == 1920 && call.plan.height == 1080)
+            #expect(
+                call.plan
+                    == VideoTranscoder.plan(
+                        info: Self.hevc4K, limitBytes: 50 << 20, maxLongSide: 1920, codec: .h264))
+            #expect(statuses.all.first?.hasPrefix("Compressing · 6016×3384 45 fps ") == true)
+            #expect(statuses.all.first?.contains("→ 1920×1080 45 fps ~") == true)
+            let body = StubURLProtocol.requests[0].httpBody ?? Data()
+            #expect(body.contains(Data(repeating: 0xEE, count: 60)))
+            // The caption describes the recording and the size actually sent.
+            #expect(String(decoding: body, as: UTF8.self).contains("Display · 6016×3384 · 45 fps"))
+            #expect(String(decoding: body, as: UTF8.self).contains(" → "))
+        }
+
+        @Test func mobileFriendlySendsAnAlreadySafeH264AsIs() async throws {
+            let uploader = makeUploader(
+                limitBytes: 100, mobileFriendly: true, videoInfo: { _ in Self.h264HD })
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 100)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            _ = try await uploader.upload(file: file, title: "T") { _ in }
+            let body = StubURLProtocol.requests[0].httpBody ?? Data()
+            #expect(body.contains(Data(repeating: 0xCD, count: 100)))
+        }
+
+        @Test func mobileFriendlyOffLeavesASmallHEVCRecordingAlone() async throws {
+            let uploader = makeUploader(
+                limitBytes: 100, mobileFriendly: false, videoInfo: { _ in Self.hevc4K })
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 100)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            _ = try await uploader.upload(file: file, title: "T") { _ in }
+            let body = StubURLProtocol.requests[0].httpBody ?? Data()
+            #expect(body.contains(Data(repeating: 0xCD, count: 100)))
+        }
+
+        @Test func mobileFriendlyRetryKeepsH264() async throws {
+            let calls = TranscodeCalls()
+            let limit = 10 << 20
+            let uploader = makeUploader(
+                limitBytes: limit, mobileFriendly: true, videoInfo: { _ in Self.hevc4K },
+                transcode: { input, plan, output, progress in
+                    calls.add(input: input, plan: plan, output: output)
+                    let bytes = calls.all.count == 1 ? 13 << 20 : 9 << 20
+                    try Data(repeating: 0xEE, count: bytes).write(to: output)
+                    return output
+                })
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 20 << 20)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+
+            _ = try await uploader.upload(file: file, title: "T") { _ in }
+
+            #expect(calls.all.map(\.plan.codec) == [.h264, .h264])
+            #expect(calls.all.map(\.plan.width) == [1920, 1920])
         }
 
         @Test func oversizedUnreadableVideoCannotBeTranscoded() async throws {

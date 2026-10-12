@@ -208,6 +208,64 @@ import VideoToolbox
         #expect(plan.width == 1920 && plan.height == 1080)
     }
 
+    // MARK: - Mobile-friendly (H.264, up to 1080p)
+
+    @Test func mobileSizeCapsTheLongSideKeepingAspect() {
+        func size(_ w: Int, _ h: Int, _ cap: Int = 1920) -> [Int] {
+            let (width, height) = VideoTranscoder.mobileSize(
+                for: VideoInfo(width: w, height: h, fps: 30, duration: 1), maxLongSide: cap)
+            return [width, height]
+        }
+        #expect(size(6016, 3384) == [1920, 1080])
+        #expect(size(3840, 2160) == [1920, 1080])
+        #expect(size(1280, 720) == [1280, 720])
+        #expect(size(1080, 1920) == [1080, 1920])
+        #expect(size(2160, 3840) == [1080, 1920])
+        #expect(size(1281, 721) == [1280, 720])
+        // 2000×1001 → 1920×960.96: rounded to an even 960.
+        #expect(size(2000, 1001) == [1920, 960])
+        #expect(size(2000, 1001).allSatisfy { $0 % 2 == 0 })
+    }
+
+    @Test func h264PlanUsesTheCapAndFitsTheLimit() {
+        let info = VideoInfo(width: 6016, height: 3384, fps: 45, duration: 60, audioTrackCount: 0)
+        let plan = VideoTranscoder.plan(
+            info: info, limitBytes: Self.fiftyMB, maxLongSide: 1920, codec: .h264)
+        #expect(plan.codec == .h264)
+        #expect(plan.width == 1920 && plan.height == 1080)
+        // The bitrate budget is the same as for the uncapped plan: only the size changes.
+        let uncapped = VideoTranscoder.plan(info: info, limitBytes: Self.fiftyMB)
+        #expect(plan.videoBitrate == uncapped.videoBitrate)
+        #expect(uncapped.codec == .hevc)
+        let small = VideoTranscoder.plan(
+            info: VideoInfo(width: 1280, height: 720, fps: 30, duration: 60), limitBytes: Self.fiftyMB,
+            maxLongSide: 1920, codec: .h264)
+        #expect(small.width == 1280 && small.height == 720)
+    }
+
+    @Test func h264CompressionPropertiesUseHighProfile() {
+        let hardware = VideoTranscoder.compressionProperties(
+            bitrate: 4_000_000, fps: 45, hardware: true, codec: .h264)
+        #expect(hardware[AVVideoProfileLevelKey] as? String == AVVideoProfileLevelH264HighAutoLevel)
+        #expect(hardware[AVVideoAllowFrameReorderingKey] as? Bool == false)
+        #expect(hardware[kVTCompressionPropertyKey_DataRateLimits as String] != nil)
+        let software = VideoTranscoder.compressionProperties(
+            bitrate: 4_000_000, fps: 45, hardware: false, codec: .h264)
+        #expect(software[AVVideoProfileLevelKey] as? String == AVVideoProfileLevelH264HighAutoLevel)
+        #expect(software[kVTCompressionPropertyKey_DataRateLimits as String] == nil)
+        #expect(software[kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String] == nil)
+        let hevc = VideoTranscoder.compressionProperties(bitrate: 4_000_000, fps: 45, hardware: true)
+        #expect(hevc[AVVideoProfileLevelKey] == nil)
+    }
+
+    @Test func throughputLineNamesTheCodecAndSize() {
+        let plan = TranscodePlan(
+            width: 1920, height: 1080, videoBitrate: 1, audioBitrate: 1, codec: .h264)
+        #expect(
+            VideoTranscoder.throughputLine(frames: 90, seconds: 3, plan: plan)
+                == "transcoded 90 frames in 3.0 s (30 fps), h264 1920×1080")
+    }
+
     // MARK: - End to end
 
     @Test(
@@ -417,6 +475,57 @@ import VideoToolbox
             }
         }
     }
+
+    @Test(
+        .enabled("needs an H.264 encoder") { ClipMaker.h264Available() }, .timeLimit(.minutes(1)))
+    func transcodesToMobileFriendlyH264() async throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appending(path: "wide.mov")
+        try await ClipMaker.make(input, width: 640, height: 360, fps: 30, seconds: 1, audio: true)
+        let source = try await VideoInfo.read(input)
+        #expect(source.codec == kCMVideoCodecType_H264)
+        let plan = VideoTranscoder.plan(
+            info: source, limitBytes: Self.fiftyMB, maxLongSide: 320, codec: .h264)
+        #expect(plan.width == 320 && plan.height == 180)
+        let output = dir.appending(path: "wide.telegram.mp4")
+        let logged = AskedStrings()
+
+        _ = try await VideoTranscoder.transcode(input, plan: plan, output: output, log: { logged.add($0) }) {
+            _ in
+        }
+
+        let info = try await VideoInfo.read(output)
+        #expect(info.codec == kCMVideoCodecType_H264)
+        #expect(max(info.width, info.height) <= 320)
+        #expect(info.width == 320 && info.height == 180)
+        #expect(abs(info.duration - source.duration) < 0.2)
+        #expect(info.audioTrackCount == 1)
+        #expect(try #require(logged.all.last).hasSuffix(", h264 320×180"))
+    }
+
+    @Test(
+        .enabled("needs H.264 and a software H.264 encoder") { ClipMaker.softwareH264Available() },
+        .timeLimit(.minutes(1)))
+    func softwareH264PathTranscodesWithoutCrashing() async throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appending(path: "clip.mov")
+        try await ClipMaker.make(input, width: 640, height: 480, fps: 30, seconds: 1)
+        let plan = TranscodePlan(
+            width: 320, height: 240, videoBitrate: 300_000, audioBitrate: 0, codec: .h264)
+        let output = dir.appending(path: "clip.telegram.mp4")
+
+        _ = try await VideoTranscoder.transcode(input, plan: plan, output: output, hardwareEncoder: false) {
+            _ in
+        }
+
+        let info = try await VideoInfo.read(output)
+        #expect(info.codec == kCMVideoCodecType_H264)
+        #expect(info.width == 320 && info.height == 240)
+    }
 }
 
 /// Writes a short H.264 clip of solid frames (plus optional silent AAC audio, `audioTracks` tracks of it)
@@ -441,6 +550,14 @@ enum ClipMaker {
             [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: false]
             as CFDictionary
         return canEncode(kCMVideoCodecType_H264) && canEncode(kCMVideoCodecType_HEVC, specification: software)
+    }
+
+    /// False on hosts without a software H.264 encoder (the source clip is H.264 too).
+    static func softwareH264Available() -> Bool {
+        let software =
+            [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: false]
+            as CFDictionary
+        return canEncode(kCMVideoCodecType_H264) && canEncode(kCMVideoCodecType_H264, specification: software)
     }
 
     private static func canEncode(_ codec: CMVideoCodecType, specification: CFDictionary? = nil) -> Bool {

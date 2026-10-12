@@ -79,6 +79,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var telegramLimitMB = 50
     /// Compression only lowers bitrate by default; when true it may also step the frame size down.
     public var telegramAllowDownscale = false
+    /// Always send H.264 at most 1080p: Telegram's phone apps show a white screen for 6K HEVC.
+    public var telegramMobileFriendly = true
     /// `privacy.view` of Vimeo uploads; some plans refuse `unlisted`, and the API error says so.
     public var vimeoPrivacy: VimeoPrivacy = .unlisted
 
@@ -94,7 +96,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
             trimHeadSeconds
         case titleTemplate, deleteAfterUpload, deleteOlderThanDays, automaticUpdates
         case gifEnabled, gifFPS, gifMaxWidth, gifMaxSeconds, quality
-        case telegramCompressToFit, telegramLimitMB, telegramAllowDownscale
+        case telegramCompressToFit, telegramLimitMB, telegramAllowDownscale, telegramMobileFriendly
         case vimeoPrivacy
     }
 
@@ -142,6 +144,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
         telegramLimitMB = c.lenient(Int.self, .telegramLimitMB) ?? d.telegramLimitMB
         telegramAllowDownscale =
             c.lenient(Bool.self, .telegramAllowDownscale) ?? d.telegramAllowDownscale
+        telegramMobileFriendly =
+            c.lenient(Bool.self, .telegramMobileFriendly) ?? d.telegramMobileFriendly
         vimeoPrivacy = c.lenient(VimeoPrivacy.self, .vimeoPrivacy) ?? d.vimeoPrivacy
     }
 

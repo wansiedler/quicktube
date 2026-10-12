@@ -12,10 +12,12 @@ public struct VideoInfo: Sendable, Equatable {
     public let audioTrackCount: Int?
     /// The estimated data rate (bit/s) of the audio track when there is exactly one, else nil.
     public let audioDataRate: Float?
+    /// The video track's codec (`kCMVideoCodecType_H264`, `kCMVideoCodecType_HEVC`, …); nil when unknown.
+    public let codec: FourCharCode?
 
     public init(
         width: Int, height: Int, fps: Double?, duration: TimeInterval, audioTrackCount: Int? = nil,
-        audioDataRate: Float? = nil
+        audioDataRate: Float? = nil, codec: FourCharCode? = nil
     ) {
         self.width = width
         self.height = height
@@ -23,13 +25,15 @@ public struct VideoInfo: Sendable, Equatable {
         self.duration = duration
         self.audioTrackCount = audioTrackCount
         self.audioDataRate = audioDataRate
+        self.codec = codec
     }
 
     public enum ReadError: Error, Equatable {
         case noVideoTrack
     }
 
-    /// Reads the first video track (the size is the displayed one, rotation applied) and counts the audio tracks.
+    /// Reads the first video track (the size is the displayed one, rotation applied, plus its codec) and counts
+    /// the audio tracks.
     public static func read(_ url: URL) async throws -> VideoInfo {
         let asset = AVURLAsset(url: url)
         let tracks = try await asset.load(.tracks)
@@ -39,6 +43,8 @@ public struct VideoInfo: Sendable, Equatable {
         let (size, transform, nominal, minDuration) = try await track.load(
             .naturalSize, .preferredTransform, .nominalFrameRate, .minFrameDuration)
         let duration = try await asset.load(.duration)
+        let formats = (try? await track.load(.formatDescriptions)) ?? []
+        let codec = formats.first.map { CMFormatDescriptionGetMediaSubType($0) }
         let (width, height) = displaySize(natural: size, transform: transform)
         let audioTracks = tracks.filter { $0.mediaType == .audio }
         var audioDataRate: Float?
@@ -48,7 +54,8 @@ public struct VideoInfo: Sendable, Equatable {
         return VideoInfo(
             width: width, height: height,
             fps: frameRate(nominal: nominal, minFrameDuration: minDuration),
-            duration: duration.seconds, audioTrackCount: audioTracks.count, audioDataRate: audioDataRate)
+            duration: duration.seconds, audioTrackCount: audioTracks.count, audioDataRate: audioDataRate,
+            codec: codec)
     }
 
     /// The displayed size: the natural size with the track's rotation applied.
