@@ -66,7 +66,7 @@ import Testing
         s.gifFPS = 15
         s.gifMaxWidth = 640
         s.gifMaxSeconds = 12
-        s.quality = RecordingQuality(resolution: .fullHD, fps: 30)
+        s.quality = RecordingQuality(resolution: .fullHD, fps: 30, bitrate: .compact)
         s.telegramCompressToFit = false
         s.telegramLimitMB = 2000
         s.telegramAllowDownscale = true
@@ -111,6 +111,22 @@ import Testing
             let v2 = Self.allNonDefault()
             defaults.set(try JSONEncoder().encode(v2), forKey: AppSettings.storageKey)
             #expect(AppSettings.load(from: defaults) == v2)
+        }
+    }
+
+    @Test func storedQualityWithoutBitrateKeepsItsSizeAndGetsBalanced() {
+        withSuite { defaults in
+            let v2 = #"{"quality":{"resolution":"fullHD","fps":30},"microphoneEnabled":false}"#
+            defaults.set(Data(v2.utf8), forKey: AppSettings.storageKey)
+            let loaded = AppSettings.load(from: defaults)
+            #expect(loaded.quality == RecordingQuality(resolution: .fullHD, fps: 30, bitrate: .balanced))
+            #expect(!loaded.microphoneEnabled)
+        }
+        withSuite { defaults in
+            defaults.set(Data(#"{"resolution":"uhd4K","fps":60}"#.utf8), forKey: AppSettings.legacyQualityKey)
+            #expect(
+                AppSettings.load(from: defaults).quality
+                    == RecordingQuality(resolution: .uhd4K, fps: 60, bitrate: .balanced))
         }
     }
 

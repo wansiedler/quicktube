@@ -48,6 +48,15 @@ struct SettingsView: View {
                     ForEach(RecordingQuality.frameRates, id: \.self) { Text("\($0) fps").tag($0) }
                 }
                 .pickerStyle(.segmented)
+                Picker("Bitrate", selection: $model.settings.quality.bitrate) {
+                    ForEach(RecordingQuality.Bitrate.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Text(
+                    "Native 6K at 60 fps: High ≈ 39 Mbit/s, Balanced ≈ 15, Compact ≈ 7 (the old built-in encoder "
+                        + "used ≈ 21). Still screens take less."
+                )
+                .font(.callout).foregroundStyle(.secondary)
                 Toggle("System audio", isOn: $model.settings.systemAudioEnabled)
                 Toggle("Microphone", isOn: $model.settings.microphoneEnabled)
                 Text(
@@ -74,7 +83,7 @@ struct SettingsView: View {
                 )
                 .font(.callout).foregroundStyle(.secondary)
                 Text(
-                    "Applies to the next recording. 1080p at 30 fps is about 12 MB per minute; native 6K at 60 fps about 55 MB."
+                    "Applies to the next recording. Balanced: up to about 15 MB per minute at 1080p 30 fps, 105 MB at native 6K 60 fps."
                 )
                 .font(.callout).foregroundStyle(.secondary)
             }
