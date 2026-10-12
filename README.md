@@ -161,14 +161,15 @@ modifiers).
 - **Quality**: Native / 4K / 1080p at 30 or 60 fps, for the next recording.
 - **Bitrate** (Settings → Recording, also in the menu): QuickTube encodes the
   capture itself (hardware HEVC) at width × height × fps × a per-preset bits per
-  pixel, clamped to 2–80 Mbit/s. Approximate video size per minute at 60 fps
-  (30 fps is half, down to the 2 Mbit/s floor ≈ 14 MB/min); still screens take less:
+  pixel, clamped to 1–80 Mbit/s. Approximate video size per minute at 60 fps
+  (MB = 10⁶ bytes; 30 fps is half, down to the 1 Mbit/s floor ≈ 8 MB/min);
+  still screens take less:
 
   | Preset | bits/pixel/frame | 6K (6016×3384) | 4K | 1080p |
   | --- | --- | --- | --- | --- |
-  | High | 0.032 | ≈ 280 MB/min (39 Mbit/s) | ≈ 114 MB/min | ≈ 28 MB/min |
-  | Balanced (default) | 0.012 | ≈ 105 MB/min (15 Mbit/s) | ≈ 43 MB/min | ≈ 14 MB/min |
-  | Compact | 0.006 | ≈ 52 MB/min (7 Mbit/s) | ≈ 21 MB/min | ≈ 14 MB/min |
+  | High | 0.032 | ≈ 293 MB/min (39 Mbit/s) | ≈ 119 MB/min | ≈ 30 MB/min |
+  | Balanced (default) | 0.012 | ≈ 110 MB/min (15 Mbit/s) | ≈ 45 MB/min | ≈ 11 MB/min |
+  | Compact | 0.006 | ≈ 55 MB/min (7 Mbit/s) | ≈ 22 MB/min | ≈ 8 MB/min |
 
   ScreenCaptureKit's built-in recording output, used before, wrote ≈ 21 Mbit/s
   (≈ 158 MB/min) at 6K with no control. Audio adds ≈ 2 MB/min (system stereo

@@ -39,10 +39,33 @@ import VideoToolbox
         #expect(properties[kVTCompressionPropertyKey_RealTime as String] == nil)
     }
 
+    @Test func conformerPassesTheFirstFormatThroughAndConvertsALaterOne() throws {
+        let conformer = AudioConformer()
+        let mono = try Feed.audioSample(pts: .zero, frames: 1_600, channels: 1)
+        #expect(conformer.conform(mono) === mono)
+        let monoAgain = try Feed.audioSample(
+            pts: CMTime(value: 1_600, timescale: 48_000), frames: 1_600, channels: 1)
+        #expect(conformer.conform(monoAgain) === monoAgain)
+        let stereoPTS = CMTime(value: 3_200, timescale: 48_000)
+        let stereo = try Feed.audioSample(pts: stereoPTS, frames: 1_600, channels: 2)
+        let converted = try #require(conformer.conform(stereo))
+        #expect(converted !== stereo)
+        let description = try #require(CMSampleBufferGetFormatDescription(converted))
+        let asbd = try #require(CMAudioFormatDescriptionGetStreamBasicDescription(description)?.pointee)
+        #expect(asbd.mChannelsPerFrame == 1)
+        #expect(CMSampleBufferGetNumSamples(converted) == 1_600)
+        #expect(CMSampleBufferGetPresentationTimeStamp(converted) == stereoPTS)
+        #expect(conformer.converted == 1)
+    }
+
     @Test func summaryLineNamesFramesDropsDurationSizeAndTarget() {
+        let stats = RecordingWriter.Stats(frames: 1800, droppedFrames: 3, droppedAudio: 5, seconds: 30.04)
         let line = RecordingWriter.summaryLine(
-            segment: 2, frames: 1800, dropped: 3, seconds: 30.04, bytes: 52_428_800, bitrate: 14_657_864)
-        #expect(line == "Recorder: segment 2 — 1800 frames, 3 dropped, 30.0 s, 50.0 MB, target 14.7 Mbit/s")
+            segment: 2, stats: stats, bytes: 52_428_800, bitrate: 14_657_864)
+        #expect(
+            line
+                == "Recorder: segment 2 — 1800 frames, 3 frames dropped, 5 audio buffers dropped, 30.0 s, "
+                + "52.4 MB, target 14.7 Mbit/s")
     }
 }
 
@@ -108,9 +131,54 @@ import VideoToolbox
         }
         let duration = try await asset.load(.duration).seconds
         #expect(abs(duration - 1) < 0.15)
+        try #require(writer.stats.droppedFrames == 0)
         #expect(try await Feed.frameCount(url) == 30)
         #expect(writer.stats.frames == 30)
-        #expect(writer.stats.dropped == 0)
+        #expect(writer.stats.droppedAudio == 0)
+    }
+
+    @Test(.enabled("needs an HEVC encoder") { ClipMaker.hevcAvailable() }, .timeLimit(.minutes(1)))
+    func aMicrophoneSwitchingFromMonoToStereoKeepsTheSegment() async throws {
+        let url = temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let writer = try RecordingWriter(
+            url: url, width: Self.width, height: Self.height, fps: 30, videoBitrate: 2_000_000,
+            systemAudio: false, microphone: true)
+        try await Feed.run(writer, frames: 30, microphone: 1, microphoneSwitch: (frame: 15, channels: 2))
+        _ = try await writer.finish(at: CMTime(value: 1, timescale: 1))
+        let asset = AVURLAsset(url: url)
+        let audio = try await asset.loadTracks(withMediaType: .audio)
+        #expect(audio.count == 1)
+        let audioDuration = try await audio.first?.load(.timeRange).duration.seconds ?? 0
+        #expect(audioDuration > 0.9)
+        #expect(writer.stats.droppedAudio == 0)
+        try #require(writer.stats.droppedFrames == 0)
+        #expect(try await Feed.frameCount(url) == 30)
+    }
+
+    @Test(.enabled("needs an HEVC encoder") { ClipMaker.hevcAvailable() }, .timeLimit(.minutes(1)))
+    func videoIsTaggedBT709() async throws {
+        let url = temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let writer = try RecordingWriter(
+            url: url, width: Self.width, height: Self.height, fps: 30, videoBitrate: 2_000_000,
+            systemAudio: false, microphone: false)
+        try await Feed.run(writer, frames: 10)
+        _ = try await writer.finish(at: CMTime(value: 1, timescale: 3))
+        let track = try #require(try await AVURLAsset(url: url).loadTracks(withMediaType: .video).first)
+        let format = try #require(try await track.load(.formatDescriptions).first)
+        func tag(_ key: CFString) -> String? {
+            CMFormatDescriptionGetExtension(format, extensionKey: key) as? String
+        }
+        #expect(
+            tag(kCMFormatDescriptionExtension_ColorPrimaries)
+                == kCMFormatDescriptionColorPrimaries_ITU_R_709_2 as String)
+        #expect(
+            tag(kCMFormatDescriptionExtension_TransferFunction)
+                == kCMFormatDescriptionTransferFunction_ITU_R_709_2 as String)
+        #expect(
+            tag(kCMFormatDescriptionExtension_YCbCrMatrix) == kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2
+                as String)
     }
 
     @Test(.enabled("needs an HEVC encoder") { ClipMaker.hevcAvailable() }, .timeLimit(.minutes(1)))
@@ -137,6 +205,7 @@ import VideoToolbox
             systemAudio: false, microphone: false)
         try await Feed.run(writer, frames: 30, incomplete: [0, 10, 11])
         _ = try await writer.finish(at: CMTime(value: 1, timescale: 1))
+        try #require(writer.stats.droppedFrames == 0)
         #expect(try await Feed.frameCount(url) == 27)
         #expect(writer.stats.frames == 27)
     }
@@ -152,6 +221,7 @@ import VideoToolbox
         _ = try await writer.finish(at: CMTime(value: 3, timescale: 1))
         let duration = try await AVURLAsset(url: url).load(.duration).seconds
         #expect(duration > 2.9 && duration < 3.2)
+        try #require(writer.stats.droppedFrames == 0)
         #expect(try await Feed.frameCount(url) == 31)
     }
 
@@ -164,6 +234,7 @@ import VideoToolbox
             systemAudio: false, microphone: false)
         try await Feed.run(writer, frames: 30)
         _ = try await writer.finish(at: CMTime(value: 1_200, timescale: 1_000))
+        try #require(writer.stats.droppedFrames == 0)
         #expect(try await Feed.frameCount(url) == 30)
     }
 
@@ -181,6 +252,7 @@ import VideoToolbox
         let asset = AVURLAsset(url: url)
         #expect(try await asset.loadTracks(withMediaType: .video).count == 1)
         #expect(try await asset.loadTracks(withMediaType: .audio).count == 2)
+        try #require(writer.stats.droppedFrames == 0)
         #expect(try await Feed.frameCount(url) == 30)
     }
 
@@ -218,15 +290,15 @@ import VideoToolbox
 }
 
 /// Synthetic ScreenCaptureKit-like input: 420v frames tagged with an `SCStreamFrameInfo.status` and 48 kHz
-/// Float32 sine audio, appended in PTS order; each append waits (bounded) until the writer is ready, so a
-/// fast test machine never drops samples.
-private enum Feed {
+/// Float32 sine audio, appended in PTS order; each append waits until the writer is ready, so no sample is
+/// dropped however loaded the machine is.
+enum Feed {
     struct Failure: Error {}
     static let sampleRate = 48_000
 
     static func run(
         _ writer: RecordingWriter, frames: Int, system: Int? = nil, microphone: Int? = nil,
-        incomplete: Set<Int> = [], noise: Bool = false
+        microphoneSwitch: (frame: Int, channels: Int)? = nil, incomplete: Set<Int> = [], noise: Bool = false
     ) async throws {
         let fps = 30
         let chunk = sampleRate / fps
@@ -243,7 +315,10 @@ private enum Feed {
                 writer.append(
                     audio: try audioSample(pts: audioPTS, frames: chunk, channels: system), kind: .system)
             }
-            if let microphone {
+            if var microphone {
+                if let microphoneSwitch, index >= microphoneSwitch.frame {
+                    microphone = microphoneSwitch.channels
+                }
                 try await waitUntilReady { writer.isReady(for: .microphone) }
                 writer.append(
                     audio: try audioSample(pts: audioPTS, frames: chunk, channels: microphone),
@@ -252,8 +327,9 @@ private enum Feed {
         }
     }
 
+    /// Unbounded on purpose: a loaded machine only makes this slower; `.timeLimit` guards a real hang.
     private static func waitUntilReady(_ ready: () -> Bool) async throws {
-        for _ in 0..<2_000 where !ready() {
+        while !ready() {
             try await Task.sleep(for: .milliseconds(1))
         }
     }

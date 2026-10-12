@@ -55,9 +55,18 @@ import Testing
     }
 
     @Test func bitrateIsClamped() {
-        #expect(RecordingQuality.bitrate(width: 1920, height: 1080, fps: 30, preset: .compact) == 2_000_000)
+        #expect(RecordingQuality.bitrate(width: 1920, height: 1080, fps: 30, preset: .compact) == 1_000_000)
         #expect(RecordingQuality.bitrate(width: 7680, height: 4320, fps: 120, preset: .high) == 80_000_000)
-        #expect(RecordingQuality.bitrate(width: 0, height: 0, fps: 0, preset: .high) == 2_000_000)
+        #expect(RecordingQuality.bitrate(width: 0, height: 0, fps: 0, preset: .high) == 1_000_000)
+    }
+
+    @Test func presetsDifferAt1080p() {
+        func rate(_ fps: Int, _ preset: RecordingQuality.Bitrate) -> Int {
+            RecordingQuality.bitrate(width: 1920, height: 1080, fps: fps, preset: preset)
+        }
+        #expect(rate(30, .high) > rate(30, .balanced))
+        #expect(rate(60, .high) > rate(60, .balanced))
+        #expect(rate(60, .balanced) > rate(60, .compact))
     }
 
     @Test func defaultIsNative60Balanced() {

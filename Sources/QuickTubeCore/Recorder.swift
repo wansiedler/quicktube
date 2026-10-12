@@ -53,6 +53,8 @@ public actor Recorder: ScreenRecorder {
     }
 
     private static let stopTimeout: Duration = .seconds(10)
+    /// Part of `stopTimeout`: past it the file is closed without waiting for the stream any longer.
+    private static let stopCaptureTimeout: Duration = .seconds(3)
 
     private let directory: URL
     private let options: @Sendable () -> RecorderOptions
@@ -239,12 +241,14 @@ public actor Recorder: ScreenRecorder {
             stream: stream, writer: writer, fileURL: url, output: output, index: index, bitrate: bitrate)
     }
 
-    /// Everything but the size: frame rate, cursor, audio, and 420v sRGB frames for the HEVC encoder.
+    /// Everything but the size: frame rate, cursor, audio, and 420v BT.709 frames for the HEVC encoder.
     private static func baseConfiguration(_ options: RecorderOptions) -> SCStreamConfiguration {
         let configuration = SCStreamConfiguration()
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(options.quality.fps))
         configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        configuration.colorSpaceName = CGColorSpace.sRGB
+        // BT.709 end to end, matching the writer's colour tags, so the encoder converts nothing.
+        configuration.colorSpaceName = CGColorSpace.itur_709
+        configuration.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
         configuration.queueDepth = 6
         configuration.showsCursor = true
         configuration.capturesAudio = options.systemAudio
@@ -282,9 +286,11 @@ public actor Recorder: ScreenRecorder {
         return segments
     }
 
-    /// Stops the stream and closes the segment file, together bounded by `stopTimeout`. Frames stop at the
-    /// moment of the call; a still screen is held until then. A stream that stopped with an error
-    /// surfaces as `finishFailed` once the file is closed (it is kept).
+    /// Stops the stream (bounded by `stopCaptureTimeout`, a stuck stop is logged and skipped) and then always
+    /// closes the segment file, so it gets its index even when the stream hangs; both together are bounded
+    /// by `stopTimeout`. Frames stop at the moment of the call; a still screen is held until then. A stream
+    /// that stopped with an error (the recorded window closed, a display was unplugged) is only logged: the
+    /// closed file is a good recording up to that point.
     private func end(_ session: Session) async throws {
         let stopTime = CMClockGetTime(CMClockGetHostTimeClock())
         let stream = Unchecked(value: session.stream)
@@ -294,22 +300,30 @@ public actor Recorder: ScreenRecorder {
             timeout: Self.stopTimeout, error: RecorderError.stopTimedOut(segments: [session.fileURL])
         ) {
             do {
-                try await Self.stopCapture(stream)
+                try await Deadline.run(timeout: Self.stopCaptureTimeout, error: StopCaptureTimedOut()) {
+                    try await Self.stopCapture(stream)
+                }
+            } catch is StopCaptureTimedOut {
+                log(
+                    "Recorder: stopping the capture took over \(Self.stopCaptureTimeout), closing the file anyway"
+                )
             } catch {
                 log("Recorder: stopping the capture failed: \(error.localizedDescription)")
             }
             _ = try await writer.finish(at: stopTime)
         }
-        let stats = writer.stats
         let bytes = (try? session.fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         log(
             RecordingWriter.summaryLine(
-                segment: session.index, frames: stats.frames, dropped: stats.dropped, seconds: stats.seconds,
-                bytes: bytes, bitrate: session.bitrate))
+                segment: session.index, stats: writer.stats, bytes: bytes, bitrate: session.bitrate))
         if let error = session.output.streamError {
-            throw RecorderError.finishFailed("The capture stopped: \(error.localizedDescription)")
+            log(
+                "Recorder: segment \(session.index) kept although the capture stopped early: \(error.localizedDescription)"
+            )
         }
     }
+
+    private struct StopCaptureTimedOut: Error {}
 }
 
 /// Receives the stream's sample buffers on one serial queue and hands them to the segment's writer; keeps

@@ -83,7 +83,7 @@ struct SettingsView: View {
                 )
                 .font(.callout).foregroundStyle(.secondary)
                 Text(
-                    "Applies to the next recording. Balanced: up to about 15 MB per minute at 1080p 30 fps, 105 MB at native 6K 60 fps."
+                    "Applies to the next recording. Balanced: up to about 8 MB per minute at 1080p 30 fps, 110 MB at native 6K 60 fps."
                 )
                 .font(.callout).foregroundStyle(.secondary)
             }

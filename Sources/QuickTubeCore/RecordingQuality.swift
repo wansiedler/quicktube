@@ -62,9 +62,9 @@ public struct RecordingQuality: Sendable, Equatable, Codable {
         }
     }
 
-    /// The video bitrate range a preset is clamped into: below 2 Mbit/s small frames fall apart, above
+    /// The video bitrate range a preset is clamped into: below 1 Mbit/s small frames fall apart, above
     /// 80 Mbit/s files grow without visible gain.
-    public static let bitrateRange = 2_000_000...80_000_000
+    public static let bitrateRange = 1_000_000...80_000_000
 
     public var resolution: Resolution
     public var fps: Int
