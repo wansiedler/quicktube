@@ -366,11 +366,16 @@ public final class RecordingWriter: @unchecked Sendable {
         return url
     }
 
-    /// Runs on `queue`.
+    /// Runs on `queue`. The encoder (a slow software one above all) may still be busy with the last
+    /// real frame, so this waits briefly for the input instead of dropping the held frame.
     private func appendTail(at stopTime: CMTime) {
-        guard let lastFrame, stopTime.isValid, stopTime - lastFramePTS > Self.tailThreshold,
-            inputs.video.isReadyForMoreMediaData
-        else { return }
+        guard let lastFrame, stopTime.isValid, stopTime - lastFramePTS > Self.tailThreshold else { return }
+        var waited = 0
+        while !inputs.video.isReadyForMoreMediaData && waited < 200 {
+            usleep(5_000)
+            waited += 1
+        }
+        guard inputs.video.isReadyForMoreMediaData else { return }
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: CMTimeScale(max(1, fps))), presentationTimeStamp: stopTime,
             decodeTimeStamp: .invalid)
@@ -447,8 +452,9 @@ final class AudioConformer {
         return Self.sampleBuffer(output, at: CMSampleBufferGetPresentationTimeStamp(sample))
     }
 
-    /// Hands the converter its one input buffer, then reports "no data now" so it returns.
-    private final class InputOnce {
+    /// Hands the converter its one input buffer, then reports "no data now" so it returns. The
+    /// converter calls back synchronously on this queue, so the unchecked conformance is safe.
+    private final class InputOnce: @unchecked Sendable {
         private var buffer: AVAudioPCMBuffer?
         init(_ buffer: AVAudioPCMBuffer) { self.buffer = buffer }
 
