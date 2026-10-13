@@ -2,7 +2,7 @@ import AppKit
 import QuickTubeCore
 import SwiftUI
 
-/// Small always-on-top status pill at the bottom of the screen under the cursor.
+/// Small always-on-top status pill at the top (or bottom) of the screen under the cursor.
 /// It never takes focus, and the recorder excludes it from capture by `windowNumber`.
 @MainActor
 final class HUDController {
@@ -38,6 +38,9 @@ final class HUDController {
     var hiddenFromCapture: Bool = true {
         didSet { panel.sharingType = hiddenFromCapture ? .none : .readOnly }
     }
+
+    /// Settings → Overlays "Status pill"; applied the next time the pill is placed.
+    var position: HUDPosition = .top
 
     /// The panel's window-server ID, for the recorder's exclusion list.
     var windowNumber: CGWindowID? {
@@ -93,7 +96,8 @@ final class HUDController {
         hosting.rootView = HUDView(state: state, maxWidth: maxWidth)
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
-        let origin = NSPoint(x: visible.midX - size.width / 2, y: visible.minY + 24)
+        let y = position == .top ? visible.maxY - 24 - size.height : visible.minY + 24
+        let origin = NSPoint(x: visible.midX - size.width / 2, y: y)
         panel.setFrame(NSRect(origin: origin, size: size), display: true)
         panel.orderFrontRegardless()
     }
