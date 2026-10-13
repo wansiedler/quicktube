@@ -18,7 +18,8 @@ public struct RecorderOptions: Sendable, Equatable {
 }
 
 /// Records a display, a window or a display region, with optional system and microphone audio,
-/// to HEVC .mp4 segments: `<date>.seg1.mp4`, `.seg2.mp4`, …
+/// to HEVC .mp4 segments: `<date>.seg1.mp4`, `.seg2.mp4`, … ScreenCaptureKit delivers the sample buffers;
+/// `RecordingWriter` encodes them at the bitrate of the recording's `RecordingQuality.Bitrate` preset.
 /// Pausing closes the current segment, resuming opens the next one with the same target and options.
 public actor Recorder: ScreenRecorder {
     public static let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -26,9 +27,11 @@ public actor Recorder: ScreenRecorder {
 
     private struct Session {
         let stream: SCStream
-        let output: SCRecordingOutput
+        let writer: RecordingWriter
         let fileURL: URL
-        let delegate: RecorderDelegate
+        let output: StreamOutput
+        let index: Int
+        let bitrate: Int
     }
 
     private enum State {
@@ -50,6 +53,8 @@ public actor Recorder: ScreenRecorder {
     }
 
     private static let stopTimeout: Duration = .seconds(10)
+    /// Part of `stopTimeout`: past it the file is closed without waiting for the stream any longer.
+    private static let stopCaptureTimeout: Duration = .seconds(3)
 
     private let directory: URL
     private let options: @Sendable () -> RecorderOptions
@@ -149,6 +154,11 @@ public actor Recorder: ScreenRecorder {
         try await stream.value.stopCapture()
     }
 
+    /// Same reason as `stopCapture`.
+    private nonisolated static func startCapture(_ stream: Unchecked<SCStream>) async throws {
+        try await stream.value.startCapture()
+    }
+
     /// Builds the content filter for `target`; for a region also returns its source rect (display points).
     /// `excludedWindows` are kept out of display and region recordings.
     private static func filter(
@@ -201,7 +211,7 @@ public actor Recorder: ScreenRecorder {
         let (filter, sourceRect) = try Self.filter(
             for: take.target, in: content, excluding: content.windows.filter { ids.contains($0.windowID) })
         let scale = CGFloat(filter.pointPixelScale)
-        let configuration = SCStreamConfiguration()
+        let configuration = Self.baseConfiguration(options)
         let captured = sourceRect?.size ?? filter.contentRect.size
         // HEVC rejects odd dimensions; outputSize keeps them even.
         let size = options.quality.resolution.outputSize(
@@ -209,25 +219,46 @@ public actor Recorder: ScreenRecorder {
         if let sourceRect { configuration.sourceRect = sourceRect }
         configuration.width = Int(size.width)
         configuration.height = Int(size.height)
+
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appending(path: "\(take.stem).seg\(index).mp4")
+        let bitrate = RecordingQuality.bitrate(
+            width: configuration.width, height: configuration.height, fps: options.quality.fps,
+            preset: options.quality.bitrate)
+        let writer = try RecordingWriter(
+            url: url, width: configuration.width, height: configuration.height, fps: options.quality.fps,
+            videoBitrate: bitrate, systemAudio: options.systemAudio, microphone: options.microphone, log: log)
+        let output = StreamOutput(writer: writer, log: log)
+        let stream = SCStream(filter: filter, configuration: configuration, delegate: output)
+        do {
+            try output.attach(to: stream, systemAudio: options.systemAudio, microphone: options.microphone)
+            try await Self.startCapture(Unchecked(value: stream))
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
+        return Session(
+            stream: stream, writer: writer, fileURL: url, output: output, index: index, bitrate: bitrate)
+    }
+
+    /// Everything but the size: frame rate, cursor, audio, and 420v BT.709 frames for the HEVC encoder.
+    private static func baseConfiguration(_ options: RecorderOptions) -> SCStreamConfiguration {
+        let configuration = SCStreamConfiguration()
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(options.quality.fps))
+        configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        // BT.709 end to end, matching the writer's colour tags, so the encoder converts nothing.
+        configuration.colorSpaceName = CGColorSpace.itur_709
+        configuration.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
+        configuration.queueDepth = 6
         configuration.showsCursor = true
         configuration.capturesAudio = options.systemAudio
         configuration.excludesCurrentProcessAudio = true
         configuration.captureMicrophone = options.microphone
-
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appending(path: "\(take.stem).seg\(index).mp4")
-        let recording = SCRecordingOutputConfiguration()
-        recording.outputURL = url
-        recording.outputFileType = .mp4
-        recording.videoCodecType = .hevc
-
-        let delegate = RecorderDelegate()
-        let output = SCRecordingOutput(configuration: recording, delegate: delegate)
-        let stream = SCStream(filter: filter, configuration: configuration, delegate: delegate)
-        try stream.addRecordingOutput(output)
-        try await stream.startCapture()
-        return Session(stream: stream, output: output, fileURL: url, delegate: delegate)
+        if options.systemAudio {
+            configuration.sampleRate = RecordingWriter.audioSampleRate
+            configuration.channelCount = 2
+        }
+        return configuration
     }
 
     /// Closes the open segment, if any, and returns every segment. A segment that does not close in time
@@ -255,61 +286,129 @@ public actor Recorder: ScreenRecorder {
         return segments
     }
 
-    /// Stops the stream and waits (bounded) until the segment file is closed.
+    /// Stops the stream (bounded by `stopCaptureTimeout`, a stuck stop is logged and skipped) and then always
+    /// closes the segment file, so it gets its index even when the stream hangs; both together are bounded
+    /// by `stopTimeout`. Frames stop at the moment of the call; a still screen is held until then. A stream
+    /// that stopped with an error (the recorded window closed, a display was unplugged) is only logged: the
+    /// closed file is a good recording up to that point.
     private func end(_ session: Session) async throws {
-        try await Self.stopCapture(Unchecked(value: session.stream))
-        try await session.delegate.waitUntilFinished(
-            timeout: Self.stopTimeout, timeoutError: RecorderError.stopTimedOut(segments: [session.fileURL]))
+        let stopTime = CMClockGetTime(CMClockGetHostTimeClock())
+        let stream = Unchecked(value: session.stream)
+        let writer = session.writer
+        let log = self.log
+        try await Deadline.run(
+            timeout: Self.stopTimeout, error: RecorderError.stopTimedOut(segments: [session.fileURL])
+        ) {
+            do {
+                try await Deadline.run(timeout: Self.stopCaptureTimeout, error: StopCaptureTimedOut()) {
+                    try await Self.stopCapture(stream)
+                }
+            } catch is StopCaptureTimedOut {
+                log(
+                    "Recorder: stopping the capture took over \(Self.stopCaptureTimeout), closing the file anyway"
+                )
+            } catch {
+                log("Recorder: stopping the capture failed: \(error.localizedDescription)")
+            }
+            _ = try await writer.finish(at: stopTime)
+        }
+        let bytes = (try? session.fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        log(
+            RecordingWriter.summaryLine(
+                segment: session.index, stats: writer.stats, bytes: bytes, bitrate: session.bitrate))
+        if let error = session.output.streamError {
+            log(
+                "Recorder: segment \(session.index) kept although the capture stopped early: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private struct StopCaptureTimedOut: Error {}
+}
+
+/// Receives the stream's sample buffers on one serial queue and hands them to the segment's writer; keeps
+/// the error the stream stopped with, if any.
+private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+    private let writer: RecordingWriter
+    private let log: @Sendable (String) -> Void
+    private let queue = DispatchQueue(label: "QuickTube.Recorder.samples", qos: .userInteractive)
+    private let lock = NSLock()
+    private var failure: Error?
+
+    init(writer: RecordingWriter, log: @escaping @Sendable (String) -> Void) {
+        self.writer = writer
+        self.log = log
+    }
+
+    /// Screen always, system audio and microphone when recorded.
+    func attach(to stream: SCStream, systemAudio: Bool, microphone: Bool) throws {
+        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+        if systemAudio { try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue) }
+        if microphone { try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: queue) }
+    }
+
+    /// The error the stream stopped with, if it did.
+    var streamError: Error? { lock.withLock { failure } }
+
+    func stream(
+        _ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType
+    ) {
+        guard sampleBuffer.isValid else { return }
+        switch type {
+        case .screen: writer.append(screen: sampleBuffer)
+        case .audio: writer.append(audio: sampleBuffer, kind: .system)
+        case .microphone: writer.append(audio: sampleBuffer, kind: .microphone)
+        @unknown default: return
+        }
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        lock.withLock { failure = error }
+        log("Recorder: the capture stopped: \(error.localizedDescription)")
     }
 }
 
-/// Bridges the delegate callbacks to one awaitable "file is closed" signal.
-private final class RecorderDelegate: NSObject, SCStreamDelegate, SCRecordingOutputDelegate,
-    @unchecked Sendable
-{
-    private let lock = NSLock()
-    private var finished = false
-    private var failure: Error?
-    private var waiter: CheckedContinuation<Void, Error>?
-
-    func waitUntilFinished(timeout: Duration, timeoutError: Error) async throws {
-        let timer = Task {
-            try await Task.sleep(for: timeout)
-            finish(timeoutError)
-        }
-        defer { timer.cancel() }
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                lock.withLock {
-                    if finished {
-                        if let failure {
-                            continuation.resume(throwing: failure)
-                        } else {
-                            continuation.resume()
-                        }
-                    } else {
-                        waiter = continuation
-                    }
+/// Runs an operation that may never return (a stuck stream or writer) with a time limit: past `timeout`
+/// the caller gets `error` and the operation is left to finish on its own.
+enum Deadline {
+    static func run(
+        timeout: Duration, error timeoutError: Error, operation: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        let gate = Gate()
+        var timer: Task<Void, Never>?
+        defer { timer?.cancel() }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            gate.set(continuation)
+            Task {
+                do {
+                    try await operation()
+                    gate.resume(with: nil)
+                } catch {
+                    gate.resume(with: error)
                 }
             }
-        } onCancel: {
-            finish(CancellationError())
+            timer = Task {
+                guard (try? await Task.sleep(for: timeout)) != nil else { return }
+                gate.resume(with: timeoutError)
+            }
         }
     }
 
-    private func finish(_ error: Error?) {
-        lock.withLock {
-            guard !finished else { return }
-            finished = true
-            failure = error
-            if let error { waiter?.resume(throwing: error) } else { waiter?.resume() }
-            waiter = nil
+    /// Resumes its continuation once; later results are ignored.
+    private final class Gate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Void, Error>?
+
+        func set(_ continuation: CheckedContinuation<Void, Error>) {
+            lock.withLock { self.continuation = continuation }
+        }
+
+        func resume(with error: Error?) {
+            let pending = lock.withLock { () -> CheckedContinuation<Void, Error>? in
+                defer { continuation = nil }
+                return continuation
+            }
+            if let error { pending?.resume(throwing: error) } else { pending?.resume() }
         }
     }
-
-    func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) { finish(nil) }
-    func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: Error) {
-        finish(error)
-    }
-    func stream(_ stream: SCStream, didStopWithError error: Error) { finish(error) }
 }

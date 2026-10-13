@@ -105,7 +105,7 @@ import VideoToolbox
     }
 
     @Test func compressionPropertiesPreferSpeedAndSkipReordering() throws {
-        let properties = VideoTranscoder.compressionProperties(bitrate: 2_000_000, fps: 29.97, hardware: true)
+        let properties = VideoEncoding.compressionProperties(bitrate: 2_000_000, fps: 29.97, hardware: true)
         #expect(properties[AVVideoAverageBitRateKey] as? Int == 2_000_000)
         #expect(properties[AVVideoAllowFrameReorderingKey] as? Bool == false)
         #expect(
@@ -115,13 +115,13 @@ import VideoToolbox
         let limits = try #require(
             properties[kVTCompressionPropertyKey_DataRateLimits as String] as? [NSNumber])
         #expect(limits == [NSNumber(value: 250_000), NSNumber(value: 1.0)])
-        let unknownFPS = VideoTranscoder.compressionProperties(bitrate: 1, fps: 0, hardware: true)
+        let unknownFPS = VideoEncoding.compressionProperties(bitrate: 1, fps: 0, hardware: true)
         #expect(unknownFPS[AVVideoExpectedSourceFrameRateKey] == nil)
     }
 
     @Test func softwareCompressionPropertiesHaveNoDataRateLimits() {
         // Apple's software HEVC encoder raises NSInvalidArgumentException on these VideoToolbox keys.
-        let properties = VideoTranscoder.compressionProperties(bitrate: 2_000_000, fps: 30, hardware: false)
+        let properties = VideoEncoding.compressionProperties(bitrate: 2_000_000, fps: 30, hardware: false)
         #expect(properties[kVTCompressionPropertyKey_DataRateLimits as String] == nil)
         #expect(properties[kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String] == nil)
         #expect(properties[AVVideoAllowFrameReorderingKey] as? Bool == false)
@@ -135,17 +135,17 @@ import VideoToolbox
                 domain: AVFoundationErrorDomain, code: -11800,
                 userInfo: [NSUnderlyingErrorKey: NSError(domain: domain, code: code)])
         }
-        #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12903)))
-        #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12908)))
-        #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12915)))
-        #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12907)))
+        #expect(VideoEncoding.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12903)))
+        #expect(VideoEncoding.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12908)))
+        #expect(VideoEncoding.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12915)))
+        #expect(VideoEncoding.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12907)))
         #expect(
-            VideoTranscoder.isEncoderUnavailable(
+            VideoEncoding.isEncoderUnavailable(
                 NSError(domain: AVFoundationErrorDomain, code: AVError.Code.encoderNotFound.rawValue)))
-        #expect(!VideoTranscoder.isEncoderUnavailable(nil))
-        #expect(!VideoTranscoder.isEncoderUnavailable(wrapped(NSPOSIXErrorDomain, 28)))  // disk full
-        #expect(!VideoTranscoder.isEncoderUnavailable(wrapped(NSCocoaErrorDomain, -12908)))
-        #expect(!VideoTranscoder.isEncoderUnavailable(NSError(domain: AVFoundationErrorDomain, code: -11800)))
+        #expect(!VideoEncoding.isEncoderUnavailable(nil))
+        #expect(!VideoEncoding.isEncoderUnavailable(wrapped(NSPOSIXErrorDomain, 28)))  // disk full
+        #expect(!VideoEncoding.isEncoderUnavailable(wrapped(NSCocoaErrorDomain, -12908)))
+        #expect(!VideoEncoding.isEncoderUnavailable(NSError(domain: AVFoundationErrorDomain, code: -11800)))
     }
 
     @Test func onlyTheHardwareAttemptRetriesInSoftware() {
@@ -154,19 +154,19 @@ import VideoToolbox
             userInfo: [NSUnderlyingErrorKey: NSError(domain: NSOSStatusErrorDomain, code: -12908)])
         let diskFull = NSError(domain: NSPOSIXErrorDomain, code: 28)
         // The writer rejecting the hardware settings retries once in software.
-        #expect(VideoTranscoder.shouldRetryInSoftware(hardware: true, inputRejected: true, error: nil))
+        #expect(VideoEncoding.shouldRetryInSoftware(hardware: true, inputRejected: true, error: nil))
         #expect(
-            VideoTranscoder.shouldRetryInSoftware(hardware: true, inputRejected: false, error: unavailable))
-        #expect(!VideoTranscoder.shouldRetryInSoftware(hardware: true, inputRejected: false, error: diskFull))
-        #expect(!VideoTranscoder.shouldRetryInSoftware(hardware: true, inputRejected: false, error: nil))
+            VideoEncoding.shouldRetryInSoftware(hardware: true, inputRejected: false, error: unavailable))
+        #expect(!VideoEncoding.shouldRetryInSoftware(hardware: true, inputRejected: false, error: diskFull))
+        #expect(!VideoEncoding.shouldRetryInSoftware(hardware: true, inputRejected: false, error: nil))
         // The software attempt never retries: its failures are final.
-        #expect(!VideoTranscoder.shouldRetryInSoftware(hardware: false, inputRejected: true, error: nil))
+        #expect(!VideoEncoding.shouldRetryInSoftware(hardware: false, inputRejected: true, error: nil))
         #expect(
-            !VideoTranscoder.shouldRetryInSoftware(hardware: false, inputRejected: false, error: unavailable))
+            !VideoEncoding.shouldRetryInSoftware(hardware: false, inputRejected: false, error: unavailable))
     }
 
     @Test func encoderSpecificationRequiresTheHardwareEncoder() {
-        let specification = VideoTranscoder.encoderSpecification()
+        let specification = VideoEncoding.encoderSpecification()
         #expect(
             specification[kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String]
                 as? Bool
@@ -280,17 +280,17 @@ import VideoToolbox
     }
 
     @Test func h264CompressionPropertiesUseHighProfile() {
-        let hardware = VideoTranscoder.compressionProperties(
+        let hardware = VideoEncoding.compressionProperties(
             bitrate: 4_000_000, fps: 45, hardware: true, codec: .h264)
         #expect(hardware[AVVideoProfileLevelKey] as? String == AVVideoProfileLevelH264HighAutoLevel)
         #expect(hardware[AVVideoAllowFrameReorderingKey] as? Bool == false)
         #expect(hardware[kVTCompressionPropertyKey_DataRateLimits as String] != nil)
-        let software = VideoTranscoder.compressionProperties(
+        let software = VideoEncoding.compressionProperties(
             bitrate: 4_000_000, fps: 45, hardware: false, codec: .h264)
         #expect(software[AVVideoProfileLevelKey] as? String == AVVideoProfileLevelH264HighAutoLevel)
         #expect(software[kVTCompressionPropertyKey_DataRateLimits as String] == nil)
         #expect(software[kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String] == nil)
-        let hevc = VideoTranscoder.compressionProperties(bitrate: 4_000_000, fps: 45, hardware: true)
+        let hevc = VideoEncoding.compressionProperties(bitrate: 4_000_000, fps: 45, hardware: true)
         #expect(hevc[AVVideoProfileLevelKey] == nil)
     }
 
@@ -573,6 +573,19 @@ enum ClipMaker {
     /// (some CI VMs); the end-to-end tests are skipped there.
     static func encodersAvailable() -> Bool {
         canEncode(kCMVideoCodecType_H264) && canEncode(kCMVideoCodecType_HEVC)
+    }
+
+    /// False on hosts without any HEVC encoder (hardware or software).
+    static func hevcAvailable() -> Bool {
+        canEncode(kCMVideoCodecType_HEVC)
+    }
+
+    /// False on hosts without Apple's software HEVC encoder.
+    static func softwareHEVCEncoderAvailable() -> Bool {
+        let software =
+            [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: false]
+            as CFDictionary
+        return canEncode(kCMVideoCodecType_HEVC, specification: software)
     }
 
     /// False on hosts without an H.264 encoder for the source clip; tests that only read the clip skip there.

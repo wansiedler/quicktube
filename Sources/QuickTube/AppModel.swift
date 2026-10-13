@@ -302,6 +302,7 @@ final class AppModel {
     /// keystroke overlay also needs the Input Monitoring grant. Start and stop are idempotent.
     private func updateOverlays() {
         let settings = settings
+        hud?.hiddenFromCapture = settings.hudHiddenFromCapture
         let recording: Bool
         switch state.phase {
         case .recording, .paused: recording = true
