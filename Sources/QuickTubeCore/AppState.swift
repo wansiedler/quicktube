@@ -63,6 +63,7 @@ public enum Destination: String, Sendable, CaseIterable, Codable {
     case telegram
     case drive
     case slack
+    case vimeo
     /// Not an upload: a GIF next to the recording; the link is its file URL.
     case gif
     /// Not an upload: the recording stays where it is; the link is its file URL.
@@ -74,6 +75,7 @@ public enum Destination: String, Sendable, CaseIterable, Codable {
         case .telegram: "Telegram"
         case .drive: "Google Drive"
         case .slack: "Slack"
+        case .vimeo: "Vimeo"
         case .gif: "GIF"
         case .local: "Save only"
         }
@@ -505,6 +507,15 @@ public final class AppState {
             return "Slack is not set up: add the bot token and channel ID in Settings."
         case SlackError.apiError(let code):
             return "Slack refused the upload: \(code)"
+        case VimeoError.notConfigured:
+            return "Vimeo is not set up: add the access token in Settings."
+        case VimeoError.apiError(_, let message):
+            return "Vimeo: \(message)"
+        case VimeoError.uploadIncomplete(let offset, let size):
+            return
+                "Vimeo: the upload stopped at \(offset / (1 << 20)) of \(size / (1 << 20)) MB. Retry the upload."
+        case VimeoError.badResponse(let status):
+            return "Vimeo: unexpected response (HTTP \(status))."
         case GIFError.cannotRead:
             return "Could not read the recording to make a GIF."
         case GIFError.cannotWrite:
@@ -545,8 +556,8 @@ public final class AppState {
         case RecorderError.finishFailed:
             return "Could not finalize the recording; segments are kept in the recordings folder."
         default:
-            // An error's description can embed a request URL; never show a bot token on screen.
-            let text = TelegramUploader.redact("\(error)")
+            // An error's description can embed a request URL or header; never show a token on screen.
+            let text = VimeoUploader.redact(TelegramUploader.redact("\(error)"))
             switch stage {
             case .recording: return "Recording failed: \(text)"
             case .upload: return "Upload failed: \(text)"

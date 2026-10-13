@@ -22,12 +22,12 @@ final class AppModel {
     private static let comboKeys: [Destination: String] = [
         .youtube: "hotkey.combo", .telegram: "hotkey.telegramCombo",
         .drive: "hotkey.driveCombo", .slack: "hotkey.slackCombo", .gif: "hotkey.gifCombo",
-        .local: "hotkey.localCombo",
+        .local: "hotkey.localCombo", .vimeo: "hotkey.vimeoCombo",
     ]
     /// Slot 5 is pause; the GIF hotkey (slot 6) is registered only while `gifEnabled` is on.
     /// "Save only" (slot 7) is always on.
     private static let slots: [Destination: UInt32] = [
-        .youtube: 1, .telegram: 2, .drive: 3, .slack: 4, .gif: 6, .local: 7,
+        .youtube: 1, .telegram: 2, .drive: 3, .slack: 4, .gif: 6, .local: 7, .vimeo: 8,
     ]
     /// Pause/resume; registered only while `pauseEnabled` is on.
     private static let pauseSlot: UInt32 = 5
@@ -44,6 +44,11 @@ final class AppModel {
     var slackChannel = ""
     var slackConfigured = false
     var slackMessage: String?
+    /// The Vimeo access token lives in the Keychain; privacy is in `settings.vimeoPrivacy`.
+    private let secrets: SecretStore
+    var vimeoToken = ""
+    var vimeoConfigured = false
+    var vimeoMessage: String?
     var clientID = ""
     var clientSecret = ""
     var signedIn = false
@@ -75,6 +80,7 @@ final class AppModel {
 
     init() {
         let store = KeychainStore()
+        self.secrets = store
         self.settingsStore = SettingsStore()
         self.updater = Updater()
         let auth = GoogleAuth(store: store)
@@ -84,6 +90,7 @@ final class AppModel {
             limitBytes: { AppSettings.load(from: .standard).telegramLimitBytes },
             compressToFit: { AppSettings.load(from: .standard).telegramCompressToFit },
             allowDownscale: { AppSettings.load(from: .standard).telegramAllowDownscale },
+            mobileFriendly: { AppSettings.load(from: .standard).telegramMobileFriendly },
             log: { DiagnosticsLog.append($0) })
         self.telegram = telegram
         let slack = SlackUploader(store: store, log: { DiagnosticsLog.append($0) })
@@ -105,6 +112,14 @@ final class AppModel {
                 .telegram: telegram,
                 .drive: GoogleDriveUploader(tokens: auth, log: { DiagnosticsLog.append($0) }),
                 .slack: slack,
+                .vimeo: VimeoUploader(
+                    configuration: {
+                        guard let token = try store.get(VimeoUploader.tokenKey), !token.isEmpty else {
+                            return nil
+                        }
+                        return VimeoConfiguration(
+                            token: token, privacy: AppSettings.load(from: .standard).vimeoPrivacy)
+                    }, log: { DiagnosticsLog.append($0) }),
                 .local: LocalSaver(),
                 .gif: GIFUploader(
                     options: {
@@ -160,13 +175,20 @@ final class AppModel {
             }
             Task { await self.state.toggle(destination: destination) }
         }
+        var registered: [Destination] = []
         for destination in Destination.allCases where destination != .gif {
             let combo = combos[destination]!
             if destination != .local, combo == combos[.local] {
                 hotkeyMessage =
                     "\(combo.label) is already the Save only shortcut; \(destination.label) has no hotkey."
+            } else if let other = registered.first(where: { combos[$0] == combo }) {
+                // A new destination's default can equal a combo the user gave another destination.
+                hotkeyMessage =
+                    "\(combo.label) is already the \(other.label) shortcut; \(destination.label) has no hotkey."
             } else if !hotkey.register(combo, slot: Self.slots[destination]!) {
                 hotkeyMessage = "\(combo.label) is already in use by another app. Choose another shortcut."
+            } else {
+                registered.append(destination)
             }
         }
         updatePauseHotkey()
@@ -210,6 +232,7 @@ final class AppModel {
         refreshAuth()
         refreshTelegram()
         refreshSlack()
+        refreshVimeo()
         // Ask for the recording grants now, so the first hotkey press records instead of prompting.
         if Bundle.main.bundleIdentifier != nil {
             Task {
@@ -279,6 +302,7 @@ final class AppModel {
     /// keystroke overlay also needs the Input Monitoring grant. Start and stop are idempotent.
     private func updateOverlays() {
         let settings = settings
+        hud?.hiddenFromCapture = settings.hudHiddenFromCapture
         let recording: Bool
         switch state.phase {
         case .recording, .paused: recording = true
@@ -514,6 +538,38 @@ final class AppModel {
             } catch {
                 slackMessage = "Could not save to Keychain: \(error)"
             }
+        }
+    }
+
+    func refreshVimeo() {
+        do {
+            if let token = try secrets.get(VimeoUploader.tokenKey), !token.isEmpty {
+                vimeoToken = token
+                vimeoConfigured = true
+            } else {
+                vimeoToken = ""
+                vimeoConfigured = false
+            }
+        } catch {
+            vimeoMessage = "Keychain error: \(error)"
+        }
+    }
+
+    /// An empty token clears it; privacy is a setting and is saved as it changes.
+    func saveVimeo() {
+        let token = vimeoToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            if token.isEmpty {
+                try secrets.delete(VimeoUploader.tokenKey)
+                vimeoConfigured = false
+                vimeoMessage = "Vimeo cleared."
+            } else {
+                try secrets.set(token, for: VimeoUploader.tokenKey)
+                vimeoConfigured = true
+                vimeoMessage = "Vimeo saved."
+            }
+        } catch {
+            vimeoMessage = "Could not save to Keychain: \(error)"
         }
     }
 

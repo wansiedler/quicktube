@@ -62,6 +62,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
     /// The keystroke pill shows only combos with ⌘, ⌃ or ⌥ and standalone keys, never plain typing.
     public var keystrokeShortcutsOnly = true
     public var overlaysInRecording = true
+    /// The status pill is invisible to every screen capture (Zoom, Meet, QuickTime), not only to QuickTube's.
+    public var hudHiddenFromCapture = true
     public var trimTailSeconds = 1.0
     public var trimHeadSeconds = 0.0
     public var titleTemplate = "{date}"
@@ -79,6 +81,10 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var telegramLimitMB = 50
     /// Compression only lowers bitrate by default; when true it may also step the frame size down.
     public var telegramAllowDownscale = false
+    /// Always send H.264 at most 1080p: Telegram's phone apps show a white screen for 6K HEVC.
+    public var telegramMobileFriendly = true
+    /// `privacy.view` of Vimeo uploads; some plans refuse `unlisted`, and the API error says so.
+    public var vimeoPrivacy: VimeoPrivacy = .unlisted
 
     /// The Telegram limit in bytes, clamped to the range Settings offers.
     public var telegramLimitBytes: Int { min(max(telegramLimitMB, 10), 2000) << 20 }
@@ -88,11 +94,12 @@ public struct AppSettings: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case captureMode, cameraEnabled, cameraAlwaysOn, cameraSize, cameraCorner, pauseEnabled
         case systemAudioEnabled, microphoneEnabled, historyEnabled, clickHighlightEnabled
-        case keystrokeOverlayEnabled, keystrokeShortcutsOnly, overlaysInRecording, trimTailSeconds,
-            trimHeadSeconds
+        case keystrokeOverlayEnabled, keystrokeShortcutsOnly, overlaysInRecording, hudHiddenFromCapture
+        case trimTailSeconds, trimHeadSeconds
         case titleTemplate, deleteAfterUpload, deleteOlderThanDays, automaticUpdates
         case gifEnabled, gifFPS, gifMaxWidth, gifMaxSeconds, quality
-        case telegramCompressToFit, telegramLimitMB, telegramAllowDownscale
+        case telegramCompressToFit, telegramLimitMB, telegramAllowDownscale, telegramMobileFriendly
+        case vimeoPrivacy
     }
 
     public init(from decoder: Decoder) throws {
@@ -118,6 +125,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
             c.lenient(Bool.self, .keystrokeShortcutsOnly) ?? d.keystrokeShortcutsOnly
         overlaysInRecording =
             c.lenient(Bool.self, .overlaysInRecording) ?? d.overlaysInRecording
+        hudHiddenFromCapture =
+            c.lenient(Bool.self, .hudHiddenFromCapture) ?? d.hudHiddenFromCapture
         trimTailSeconds =
             c.lenient(Double.self, .trimTailSeconds) ?? d.trimTailSeconds
         trimHeadSeconds =
@@ -139,6 +148,9 @@ public struct AppSettings: Codable, Sendable, Equatable {
         telegramLimitMB = c.lenient(Int.self, .telegramLimitMB) ?? d.telegramLimitMB
         telegramAllowDownscale =
             c.lenient(Bool.self, .telegramAllowDownscale) ?? d.telegramAllowDownscale
+        telegramMobileFriendly =
+            c.lenient(Bool.self, .telegramMobileFriendly) ?? d.telegramMobileFriendly
+        vimeoPrivacy = c.lenient(VimeoPrivacy.self, .vimeoPrivacy) ?? d.vimeoPrivacy
     }
 
     /// UserDefaults key holding the JSON-encoded settings.

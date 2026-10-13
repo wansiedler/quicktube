@@ -1,3 +1,4 @@
+import CoreMedia
 import Foundation
 
 public enum TelegramError: Error, Equatable {
@@ -36,6 +37,7 @@ public actor TelegramUploader: VideoUploader {
     private let limitBytes: @Sendable () -> Int
     private let compressToFit: @Sendable () -> Bool
     private let allowDownscale: @Sendable () -> Bool
+    private let mobileFriendly: @Sendable () -> Bool
     private let log: @Sendable (String) -> Void
     private let videoInfo: @Sendable (URL) async throws -> VideoInfo
     private let transcode: Transcode
@@ -46,7 +48,8 @@ public actor TelegramUploader: VideoUploader {
             URL, TranscodePlan, URL, @escaping @Sendable (Double) -> Void
         ) async throws -> URL
 
-    /// `limitBytes`, `compressToFit` and `allowDownscale` are read at each upload, so Settings changes apply immediately.
+    /// `limitBytes`, `compressToFit`, `allowDownscale` and `mobileFriendly` are read at each upload, so Settings
+    /// changes apply immediately. `mobileFriendly` sends H.264 at most 1080p (see `shouldTranscode`).
     /// `transcode` defaults to `VideoTranscoder.transcode`, logging through `log`.
     public init(
         store: SecretStore,
@@ -55,6 +58,7 @@ public actor TelegramUploader: VideoUploader {
         limitBytes: @escaping @Sendable () -> Int = { TelegramUploader.botAPILimit },
         compressToFit: @escaping @Sendable () -> Bool = { true },
         allowDownscale: @escaping @Sendable () -> Bool = { false },
+        mobileFriendly: @escaping @Sendable () -> Bool = { true },
         log: @escaping @Sendable (String) -> Void = { _ in },
         videoInfo: @escaping @Sendable (URL) async throws -> VideoInfo = { try await VideoInfo.read($0) },
         transcode: Transcode? = nil
@@ -65,6 +69,7 @@ public actor TelegramUploader: VideoUploader {
         self.limitBytes = limitBytes
         self.compressToFit = compressToFit
         self.allowDownscale = allowDownscale
+        self.mobileFriendly = mobileFriendly
         self.log = log
         self.videoInfo = videoInfo
         self.transcode =
@@ -75,14 +80,40 @@ public actor TelegramUploader: VideoUploader {
     }
 
     /// The plan for a second attempt after the first came out at `actualBytes`: the video bitrate scaled by
-    /// `limit / actual × 0.9`, never below `VideoTranscoder.minimumVideoBitrate`; size and audio unchanged.
+    /// `limit / actual × 0.9`, never below `VideoTranscoder.minimumVideoBitrate`; size, audio and codec unchanged.
     public static func retryPlan(after plan: TranscodePlan, actualBytes: Int, limitBytes: Int)
         -> TranscodePlan
     {
         let scale = Double(limitBytes) / Double(max(1, actualBytes)) * 0.9
         let video = max(VideoTranscoder.minimumVideoBitrate, Int(Double(plan.videoBitrate) * scale))
         return TranscodePlan(
-            width: plan.width, height: plan.height, videoBitrate: video, audioBitrate: plan.audioBitrate)
+            width: plan.width, height: plan.height, videoBitrate: video, audioBitrate: plan.audioBitrate,
+            codec: plan.codec)
+    }
+
+    /// Pure: true when phones can play `info` as is: H.264 with the long side at most 1920 (1080p) and at most
+    /// 60 fps (an unknown rate passes).
+    public static func isMobileReady(_ info: VideoInfo) -> Bool {
+        info.codec == kCMVideoCodecType_H264
+            && max(info.width, info.height) <= VideoTranscoder.mobileMaxLongSide
+            && (info.fps ?? 0) <= 60
+    }
+
+    /// Pure: the size the HUD announces for `plan`. HEVC fills the limit; a capped H.264 plan announces its own
+    /// estimate, (video + audio bitrate) × duration / 8, at most `limit`.
+    public static func targetBytes(for plan: TranscodePlan, duration: TimeInterval, limit: Int) -> Int {
+        guard plan.codec == .h264, duration > 0 else { return limit }
+        let estimate = Double(plan.videoBitrate + plan.audioBitrate) * duration / 8
+        return min(limit, Int(estimate.rounded()))
+    }
+
+    /// Pure: a file over `limit` is always transcoded; with `mobileFriendly` so is one that is not already
+    /// `isMobileReady` (an unknown codec counts as not ready). Without `info` only the size decides.
+    public static func shouldTranscode(info: VideoInfo?, size: Int, limit: Int, mobileFriendly: Bool) -> Bool
+    {
+        if size > limit { return true }
+        guard mobileFriendly, let info else { return false }
+        return !isMobileReady(info)
     }
 
     /// Replaces every `bot<id>:<secret>` in `text` with `bot<redacted>`. The bot token is part of the request
@@ -116,6 +147,7 @@ public actor TelegramUploader: VideoUploader {
         let size = Self.fileSize(file)
         guard size > 0 else { throw UploadError.fileUnreadable }
         let limit = limitBytes()
+        let mobile = mobileFriendly()
         let oversized = size > limit
         guard !oversized || compressToFit() else {
             throw TelegramError.fileTooLarge(limit: limit, actual: size)
@@ -133,14 +165,26 @@ public actor TelegramUploader: VideoUploader {
         var sendingInfo = info
         var transcoded: URL?
         defer { if let transcoded { try? FileManager.default.removeItem(at: transcoded) } }
-        if oversized {
+        if mobile && info == nil && !oversized {
+            log("Telegram: mobile-friendly check skipped (video info unreadable), sending as is")
+        }
+        if Self.shouldTranscode(info: info, size: size, limit: limit, mobileFriendly: mobile) {
             guard let info else { throw TranscodeError.cannotRead }
-            var plan = VideoTranscoder.plan(info: info, limitBytes: limit, allowDownscale: allowDownscale())
+            // Mobile-friendly: H.264 capped at 1080p, the whole size budget spent on that.
+            var plan = VideoTranscoder.plan(
+                info: info, limitBytes: limit, allowDownscale: allowDownscale(),
+                maxLongSide: mobile ? VideoTranscoder.mobileMaxLongSide : nil, codec: mobile ? .h264 : .hevc)
             let output = Self.transcodeURL(for: file)
             transcoded = output
             context.onStatus(
-                RecordingNaming.compressionLine(from: info, sizeBytes: size, to: plan, targetBytes: limit))
-            log("Telegram: \(size) bytes over the \(limit)-byte limit, transcoding with \(plan)")
+                RecordingNaming.compressionLine(
+                    from: info, sizeBytes: size, to: plan,
+                    targetBytes: Self.targetBytes(for: plan, duration: info.duration, limit: limit)))
+            let reason =
+                oversized
+                ? "\(size) bytes over the \(limit)-byte limit"
+                : "\(size) bytes, not mobile-friendly as recorded"
+            log("Telegram: \(reason), transcoding with \(plan)")
             progress(0)
             sending = try await transcode(file, plan, output) { progress($0) }
             transcoded = sending
@@ -151,7 +195,8 @@ public actor TelegramUploader: VideoUploader {
             if newSize > limit {
                 plan = Self.retryPlan(after: plan, actualBytes: newSize, limitBytes: limit)
                 let line = RecordingNaming.compressionLine(
-                    from: info, sizeBytes: size, to: plan, targetBytes: limit)
+                    from: info, sizeBytes: size, to: plan,
+                    targetBytes: Self.targetBytes(for: plan, duration: info.duration, limit: limit))
                 context.onStatus(line.replacingOccurrences(of: "Compressing", with: "Compressing again"))
                 log(
                     "Telegram: \(newSize) bytes still over the \(limit)-byte limit, transcoding again with \(plan)"
@@ -187,7 +232,7 @@ public actor TelegramUploader: VideoUploader {
 
         // Each stage reports 0 → 1 on its own; the status switch tells the UI which one is running.
         context.onStatus("Uploading")
-        if oversized { progress(0) }
+        if transcoded != nil { progress(0) }
         let boundary = "QuickTube-\(UUID().uuidString)"
         let body = try Self.multipartBody(
             boundary: boundary, chat: configuration.chat, caption: caption, file: sending,

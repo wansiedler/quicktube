@@ -5,7 +5,9 @@ import QuickTubeCore
 import SwiftUI
 
 /// A pill at the bottom centre of the screen, just above the HUD, showing the last key combo for
-/// 1.5 s. The global key monitor needs Input Monitoring; the caller starts it only when granted.
+/// 1.5 s. Keys are read through a listen-only `CGEvent` tap, which is what Input Monitoring grants
+/// (a global `NSEvent` key monitor would need Accessibility instead); the caller starts it only
+/// when granted.
 /// The window stays ordered in (transparent while idle) from `start` to `stop`, so its number can be
 /// excluded from capture.
 @MainActor
@@ -18,6 +20,8 @@ final class KeystrokeOverlay {
     private let panel: NSPanel
     private let keystroke = Keystroke()
     private var monitors: [Any] = []
+    private var tap: CFMachPort?
+    private var tapSource: CFRunLoopSource?
     private var hideTask: Task<Void, Never>?
     /// Settings → Overlays "Show only shortcuts"; read per key press.
     var shortcutsOnly: () -> Bool = { true }
@@ -28,7 +32,7 @@ final class KeystrokeOverlay {
         panel.contentView = NSHostingView(rootView: KeystrokeView(keystroke: keystroke))
     }
 
-    var isRunning: Bool { !monitors.isEmpty }
+    var isRunning: Bool { tap != nil || !monitors.isEmpty }
 
     /// The pill's window-server ID, for the recorder's exclusion list.
     var windowNumber: CGWindowID? {
@@ -48,20 +52,12 @@ final class KeystrokeOverlay {
         }
         keystroke.text = nil
         panel.orderFrontRegardless()
-        if let global = NSEvent.addGlobalMonitorForEvents(
-            matching: .keyDown,
-            handler: { [weak self] event in
-                // Global monitors deliver on the main thread.
-                MainActor.assumeIsolated { self?.show(event) }
-            })
-        {
-            monitors.append(global)
-        }
-        // Keys typed into QuickTube's own windows never reach the global monitor.
+        installTap()
+        // Keys typed into QuickTube's own windows never reach the tap once the app handles them.
         if let local = NSEvent.addLocalMonitorForEvents(
             matching: .keyDown,
             handler: { [weak self] event in
-                MainActor.assumeIsolated { self?.show(event) }
+                MainActor.assumeIsolated { self?.show(KeyPress(event)) }
                 return event
             })
         {
@@ -69,8 +65,57 @@ final class KeystrokeOverlay {
         }
     }
 
-    /// Removes the monitors and hides the pill; safe to call when not running.
+    /// A session-wide, listen-only tap on key presses, serviced on the main run loop so the callback
+    /// is on the main thread. Fails silently (logged by the caller's status) without the grant.
+    private func installTap() {
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        guard
+            let tap = CGEvent.tapCreate(
+                tap: .cgSessionEventTap, place: .headInsertEventTap, options: .listenOnly,
+                eventsOfInterest: mask, callback: keystrokeTapCallback, userInfo: refcon)
+        else { return }
+        let source = CFMachPortCreateRunLoopSource(nil, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        self.tap = tap
+        tapSource = source
+    }
+
+    /// What the pill needs from a key press; plain values, so they can cross into the main actor.
+    struct KeyPress: Sendable {
+        let keyCode: UInt16
+        let modifierFlags: UInt
+        let characters: String?
+
+        init(_ event: NSEvent) {
+            keyCode = event.keyCode
+            modifierFlags = event.modifierFlags.rawValue
+            characters = event.charactersIgnoringModifiers
+        }
+    }
+
+    /// Called by the tap on the main thread; a disabled tap (timeout) is switched back on.
+    fileprivate func handleTap(type: CGEventType, key: KeyPress?) {
+        switch type {
+        case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+        case .keyDown:
+            if let key { show(key) }
+        default:
+            break
+        }
+    }
+
+    /// Removes the tap and monitors and hides the pill; safe to call when not running.
     func stop() {
+        if let tap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            if let tapSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), tapSource, .commonModes) }
+            CFMachPortInvalidate(tap)
+        }
+        tap = nil
+        tapSource = nil
         for monitor in monitors {
             NSEvent.removeMonitor(monitor)
         }
@@ -81,15 +126,15 @@ final class KeystrokeOverlay {
         panel.orderOut(nil)
     }
 
-    private func show(_ event: NSEvent) {
+    private func show(_ key: KeyPress) {
         // A password field (or a terminal with Secure Keyboard Entry) is active: show nothing.
         guard !IsSecureEventInputEnabled() else { return }
-        let modifiers = KeyComboFormatter.Modifiers(eventFlags: event.modifierFlags.rawValue)
+        let modifiers = KeyComboFormatter.Modifiers(eventFlags: key.modifierFlags)
         guard
             KeyComboFormatter.shouldShow(
-                modifiers: modifiers, keyCode: event.keyCode, shortcutsOnly: shortcutsOnly()),
+                modifiers: modifiers, keyCode: key.keyCode, shortcutsOnly: shortcutsOnly()),
             let text = KeyComboFormatter.format(
-                modifiers: modifiers, keyCode: event.keyCode, characters: event.charactersIgnoringModifiers)
+                modifiers: modifiers, keyCode: key.keyCode, characters: key.characters)
         else { return }
         keystroke.text = text
         hideTask?.cancel()
@@ -99,6 +144,20 @@ final class KeystrokeOverlay {
             self?.keystroke.text = nil
         }
     }
+}
+
+/// C entry point for the tap; `refcon` is the unretained overlay, and the tap's run-loop source
+/// lives on the main run loop, so this runs on the main thread.
+private func keystrokeTapCallback(
+    proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, refcon: UnsafeMutableRawPointer?
+) -> Unmanaged<CGEvent>? {
+    if let refcon {
+        let overlay = Unmanaged<KeystrokeOverlay>.fromOpaque(refcon).takeUnretainedValue()
+        // Converted here, outside the isolated closure, so no CGEvent crosses into the main actor.
+        let key = type == .keyDown ? NSEvent(cgEvent: event).map(KeystrokeOverlay.KeyPress.init) : nil
+        MainActor.assumeIsolated { overlay.handleTap(type: type, key: key) }
+    }
+    return Unmanaged.passUnretained(event)
 }
 
 /// The combo on display, nil while the pill is hidden.

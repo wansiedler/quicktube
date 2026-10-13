@@ -30,6 +30,10 @@ final class HotkeyManager {
             keyCode: UInt32(kVK_ANSI_S),
             modifiers: UInt32(controlKey | optionKey | cmdKey),
             label: "⌃⌥⌘S")
+        static let vimeoDefault = Combo(
+            keyCode: UInt32(kVK_ANSI_V),
+            modifiers: UInt32(controlKey | optionKey | cmdKey),
+            label: "⌃⌥⌘V")
         static let gifDefault = Combo(
             keyCode: UInt32(kVK_ANSI_G),
             modifiers: UInt32(controlKey | optionKey | cmdKey),
@@ -45,6 +49,7 @@ final class HotkeyManager {
             case .telegram: .telegramDefault
             case .drive: .driveDefault
             case .slack: .slackDefault
+            case .vimeo: .vimeoDefault
             case .gif: .gifDefault
             case .local: .localDefault
             }
