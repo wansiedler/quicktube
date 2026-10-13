@@ -13,6 +13,7 @@ import Testing
         #expect(!s.systemAudioEnabled && s.microphoneEnabled)
         #expect(s.historyEnabled)
         #expect(!s.clickHighlightEnabled && !s.keystrokeOverlayEnabled && s.overlaysInRecording)
+        #expect(s.hudHiddenFromCapture)
         #expect(s.keystrokeShortcutsOnly)
         #expect(s.trimTailSeconds == 1.0 && s.trimHeadSeconds == 0.0)
         #expect(s.titleTemplate == "{date}")
@@ -56,6 +57,7 @@ import Testing
         s.keystrokeOverlayEnabled = true
         s.keystrokeShortcutsOnly = false
         s.overlaysInRecording = false
+        s.hudHiddenFromCapture = false
         s.trimTailSeconds = 2.5
         s.trimHeadSeconds = 0.5
         s.titleTemplate = "Demo {date}"

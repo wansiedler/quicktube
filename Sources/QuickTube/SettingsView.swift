@@ -145,6 +145,7 @@ struct SettingsView: View {
                 )
                 .disabled(!model.settings.keystrokeOverlayEnabled)
                 Toggle("Show overlays in recording", isOn: $model.settings.overlaysInRecording)
+                Toggle("Hide the status pill from screen sharing", isOn: $model.settings.hudHiddenFromCapture)
                 Text(
                     "While recording, a ring marks each click and a pill above the status bar shows the last "
                         + "key combo. Keystrokes need Input Monitoring. \"Show only shortcuts\" leaves out plain "

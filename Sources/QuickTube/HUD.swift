@@ -28,10 +28,15 @@ final class HUDController {
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = false
-        // Invisible to every screen capture (Zoom, Meet, QuickTime), not only to QuickTube's own.
         panel.sharingType = .none
         panel.contentView = hosting
         observe()
+    }
+
+    /// Invisible to every screen capture (Zoom, Meet, QuickTime) when on; the recorder excludes the
+    /// panel by window ID either way, so QuickTube's own recording never shows it.
+    var hiddenFromCapture: Bool = true {
+        didSet { panel.sharingType = hiddenFromCapture ? .none : .readOnly }
     }
 
     /// The panel's window-server ID, for the recorder's exclusion list.
