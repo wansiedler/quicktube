@@ -68,6 +68,12 @@ struct MenuContent: View {
         Picker("Frame rate: \(model.settings.quality.fps) fps", selection: $model.settings.quality.fps) {
             ForEach(RecordingQuality.frameRates, id: \.self) { Text("\($0) fps").tag($0) }
         }
+        Picker(
+            "Bitrate: \(model.settings.quality.bitrate.label)",
+            selection: $model.settings.quality.bitrate
+        ) {
+            ForEach(RecordingQuality.Bitrate.allCases, id: \.self) { Text($0.label).tag($0) }
+        }
         Toggle(
             "Camera",
             isOn: Binding(

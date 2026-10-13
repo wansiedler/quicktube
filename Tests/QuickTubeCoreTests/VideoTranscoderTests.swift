@@ -105,7 +105,7 @@ import VideoToolbox
     }
 
     @Test func compressionPropertiesPreferSpeedAndSkipReordering() throws {
-        let properties = VideoTranscoder.compressionProperties(bitrate: 2_000_000, fps: 29.97, hardware: true)
+        let properties = VideoEncoding.compressionProperties(bitrate: 2_000_000, fps: 29.97, hardware: true)
         #expect(properties[AVVideoAverageBitRateKey] as? Int == 2_000_000)
         #expect(properties[AVVideoAllowFrameReorderingKey] as? Bool == false)
         #expect(
@@ -115,13 +115,13 @@ import VideoToolbox
         let limits = try #require(
             properties[kVTCompressionPropertyKey_DataRateLimits as String] as? [NSNumber])
         #expect(limits == [NSNumber(value: 250_000), NSNumber(value: 1.0)])
-        let unknownFPS = VideoTranscoder.compressionProperties(bitrate: 1, fps: 0, hardware: true)
+        let unknownFPS = VideoEncoding.compressionProperties(bitrate: 1, fps: 0, hardware: true)
         #expect(unknownFPS[AVVideoExpectedSourceFrameRateKey] == nil)
     }
 
     @Test func softwareCompressionPropertiesHaveNoDataRateLimits() {
         // Apple's software HEVC encoder raises NSInvalidArgumentException on these VideoToolbox keys.
-        let properties = VideoTranscoder.compressionProperties(bitrate: 2_000_000, fps: 30, hardware: false)
+        let properties = VideoEncoding.compressionProperties(bitrate: 2_000_000, fps: 30, hardware: false)
         #expect(properties[kVTCompressionPropertyKey_DataRateLimits as String] == nil)
         #expect(properties[kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String] == nil)
         #expect(properties[AVVideoAllowFrameReorderingKey] as? Bool == false)
@@ -135,17 +135,17 @@ import VideoToolbox
                 domain: AVFoundationErrorDomain, code: -11800,
                 userInfo: [NSUnderlyingErrorKey: NSError(domain: domain, code: code)])
         }
-        #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12903)))
-        #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12908)))
-        #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12915)))
-        #expect(VideoTranscoder.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12907)))
+        #expect(VideoEncoding.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12903)))
+        #expect(VideoEncoding.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12908)))
+        #expect(VideoEncoding.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12915)))
+        #expect(VideoEncoding.isEncoderUnavailable(wrapped(NSOSStatusErrorDomain, -12907)))
         #expect(
-            VideoTranscoder.isEncoderUnavailable(
+            VideoEncoding.isEncoderUnavailable(
                 NSError(domain: AVFoundationErrorDomain, code: AVError.Code.encoderNotFound.rawValue)))
-        #expect(!VideoTranscoder.isEncoderUnavailable(nil))
-        #expect(!VideoTranscoder.isEncoderUnavailable(wrapped(NSPOSIXErrorDomain, 28)))  // disk full
-        #expect(!VideoTranscoder.isEncoderUnavailable(wrapped(NSCocoaErrorDomain, -12908)))
-        #expect(!VideoTranscoder.isEncoderUnavailable(NSError(domain: AVFoundationErrorDomain, code: -11800)))
+        #expect(!VideoEncoding.isEncoderUnavailable(nil))
+        #expect(!VideoEncoding.isEncoderUnavailable(wrapped(NSPOSIXErrorDomain, 28)))  // disk full
+        #expect(!VideoEncoding.isEncoderUnavailable(wrapped(NSCocoaErrorDomain, -12908)))
+        #expect(!VideoEncoding.isEncoderUnavailable(NSError(domain: AVFoundationErrorDomain, code: -11800)))
     }
 
     @Test func onlyTheHardwareAttemptRetriesInSoftware() {
@@ -154,19 +154,19 @@ import VideoToolbox
             userInfo: [NSUnderlyingErrorKey: NSError(domain: NSOSStatusErrorDomain, code: -12908)])
         let diskFull = NSError(domain: NSPOSIXErrorDomain, code: 28)
         // The writer rejecting the hardware settings retries once in software.
-        #expect(VideoTranscoder.shouldRetryInSoftware(hardware: true, inputRejected: true, error: nil))
+        #expect(VideoEncoding.shouldRetryInSoftware(hardware: true, inputRejected: true, error: nil))
         #expect(
-            VideoTranscoder.shouldRetryInSoftware(hardware: true, inputRejected: false, error: unavailable))
-        #expect(!VideoTranscoder.shouldRetryInSoftware(hardware: true, inputRejected: false, error: diskFull))
-        #expect(!VideoTranscoder.shouldRetryInSoftware(hardware: true, inputRejected: false, error: nil))
+            VideoEncoding.shouldRetryInSoftware(hardware: true, inputRejected: false, error: unavailable))
+        #expect(!VideoEncoding.shouldRetryInSoftware(hardware: true, inputRejected: false, error: diskFull))
+        #expect(!VideoEncoding.shouldRetryInSoftware(hardware: true, inputRejected: false, error: nil))
         // The software attempt never retries: its failures are final.
-        #expect(!VideoTranscoder.shouldRetryInSoftware(hardware: false, inputRejected: true, error: nil))
+        #expect(!VideoEncoding.shouldRetryInSoftware(hardware: false, inputRejected: true, error: nil))
         #expect(
-            !VideoTranscoder.shouldRetryInSoftware(hardware: false, inputRejected: false, error: unavailable))
+            !VideoEncoding.shouldRetryInSoftware(hardware: false, inputRejected: false, error: unavailable))
     }
 
     @Test func encoderSpecificationRequiresTheHardwareEncoder() {
-        let specification = VideoTranscoder.encoderSpecification()
+        let specification = VideoEncoding.encoderSpecification()
         #expect(
             specification[kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String]
                 as? Bool
@@ -206,6 +206,100 @@ import VideoToolbox
         let plan = VideoTranscoder.plan(info: info, limitBytes: Self.fiftyMB)
         #expect(plan.videoBitrate > 300_000)
         #expect(plan.width == 1920 && plan.height == 1080)
+    }
+
+    // MARK: - Mobile-friendly (H.264, up to 1080p)
+
+    @Test func mobileSizeCapsTheLongSideKeepingAspect() {
+        func size(_ w: Int, _ h: Int, _ cap: Int = 1920) -> [Int] {
+            let (width, height) = VideoTranscoder.mobileSize(
+                for: VideoInfo(width: w, height: h, fps: 30, duration: 1), maxLongSide: cap)
+            return [width, height]
+        }
+        #expect(size(6016, 3384) == [1920, 1080])
+        #expect(size(3840, 2160) == [1920, 1080])
+        #expect(size(1280, 720) == [1280, 720])
+        #expect(size(1080, 1920) == [1080, 1920])
+        #expect(size(2160, 3840) == [1080, 1920])
+        #expect(size(1281, 721) == [1280, 720])
+        // 2000×1001 → 1920×960.96: rounded to an even 960.
+        #expect(size(2000, 1001) == [1920, 960])
+        #expect(size(2000, 1001).allSatisfy { $0 % 2 == 0 })
+    }
+
+    @Test func h264PlanUsesTheCapAndFitsTheLimit() {
+        let info = VideoInfo(width: 6016, height: 3384, fps: 45, duration: 60, audioTrackCount: 0)
+        let plan = VideoTranscoder.plan(
+            info: info, limitBytes: Self.fiftyMB, maxLongSide: 1920, codec: .h264)
+        #expect(plan.codec == .h264)
+        #expect(plan.width == 1920 && plan.height == 1080)
+        // The bitrate budget is the same as for the uncapped plan: only the size changes.
+        let uncapped = VideoTranscoder.plan(info: info, limitBytes: Self.fiftyMB)
+        #expect(plan.videoBitrate == uncapped.videoBitrate)
+        #expect(uncapped.codec == .hevc)
+        let small = VideoTranscoder.plan(
+            info: VideoInfo(width: 1280, height: 720, fps: 30, duration: 60), limitBytes: Self.fiftyMB,
+            maxLongSide: 1920, codec: .h264)
+        #expect(small.width == 1280 && small.height == 720)
+    }
+
+    @Test func h264BitrateIsCappedForShortClips() {
+        let six = VideoInfo(width: 6016, height: 3384, fps: 45, duration: 10, audioTrackCount: 0)
+        let fast = VideoTranscoder.plan(info: six, limitBytes: Self.fiftyMB, maxLongSide: 1920, codec: .h264)
+        #expect(fast.width == 1920 && fast.height == 1080)
+        #expect(fast.videoBitrate == 16_000_000)
+        let thirty = VideoInfo(width: 6016, height: 3384, fps: 30, duration: 10, audioTrackCount: 0)
+        let slow = VideoTranscoder.plan(
+            info: thirty, limitBytes: Self.fiftyMB, maxLongSide: 1920, codec: .h264)
+        #expect(slow.videoBitrate == 12_000_000)
+        // HEVC keeps filling the limit.
+        let hevc = VideoTranscoder.plan(info: six, limitBytes: Self.fiftyMB)
+        #expect(hevc.videoBitrate > 30_000_000)
+        // A long recording is below the cap and unchanged.
+        let long = VideoInfo(width: 6016, height: 3384, fps: 45, duration: 60, audioTrackCount: 0)
+        let longH264 = VideoTranscoder.plan(
+            info: long, limitBytes: Self.fiftyMB, maxLongSide: 1920, codec: .h264)
+        #expect(
+            longH264.videoBitrate == VideoTranscoder.plan(info: long, limitBytes: Self.fiftyMB).videoBitrate)
+        // The cap is applied after the size is chosen, so it never forces a downscale step.
+        let sixty = VideoInfo(width: 1920, height: 1080, fps: 60, duration: 10, audioTrackCount: 0)
+        let kept = VideoTranscoder.plan(
+            info: sixty, limitBytes: Self.fiftyMB, allowDownscale: true, maxLongSide: 1920, codec: .h264)
+        #expect(kept.width == 1920 && kept.height == 1080)
+        #expect(kept.videoBitrate == 16_000_000)
+    }
+
+    @Test func h264BitrateCapScalesWithThePixelCount() {
+        #expect(VideoTranscoder.h264BitrateCap(width: 1920, height: 1080, fps: 30) == 12_000_000)
+        #expect(VideoTranscoder.h264BitrateCap(width: 1920, height: 1080, fps: 60) == 16_000_000)
+        #expect(VideoTranscoder.h264BitrateCap(width: 1280, height: 720, fps: 30) == 5_333_333)
+        #expect(VideoTranscoder.h264BitrateCap(width: 1080, height: 1920, fps: 30) == 12_000_000)
+        #expect(
+            VideoTranscoder.h264BitrateCap(width: 64, height: 36, fps: 30)
+                == VideoTranscoder.minimumVideoBitrate)
+    }
+
+    @Test func h264CompressionPropertiesUseHighProfile() {
+        let hardware = VideoEncoding.compressionProperties(
+            bitrate: 4_000_000, fps: 45, hardware: true, codec: .h264)
+        #expect(hardware[AVVideoProfileLevelKey] as? String == AVVideoProfileLevelH264HighAutoLevel)
+        #expect(hardware[AVVideoAllowFrameReorderingKey] as? Bool == false)
+        #expect(hardware[kVTCompressionPropertyKey_DataRateLimits as String] != nil)
+        let software = VideoEncoding.compressionProperties(
+            bitrate: 4_000_000, fps: 45, hardware: false, codec: .h264)
+        #expect(software[AVVideoProfileLevelKey] as? String == AVVideoProfileLevelH264HighAutoLevel)
+        #expect(software[kVTCompressionPropertyKey_DataRateLimits as String] == nil)
+        #expect(software[kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String] == nil)
+        let hevc = VideoEncoding.compressionProperties(bitrate: 4_000_000, fps: 45, hardware: true)
+        #expect(hevc[AVVideoProfileLevelKey] == nil)
+    }
+
+    @Test func throughputLineNamesTheCodecAndSize() {
+        let plan = TranscodePlan(
+            width: 1920, height: 1080, videoBitrate: 1, audioBitrate: 1, codec: .h264)
+        #expect(
+            VideoTranscoder.throughputLine(frames: 90, seconds: 3, plan: plan)
+                == "transcoded 90 frames in 3.0 s (30 fps), h264 1920×1080")
     }
 
     // MARK: - End to end
@@ -352,7 +446,7 @@ import VideoToolbox
         let output = dir.appending(path: "clip.telegram.mp4")
 
         _ = try await VideoTranscoder.transcode(input, plan: plan, output: output, hardwareEncoder: false) {
-            _ in
+            _ in /* progress not checked here */
         }
 
         let info = try await VideoInfo.read(output)
@@ -417,6 +511,57 @@ import VideoToolbox
             }
         }
     }
+
+    @Test(
+        .enabled("needs an H.264 encoder") { ClipMaker.h264Available() }, .timeLimit(.minutes(1)))
+    func transcodesToMobileFriendlyH264() async throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appending(path: "wide.mov")
+        try await ClipMaker.make(input, width: 640, height: 360, fps: 30, seconds: 1, audio: true)
+        let source = try await VideoInfo.read(input)
+        #expect(source.codec == kCMVideoCodecType_H264)
+        let plan = VideoTranscoder.plan(
+            info: source, limitBytes: Self.fiftyMB, maxLongSide: 320, codec: .h264)
+        #expect(plan.width == 320 && plan.height == 180)
+        let output = dir.appending(path: "wide.telegram.mp4")
+        let logged = AskedStrings()
+
+        _ = try await VideoTranscoder.transcode(input, plan: plan, output: output, log: { logged.add($0) }) {
+            _ in /* progress not checked here */
+        }
+
+        let info = try await VideoInfo.read(output)
+        #expect(info.codec == kCMVideoCodecType_H264)
+        #expect(max(info.width, info.height) <= 320)
+        #expect(info.width == 320 && info.height == 180)
+        #expect(abs(info.duration - source.duration) < 0.2)
+        #expect(info.audioTrackCount == 1)
+        #expect(try #require(logged.all.last).hasSuffix(", h264 320×180"))
+    }
+
+    @Test(
+        .enabled("needs H.264 and a software H.264 encoder") { ClipMaker.softwareH264Available() },
+        .timeLimit(.minutes(1)))
+    func softwareH264PathTranscodesWithoutCrashing() async throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appending(path: "clip.mov")
+        try await ClipMaker.make(input, width: 640, height: 480, fps: 30, seconds: 1)
+        let plan = TranscodePlan(
+            width: 320, height: 240, videoBitrate: 300_000, audioBitrate: 0, codec: .h264)
+        let output = dir.appending(path: "clip.telegram.mp4")
+
+        _ = try await VideoTranscoder.transcode(input, plan: plan, output: output, hardwareEncoder: false) {
+            _ in /* progress not checked here */
+        }
+
+        let info = try await VideoInfo.read(output)
+        #expect(info.codec == kCMVideoCodecType_H264)
+        #expect(info.width == 320 && info.height == 240)
+    }
 }
 
 /// Writes a short H.264 clip of solid frames (plus optional silent AAC audio, `audioTracks` tracks of it)
@@ -430,6 +575,19 @@ enum ClipMaker {
         canEncode(kCMVideoCodecType_H264) && canEncode(kCMVideoCodecType_HEVC)
     }
 
+    /// False on hosts without any HEVC encoder (hardware or software).
+    static func hevcAvailable() -> Bool {
+        canEncode(kCMVideoCodecType_HEVC)
+    }
+
+    /// False on hosts without Apple's software HEVC encoder.
+    static func softwareHEVCEncoderAvailable() -> Bool {
+        let software =
+            [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: false]
+            as CFDictionary
+        return canEncode(kCMVideoCodecType_HEVC, specification: software)
+    }
+
     /// False on hosts without an H.264 encoder for the source clip; tests that only read the clip skip there.
     static func h264Available() -> Bool {
         canEncode(kCMVideoCodecType_H264)
@@ -441,6 +599,14 @@ enum ClipMaker {
             [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: false]
             as CFDictionary
         return canEncode(kCMVideoCodecType_H264) && canEncode(kCMVideoCodecType_HEVC, specification: software)
+    }
+
+    /// False on hosts without a software H.264 encoder (the source clip is H.264 too).
+    static func softwareH264Available() -> Bool {
+        let software =
+            [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: false]
+            as CFDictionary
+        return canEncode(kCMVideoCodecType_H264) && canEncode(kCMVideoCodecType_H264, specification: software)
     }
 
     private static func canEncode(_ codec: CMVideoCodecType, specification: CFDictionary? = nil) -> Bool {

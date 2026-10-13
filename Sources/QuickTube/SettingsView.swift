@@ -48,6 +48,15 @@ struct SettingsView: View {
                     ForEach(RecordingQuality.frameRates, id: \.self) { Text("\($0) fps").tag($0) }
                 }
                 .pickerStyle(.segmented)
+                Picker("Bitrate", selection: $model.settings.quality.bitrate) {
+                    ForEach(RecordingQuality.Bitrate.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Text(
+                    "Native 6K at 60 fps: High ≈ 39 Mbit/s, Balanced ≈ 15, Compact ≈ 7 (the old built-in encoder "
+                        + "used ≈ 21). Still screens take less."
+                )
+                .font(.callout).foregroundStyle(.secondary)
                 Toggle("System audio", isOn: $model.settings.systemAudioEnabled)
                 Toggle("Microphone", isOn: $model.settings.microphoneEnabled)
                 Text(
@@ -74,7 +83,7 @@ struct SettingsView: View {
                 )
                 .font(.callout).foregroundStyle(.secondary)
                 Text(
-                    "Applies to the next recording. 1080p at 30 fps is about 12 MB per minute; native 6K at 60 fps about 55 MB."
+                    "Applies to the next recording. Balanced: up to about 8 MB per minute at 1080p 30 fps, 110 MB at native 6K 60 fps."
                 )
                 .font(.callout).foregroundStyle(.secondary)
             }
@@ -136,6 +145,7 @@ struct SettingsView: View {
                 )
                 .disabled(!model.settings.keystrokeOverlayEnabled)
                 Toggle("Show overlays in recording", isOn: $model.settings.overlaysInRecording)
+                Toggle("Hide the status pill from screen sharing", isOn: $model.settings.hudHiddenFromCapture)
                 Text(
                     "While recording, a ring marks each click and a pill above the status bar shows the last "
                         + "key combo. Keystrokes need Input Monitoring. \"Show only shortcuts\" leaves out plain "
@@ -225,10 +235,21 @@ struct SettingsView: View {
                     Spacer()
                     Text(model.telegramConfigured ? "Configured" : "Not set up").foregroundStyle(.secondary)
                 }
+                Toggle(
+                    "Mobile-friendly (H.264, up to 1080p) — needed for phones",
+                    isOn: $model.settings.telegramMobileFriendly)
+                Text(
+                    "Telegram's phone apps show a white screen for large HEVC recordings. On: every recording is "
+                        + "sent as H.264 at most 1920×1080 (frame rate kept), re-encoded unless it already is one."
+                )
+                .font(.callout).foregroundStyle(.secondary)
                 Toggle("Compress to fit the limit", isOn: $model.settings.telegramCompressToFit)
                 Toggle("Allow downscaling when compressing", isOn: $model.settings.telegramAllowDownscale)
-                Text("Off: compression only lowers video and audio quality, the frame size stays.")
-                    .font(.callout).foregroundStyle(.secondary)
+                Text(
+                    "With mobile-friendly off, compression only lowers video and audio quality and the frame "
+                        + "size stays unless downscaling is allowed. Mobile-friendly always caps it at 1080p."
+                )
+                .font(.callout).foregroundStyle(.secondary)
                 Stepper(
                     "Limit (MB): \(model.settings.telegramLimitMB)", value: $model.settings.telegramLimitMB,
                     in: 10...2000, step: 10)

@@ -13,6 +13,7 @@ import Testing
         #expect(!s.systemAudioEnabled && s.microphoneEnabled)
         #expect(s.historyEnabled)
         #expect(!s.clickHighlightEnabled && !s.keystrokeOverlayEnabled && s.overlaysInRecording)
+        #expect(s.hudHiddenFromCapture)
         #expect(s.keystrokeShortcutsOnly)
         #expect(s.trimTailSeconds == 1.0 && s.trimHeadSeconds == 0.0)
         #expect(s.titleTemplate == "{date}")
@@ -23,6 +24,7 @@ import Testing
         #expect(s.telegramCompressToFit && s.telegramLimitMB == 50)
         #expect(s.telegramLimitBytes == 50 << 20)
         #expect(!s.telegramAllowDownscale)
+        #expect(s.telegramMobileFriendly)
         #expect(s.vimeoPrivacy == .unlisted)
     }
 
@@ -55,6 +57,7 @@ import Testing
         s.keystrokeOverlayEnabled = true
         s.keystrokeShortcutsOnly = false
         s.overlaysInRecording = false
+        s.hudHiddenFromCapture = false
         s.trimTailSeconds = 2.5
         s.trimHeadSeconds = 0.5
         s.titleTemplate = "Demo {date}"
@@ -65,10 +68,11 @@ import Testing
         s.gifFPS = 15
         s.gifMaxWidth = 640
         s.gifMaxSeconds = 12
-        s.quality = RecordingQuality(resolution: .fullHD, fps: 30)
+        s.quality = RecordingQuality(resolution: .fullHD, fps: 30, bitrate: .compact)
         s.telegramCompressToFit = false
         s.telegramLimitMB = 2000
         s.telegramAllowDownscale = true
+        s.telegramMobileFriendly = false
         s.vimeoPrivacy = .nobody
         return s
     }
@@ -112,6 +116,22 @@ import Testing
         }
     }
 
+    @Test func storedQualityWithoutBitrateKeepsItsSizeAndGetsBalanced() {
+        withSuite { defaults in
+            let v2 = #"{"quality":{"resolution":"fullHD","fps":30},"microphoneEnabled":false}"#
+            defaults.set(Data(v2.utf8), forKey: AppSettings.storageKey)
+            let loaded = AppSettings.load(from: defaults)
+            #expect(loaded.quality == RecordingQuality(resolution: .fullHD, fps: 30, bitrate: .balanced))
+            #expect(!loaded.microphoneEnabled)
+        }
+        withSuite { defaults in
+            defaults.set(Data(#"{"resolution":"uhd4K","fps":60}"#.utf8), forKey: AppSettings.legacyQualityKey)
+            #expect(
+                AppSettings.load(from: defaults).quality
+                    == RecordingQuality(resolution: .uhd4K, fps: 60, bitrate: .balanced))
+        }
+    }
+
     @Test func loadWithNothingStoredGivesDefaults() {
         withSuite { defaults in
             #expect(AppSettings.load(from: defaults) == AppSettings())
@@ -151,6 +171,18 @@ import Testing
         let bad = try JSONDecoder().decode(
             AppSettings.self, from: Data(#"{"vimeoPrivacy":"password","gifFPS":12}"#.utf8))
         #expect(bad.vimeoPrivacy == .unlisted)
+        #expect(bad.gifFPS == 12)
+    }
+
+    @Test func telegramMobileFriendlyDecodesLeniently() throws {
+        let off = try JSONDecoder().decode(
+            AppSettings.self, from: Data(#"{"telegramMobileFriendly":false}"#.utf8))
+        #expect(!off.telegramMobileFriendly)
+        let missing = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"gifFPS":12}"#.utf8))
+        #expect(missing.telegramMobileFriendly)
+        let bad = try JSONDecoder().decode(
+            AppSettings.self, from: Data(#"{"telegramMobileFriendly":"yes","gifFPS":12}"#.utf8))
+        #expect(bad.telegramMobileFriendly)
         #expect(bad.gifFPS == 12)
     }
 

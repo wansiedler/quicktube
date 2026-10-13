@@ -90,6 +90,7 @@ final class AppModel {
             limitBytes: { AppSettings.load(from: .standard).telegramLimitBytes },
             compressToFit: { AppSettings.load(from: .standard).telegramCompressToFit },
             allowDownscale: { AppSettings.load(from: .standard).telegramAllowDownscale },
+            mobileFriendly: { AppSettings.load(from: .standard).telegramMobileFriendly },
             log: { DiagnosticsLog.append($0) })
         self.telegram = telegram
         let slack = SlackUploader(store: store, log: { DiagnosticsLog.append($0) })
@@ -301,6 +302,7 @@ final class AppModel {
     /// keystroke overlay also needs the Input Monitoring grant. Start and stop are idempotent.
     private func updateOverlays() {
         let settings = settings
+        hud?.hiddenFromCapture = settings.hudHiddenFromCapture
         let recording: Bool
         switch state.phase {
         case .recording, .paused: recording = true

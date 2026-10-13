@@ -64,14 +64,26 @@ channel instead of YouTube; the message link goes on the clipboard.
 3. QuickTube → Settings → Telegram: paste the token and the channel
    (`@name` for a public channel, or the `-100…` id for a private one) → Save.
 
+Telegram's phone apps cannot play a full-resolution recording (6016×3384
+HEVC shows a white screen; desktop plays it). So "Mobile-friendly (H.264, up
+to 1080p)" in Settings → Telegram is on by default: every recording is sent as
+H.264 High profile with the long side at most 1920 (1920×1080 for a 16:9
+screen, aspect kept, never upscaled, frame rate unchanged), even when it is
+under the size limit; a recording that already is H.264 at 1080p and 60 fps
+or less is sent as is. The bitrate fits the size limit but stays at most 12 Mbit/s (up to
+30 fps) or 16 Mbit/s (above), scaled down for smaller frames, so short clips
+are not inflated; the retry pass below still applies.
+Turn it off to get the behaviour described next (HEVC at full size,
+re-encoded only when over the limit).
+
 The Bot API accepts files up to 50 MB. Longer recordings are re-encoded into a
 temporary `<name>.telegram.mp4` that is sent and then deleted; the original
 stays on disk:
 
-- By default only the bitrate drops: the video is re-encoded to HEVC (hardware
-  encoder first, software fallback logged if it is unavailable), the frame size
-  and length are kept. Enable "Allow downscaling when compressing" in
-  Settings → Telegram to let it shrink the frame size too.
+- With mobile-friendly off, only the bitrate drops: the video is re-encoded to
+  HEVC (hardware encoder first, software fallback logged if it is
+  unavailable), the frame size and length are kept. Enable "Allow downscaling
+  when compressing" in Settings → Telegram to let it shrink the frame size too.
 - Audio is not degraded: a single track is copied untouched; microphone plus
   system audio are mixed into one 160 kbit/s AAC track.
 - If the encoder overshoots the limit, one retry pass re-encodes at a
@@ -147,6 +159,21 @@ modifiers).
   display under the cursor, a selected area (drag a rectangle; the pixel size
   is shown) or a selected window (click it). Esc cancels the chooser.
 - **Quality**: Native / 4K / 1080p at 30 or 60 fps, for the next recording.
+- **Bitrate** (Settings → Recording, also in the menu): QuickTube encodes the
+  capture itself (hardware HEVC) at width × height × fps × a per-preset bits per
+  pixel, clamped to 1–80 Mbit/s. Approximate video size per minute at 60 fps
+  (MB = 10⁶ bytes; 30 fps is half, down to the 1 Mbit/s floor ≈ 8 MB/min);
+  still screens take less:
+
+  | Preset | bits/pixel/frame | 6K (6016×3384) | 4K | 1080p |
+  | --- | --- | --- | --- | --- |
+  | High | 0.032 | ≈ 293 MB/min (39 Mbit/s) | ≈ 119 MB/min | ≈ 30 MB/min |
+  | Balanced (default) | 0.012 | ≈ 110 MB/min (15 Mbit/s) | ≈ 45 MB/min | ≈ 11 MB/min |
+  | Compact | 0.006 | ≈ 55 MB/min (7 Mbit/s) | ≈ 22 MB/min | ≈ 8 MB/min |
+
+  ScreenCaptureKit's built-in recording output, used before, wrote ≈ 21 Mbit/s
+  (≈ 158 MB/min) at 6K with no control. Audio adds ≈ 2 MB/min (system stereo
+  160 kbit/s and microphone 128 kbit/s, two separate AAC tracks).
 - **System audio** next to the microphone; QuickTube's own sounds are never
   recorded.
 - **Pause and resume**: each pause starts a new segment; on stop the segments
@@ -187,7 +214,7 @@ modifiers).
 
 ### Settings
 
-General (launch at login, updates) · Recording (capture, quality, frame rate,
+General (launch at login, updates) · Recording (capture, quality, frame rate, bitrate,
 system audio, microphone, pause, trimming, title template) · Camera · History ·
 Overlays · Files (cleanup) · GIF · Permissions · Google · Telegram · Google
 Drive · Slack · Vimeo · Shortcuts.
