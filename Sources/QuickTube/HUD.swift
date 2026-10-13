@@ -28,6 +28,8 @@ final class HUDController {
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = false
+        // Invisible to every screen capture (Zoom, Meet, QuickTime), not only to QuickTube's own.
+        panel.sharingType = .none
         panel.contentView = hosting
         observe()
     }

@@ -165,6 +165,8 @@ private final class OverlayPanel: NSPanel {
         acceptsMouseMovedEvents = true
         isReleasedWhenClosed = false
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // The chooser never belongs in anyone's capture.
+        sharingType = .none
         contentView = view
     }
 
