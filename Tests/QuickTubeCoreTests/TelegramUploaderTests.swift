@@ -1,3 +1,4 @@
+import CoreMedia
 import Foundation
 import QuickTubeCore
 import Testing
@@ -6,12 +7,40 @@ extension NetworkSuite {
     @Suite struct TelegramUploaderTests {
         let store = InMemorySecretStore()
 
-        func makeUploader(maxBytes: Int = TelegramUploader.botAPILimit) -> TelegramUploader {
+        func makeUploader(
+            limitBytes: Int = TelegramUploader.botAPILimit,
+            compressToFit: Bool = true,
+            allowDownscale: Bool = false,
+            mobileFriendly: Bool = false,
+            videoInfo: @escaping @Sendable (URL) async throws -> VideoInfo = {
+                _ in throw VideoInfo.ReadError.noVideoTrack
+            },
+            transcode: @escaping TelegramUploader.Transcode = { _, _, _, _ in
+                Issue.record("transcode must not run")
+                throw TranscodeError.failed("unexpected")
+            }
+        ) -> TelegramUploader {
             StubURLProtocol.reset()
             return TelegramUploader(
                 store: store, session: StubURLProtocol.makeSession(),
-                baseURL: URL(string: "https://tg.example")!, maxBytes: maxBytes)
+                baseURL: URL(string: "https://tg.example")!, limitBytes: { limitBytes },
+                compressToFit: { compressToFit }, allowDownscale: { allowDownscale },
+                mobileFriendly: { mobileFriendly }, videoInfo: videoInfo,
+                transcode: transcode)
         }
+
+        /// A transcode stub that writes `bytes` bytes of 0xEE to the requested output.
+        func fakeTranscode(bytes: Int, calls: TranscodeCalls) -> TelegramUploader.Transcode {
+            { input, plan, output, progress in
+                calls.add(input: input, plan: plan, output: output)
+                try Data(repeating: 0xEE, count: bytes).write(to: output)
+                progress(0.5)
+                progress(1)
+                return output
+            }
+        }
+
+        static let info = VideoInfo(width: 2560, height: 1440, fps: 60, duration: 60)
 
         func makeFile(bytes: Int) throws -> URL {
             let url = FileManager.default.temporaryDirectory.appending(path: "tg-\(UUID().uuidString).mp4")
@@ -49,6 +78,87 @@ extension NetworkSuite {
             #expect((request.httpBody ?? Data()).count > 16)
         }
 
+        @Test func redactReplacesTheBotTokenInURLs() {
+            let text =
+                "NSErrorFailingURLStringKey=https://api.telegram.org/bot123456789:AAH-x_Yz09/sendVideo, code -1009"
+            let redacted = TelegramUploader.redact(text)
+            #expect(redacted.contains("https://api.telegram.org/bot<redacted>/sendVideo"))
+            #expect(!redacted.contains("123456789"))
+            #expect(!redacted.contains("AAH-x_Yz09"))
+            #expect(TelegramUploader.redact("plain text, no token") == "plain text, no token")
+        }
+
+        @MainActor @Test func transportFailureDoesNotLeakTheToken() async throws {
+            let token = "987654321:SECRET-token_value"
+            let uploader = makeUploader()
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: token, chat: "@c"))
+            let file = try makeFile(bytes: 16)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue { request in
+                let url = request.url!
+                return .init(
+                    status: 0,
+                    error: URLError(
+                        .notConnectedToInternet,
+                        userInfo: [
+                            NSURLErrorFailingURLErrorKey: url,
+                            NSURLErrorFailingURLStringErrorKey: url.absoluteString,
+                        ]))
+            }
+
+            var thrown: Error?
+            do {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            } catch {
+                thrown = error
+            }
+            let error = try #require(thrown)
+            guard case TelegramError.network = error else {
+                Issue.record("expected TelegramError.network, got \(error)")
+                return
+            }
+            #expect(!"\(error)".contains("SECRET"))
+            #expect(!String(describing: error).contains("987654321"))
+            let message = AppState.message(for: error, stage: .upload)
+            #expect(message.hasPrefix("Could not reach Telegram: "))
+            #expect(!message.contains("SECRET"))
+        }
+
+        @MainActor @Test func fallbackMessageRedactsTokens() {
+            let url = URL(string: "https://api.telegram.org/bot1:abc_DEF/sendVideo")!
+            let error = URLError(
+                .timedOut, userInfo: [NSURLErrorFailingURLStringErrorKey: url.absoluteString])
+            let message = AppState.message(for: error, stage: .upload)
+            #expect(message.hasPrefix("Upload failed: "))
+            #expect(!message.contains("abc_DEF"))
+        }
+
+        @Test func captionCarriesTheMetadataLine() async throws {
+            let uploader = makeUploader(videoInfo: { _ in
+                VideoInfo(width: 2560, height: 1440, fps: 60, duration: 3)
+            })
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 3 * 1_048_576)
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            _ = try await uploader.upload(
+                file: file, title: "Demo", context: UploadContext(display: "Studio Display")
+            ) { _ in }
+            let body = String(decoding: StubURLProtocol.requests[0].httpBody ?? Data(), as: UTF8.self)
+            #expect(
+                body.contains(
+                    "name=\"caption\"\r\n\r\nDemo\nStudio Display · 2560×1440 · 60 fps · 3 MB\r\n"))
+        }
+
+        @Test func unreadableVideoKeepsPlainTitleCaption() async throws {
+            let uploader = makeUploader()
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 4)
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            _ = try await uploader.upload(file: file, title: "Demo") { _ in }
+            let body = String(decoding: StubURLProtocol.requests[0].httpBody ?? Data(), as: UTF8.self)
+            #expect(body.contains("name=\"caption\"\r\n\r\nDemo\r\n"))
+        }
+
         @Test func privateChannelLinksById() async throws {
             let uploader = makeUploader()
             try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "-1001234567890"))
@@ -57,6 +167,15 @@ extension NetworkSuite {
                 .init(status: 200, body: reply(username: nil, id: -1_001_234_567_890, messageID: 7)))
             let result = try await uploader.upload(file: file, title: "T") { _ in }
             #expect(result.link == URL(string: "https://t.me/c/1234567890/7"))
+        }
+
+        @Test func privateChatUsesDeepLink() async throws {
+            let uploader = makeUploader()
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "4242"))
+            let file = try makeFile(bytes: 4)
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "alex", id: 4242, messageID: 9)))
+            let result = try await uploader.upload(file: file, title: "T") { _ in }
+            #expect(result.link == URL(string: "tg://openmessage?user_id=4242&message_id=9"))
         }
 
         @Test func missingConfigurationIsReported() async throws {
@@ -68,11 +187,370 @@ extension NetworkSuite {
             #expect(StubURLProtocol.requests.isEmpty)
         }
 
-        @Test func oversizedFileIsRejectedBeforeSending() async throws {
-            let uploader = makeUploader(maxBytes: 10)
+        @Test func oversizedFileIsRejectedWhenCompressionIsOff() async throws {
+            let uploader = makeUploader(limitBytes: 10, compressToFit: false)
             try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
             let file = try makeFile(bytes: 11)
             await #expect(throws: TelegramError.fileTooLarge(limit: 10, actual: 11)) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+            #expect(StubURLProtocol.requests.isEmpty)
+        }
+
+        @Test func downscaleSettingIsPassedToThePlan() async throws {
+            let calls = TranscodeCalls()
+            let uploader = makeUploader(
+                limitBytes: 100, allowDownscale: true, videoInfo: { _ in Self.info },
+                transcode: fakeTranscode(bytes: 60, calls: calls))
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 200)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+
+            _ = try await uploader.upload(file: file, title: "T") { _ in }
+
+            let call = try #require(calls.all.first)
+            #expect(call.plan == VideoTranscoder.plan(info: Self.info, limitBytes: 100, allowDownscale: true))
+            #expect(call.plan != VideoTranscoder.plan(info: Self.info, limitBytes: 100))
+        }
+
+        @Test func oversizedFileIsTranscodedAndTheCopySent() async throws {
+            let calls = TranscodeCalls()
+            let uploader = makeUploader(
+                limitBytes: 100, videoInfo: { _ in Self.info },
+                transcode: fakeTranscode(bytes: 60, calls: calls))
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 200)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            let seen = ProgressLog()
+
+            _ = try await uploader.upload(file: file, title: "T") { seen.add($0) }
+
+            let call = try #require(calls.all.first)
+            #expect(calls.all.count == 1)
+            #expect(call.input == file)
+            #expect(call.plan == VideoTranscoder.plan(info: Self.info, limitBytes: 100))
+            let stem = file.deletingPathExtension().lastPathComponent
+            #expect(call.output.lastPathComponent == "\(stem).telegram.mp4")
+            #expect(call.output.deletingLastPathComponent() == file.deletingLastPathComponent())
+            let body = StubURLProtocol.requests[0].httpBody ?? Data()
+            #expect(String(decoding: body, as: UTF8.self).contains("filename=\"\(stem).telegram.mp4\""))
+            #expect(body.contains(Data(repeating: 0xEE, count: 60)))
+            #expect(!body.contains(Data(repeating: 0xCD, count: 200)))
+            #expect(!FileManager.default.fileExists(atPath: call.output.path))
+            #expect(FileManager.default.fileExists(atPath: file.path))
+            #expect(seen.values == [0, 0.5, 1, 0, 1])
+        }
+
+        @Test func directUploadSendsDimensionsOfTheOriginal() async throws {
+            let asked = AskedURLs()
+            let uploader = makeUploader(
+                limitBytes: 100,
+                videoInfo: { url in
+                    asked.add(url)
+                    return VideoInfo(width: 2560, height: 1440, fps: 60, duration: 12.6)
+                })
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 50)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+
+            _ = try await uploader.upload(file: file, title: "T") { _ in }
+
+            let body = String(decoding: StubURLProtocol.requests[0].httpBody ?? Data(), as: UTF8.self)
+            #expect(body.contains("name=\"width\"\r\n\r\n2560\r\n"))
+            #expect(body.contains("name=\"height\"\r\n\r\n1440\r\n"))
+            #expect(body.contains("name=\"duration\"\r\n\r\n13\r\n"))
+            #expect(asked.all == [file])
+        }
+
+        @Test func transcodingReportsCompressingThenUploading() async throws {
+            let statuses = AskedStrings()
+            let uploader = makeUploader(
+                limitBytes: 100 << 20,
+                videoInfo: { _ in VideoInfo(width: 2560, height: 1440, fps: 60, duration: 60) },
+                transcode: fakeTranscode(bytes: 60, calls: TranscodeCalls()))
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 200 << 20)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+
+            _ = try await uploader.upload(
+                file: file, title: "T", context: UploadContext(onStatus: { statuses.add($0) })
+            ) { _ in }
+
+            let all = statuses.all
+            #expect(all.count == 2)
+            #expect(all[0].hasPrefix("Compressing · 2560×1440 60 fps 200 MB → "))
+            #expect(all[0].hasSuffix(" fps ~100 MB"))
+            #expect(all.last == "Uploading")
+        }
+
+        @Test func plainUploadReportsOnlyUploading() async throws {
+            let statuses = AskedStrings()
+            let uploader = makeUploader()
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 4)
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            _ = try await uploader.upload(
+                file: file, title: "T", context: UploadContext(onStatus: { statuses.add($0) })
+            ) { _ in }
+            #expect(statuses.all == ["Uploading"])
+        }
+
+        @Test func transcodedUploadSendsDimensionsOfTheTranscodedCopy() async throws {
+            let asked = AskedURLs()
+            let calls = TranscodeCalls()
+            let original = VideoInfo(width: 2560, height: 1440, fps: 60, duration: 60)
+            let uploader = makeUploader(
+                limitBytes: 100,
+                videoInfo: { url in
+                    asked.add(url)
+                    return url.lastPathComponent.hasSuffix(".telegram.mp4")
+                        ? VideoInfo(width: 1280, height: 720, fps: 30, duration: 59.6) : original
+                },
+                transcode: fakeTranscode(bytes: 60, calls: calls))
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 200)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+
+            _ = try await uploader.upload(
+                file: file, title: "T", context: UploadContext(display: "Display")
+            ) { _ in }
+
+            let output = try #require(calls.all.first).output
+            #expect(asked.all == [file, output])
+            let body = String(decoding: StubURLProtocol.requests[0].httpBody ?? Data(), as: UTF8.self)
+            #expect(body.contains("name=\"width\"\r\n\r\n1280\r\n"))
+            #expect(body.contains("name=\"height\"\r\n\r\n720\r\n"))
+            #expect(body.contains("name=\"duration\"\r\n\r\n60\r\n"))
+            // The caption still describes the original recording.
+            #expect(body.contains("Display · 2560×1440 · 60 fps"))
+        }
+
+        @Test func unreadableVideoOmitsDimensions() async throws {
+            let uploader = makeUploader()
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 4)
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            _ = try await uploader.upload(file: file, title: "T") { _ in }
+            let body = String(decoding: StubURLProtocol.requests[0].httpBody ?? Data(), as: UTF8.self)
+            #expect(!body.contains("name=\"width\""))
+        }
+
+        @Test func fileUnderTheLimitIsNotTranscoded() async throws {
+            let uploader = makeUploader(limitBytes: 100, videoInfo: { _ in Self.info })
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 100)
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            _ = try await uploader.upload(file: file, title: "T") { _ in }
+            let body = StubURLProtocol.requests[0].httpBody ?? Data()
+            #expect(body.contains(Data(repeating: 0xCD, count: 100)))
+        }
+
+        @Test func transcodedFileStillTooLargeIsRejected() async throws {
+            let calls = TranscodeCalls()
+            let uploader = makeUploader(
+                limitBytes: 100, videoInfo: { _ in Self.info },
+                transcode: fakeTranscode(bytes: 150, calls: calls))
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 200)
+            await #expect(throws: TelegramError.fileTooLarge(limit: 100, actual: 150)) {
+                _ = try await uploader.upload(file: file, title: "T") { _ in }
+            }
+            #expect(StubURLProtocol.requests.isEmpty)
+            #expect(calls.all.count == 2)
+            let output = try #require(calls.all.first?.output)
+            #expect(!FileManager.default.fileExists(atPath: output.path))
+        }
+
+        @Test func oversizedTranscodeIsRetriedOnceAtALowerBitrate() async throws {
+            let calls = TranscodeCalls()
+            let info = VideoInfo(width: 6016, height: 3384, fps: 60, duration: 10)
+            let statuses = AskedStrings()
+            let seen = ProgressLog()
+            let limit = 10 << 20
+            let uploader = makeUploader(
+                limitBytes: limit, videoInfo: { _ in info },
+                transcode: { input, plan, output, progress in
+                    calls.add(input: input, plan: plan, output: output)
+                    let bytes = calls.all.count == 1 ? 13 << 20 : 9 << 20
+                    try Data(repeating: 0xEE, count: bytes).write(to: output)
+                    progress(1)
+                    return output
+                })
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 20 * 1_048_576)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+
+            _ = try await uploader.upload(
+                file: file, title: "T", context: UploadContext(onStatus: { statuses.add($0) })
+            ) { seen.add($0) }
+
+            let all = calls.all
+            #expect(all.count == 2)
+            let first = all[0].plan
+            let second = all[1].plan
+            #expect(second.videoBitrate < first.videoBitrate)
+            #expect(
+                second == TelegramUploader.retryPlan(after: first, actualBytes: 13 << 20, limitBytes: limit))
+            #expect(second.width == first.width && second.audioBitrate == first.audioBitrate)
+            #expect(statuses.all.count == 3)
+            #expect(statuses.all[0].hasPrefix("Compressing · "))
+            #expect(statuses.all[1].hasPrefix("Compressing again · "))
+            #expect(statuses.all.last == "Uploading")
+            #expect(seen.values.prefix(4) == [0, 1, 0, 1])
+            #expect(StubURLProtocol.requests.count == 1)
+        }
+
+        @Test func retryPlanScalesTheVideoBitrateAndKeepsTheFloor() {
+            let plan = TranscodePlan(
+                width: 6016, height: 3384, videoBitrate: 2_690_000, audioBitrate: 160_000)
+            let retry = TelegramUploader.retryPlan(after: plan, actualBytes: 66 << 20, limitBytes: 50 << 20)
+            #expect(retry.videoBitrate == Int(2_690_000.0 * 50 / 66 * 0.9))
+            #expect(retry.width == 6016 && retry.height == 3384 && retry.audioBitrate == 160_000)
+            let tiny = TranscodePlan(width: 640, height: 360, videoBitrate: 160_000, audioBitrate: 0)
+            #expect(
+                TelegramUploader.retryPlan(after: tiny, actualBytes: 1000, limitBytes: 100).videoBitrate
+                    == VideoTranscoder.minimumVideoBitrate)
+        }
+
+        // MARK: - Mobile-friendly
+
+        static let hevc4K = VideoInfo(
+            width: 6016, height: 3384, fps: 45, duration: 60, codec: kCMVideoCodecType_HEVC)
+        static let h264HD = VideoInfo(
+            width: 1920, height: 1080, fps: 45, duration: 60, codec: kCMVideoCodecType_H264)
+
+        @Test func shouldTranscodeMatrix() {
+            func should(_ info: VideoInfo?, size: Int, mobile: Bool) -> Bool {
+                TelegramUploader.shouldTranscode(info: info, size: size, limit: 100, mobileFriendly: mobile)
+            }
+            #expect(!should(Self.h264HD, size: 50, mobile: true))
+            #expect(should(Self.hevc4K, size: 50, mobile: true))
+            #expect(!should(Self.hevc4K, size: 50, mobile: false))
+            #expect(should(Self.h264HD, size: 150, mobile: true))
+            #expect(should(Self.h264HD, size: 150, mobile: false))
+            #expect(should(Self.hevc4K, size: 150, mobile: false))
+            // H.264 but above 1080p, and an unknown codec, are not phone-safe.
+            let h264Big = VideoInfo(
+                width: 3840, height: 2160, fps: 30, duration: 1, codec: kCMVideoCodecType_H264)
+            #expect(should(h264Big, size: 50, mobile: true))
+            #expect(should(VideoInfo(width: 1280, height: 720, fps: 30, duration: 1), size: 50, mobile: true))
+            let portrait = VideoInfo(
+                width: 1080, height: 1920, fps: 30, duration: 1, codec: kCMVideoCodecType_H264)
+            #expect(!should(portrait, size: 50, mobile: true))
+            // 1080p H.264 above 60 fps is not phone-safe either.
+            let fast = VideoInfo(
+                width: 1920, height: 1080, fps: 120, duration: 1, codec: kCMVideoCodecType_H264)
+            #expect(should(fast, size: 50, mobile: true))
+            // Nothing is known about an unreadable file: only the size decides.
+            #expect(!should(nil, size: 50, mobile: true))
+            #expect(should(nil, size: 150, mobile: true))
+        }
+
+        @Test func mobileFriendlyTranscodesASmallHEVCRecordingToH264() async throws {
+            let calls = TranscodeCalls()
+            let statuses = AskedStrings()
+            let uploader = makeUploader(
+                limitBytes: 50 << 20, mobileFriendly: true, videoInfo: { _ in Self.hevc4K },
+                transcode: fakeTranscode(bytes: 1_048_576, calls: calls))
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 3 * 1_048_576)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+
+            _ = try await uploader.upload(
+                file: file, title: "T",
+                context: UploadContext(display: "Display", onStatus: { statuses.add($0) })
+            ) { _ in /* progress not checked here */ }
+
+            let call = try #require(calls.all.first)
+            #expect(calls.all.count == 1)
+            #expect(call.plan.codec == .h264)
+            #expect(call.plan.width == 1920 && call.plan.height == 1080)
+            #expect(
+                call.plan
+                    == VideoTranscoder.plan(
+                        info: Self.hevc4K, limitBytes: 50 << 20, maxLongSide: 1920, codec: .h264))
+            #expect(statuses.all.first?.hasPrefix("Compressing · 6016×3384 45 fps ") == true)
+            // The HUD announces the capped plan's estimate (about 48 MB here), not the limit.
+            let target = TelegramUploader.targetBytes(for: call.plan, duration: 60, limit: 50 << 20)
+            #expect(target < 50 << 20)
+            #expect(
+                statuses.all.first?.hasSuffix(
+                    "→ 1920×1080 45 fps ~\(RecordingNaming.megabytes(target)) MB") == true)
+            let body = StubURLProtocol.requests[0].httpBody ?? Data()
+            #expect(body.contains(Data(repeating: 0xEE, count: 1_048_576)))
+            // The caption describes the recording and the size actually sent.
+            #expect(
+                String(decoding: body, as: UTF8.self).contains(
+                    "T\nDisplay · 6016×3384 · 45 fps · 3 MB → 1 MB\r\n"))
+        }
+
+        @Test func targetBytesIsTheH264EstimateAndTheLimitForHEVC() {
+            let h264 = TranscodePlan(
+                width: 1920, height: 1080, videoBitrate: 16_000_000, audioBitrate: 160_000, codec: .h264)
+            #expect(TelegramUploader.targetBytes(for: h264, duration: 10, limit: 50 << 20) == 20_200_000)
+            #expect(TelegramUploader.targetBytes(for: h264, duration: 600, limit: 50 << 20) == 50 << 20)
+            let hevc = TranscodePlan(width: 1920, height: 1080, videoBitrate: 1_000_000, audioBitrate: 0)
+            #expect(TelegramUploader.targetBytes(for: hevc, duration: 10, limit: 50 << 20) == 50 << 20)
+        }
+
+        @Test func mobileFriendlySendsAnAlreadySafeH264AsIs() async throws {
+            let uploader = makeUploader(
+                limitBytes: 100, mobileFriendly: true, videoInfo: { _ in Self.h264HD })
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 100)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            _ = try await uploader.upload(file: file, title: "T") { _ in /* progress not checked here */ }
+            let body = StubURLProtocol.requests[0].httpBody ?? Data()
+            #expect(body.contains(Data(repeating: 0xCD, count: 100)))
+        }
+
+        @Test func mobileFriendlyOffLeavesASmallHEVCRecordingAlone() async throws {
+            let uploader = makeUploader(
+                limitBytes: 100, mobileFriendly: false, videoInfo: { _ in Self.hevc4K })
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 100)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+            _ = try await uploader.upload(file: file, title: "T") { _ in /* progress not checked here */ }
+            let body = StubURLProtocol.requests[0].httpBody ?? Data()
+            #expect(body.contains(Data(repeating: 0xCD, count: 100)))
+        }
+
+        @Test func mobileFriendlyRetryKeepsH264() async throws {
+            let calls = TranscodeCalls()
+            let limit = 10 * 1_048_576
+            let uploader = makeUploader(
+                limitBytes: limit, mobileFriendly: true, videoInfo: { _ in Self.hevc4K },
+                transcode: { input, plan, output, progress in
+                    calls.add(input: input, plan: plan, output: output)
+                    let bytes = (calls.all.count == 1 ? 13 : 9) * 1_048_576
+                    try Data(repeating: 0xEE, count: bytes).write(to: output)
+                    return output
+                })
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 20 * 1_048_576)
+            defer { try? FileManager.default.removeItem(at: file) }
+            StubURLProtocol.enqueue(.init(status: 200, body: reply(username: "c", id: -1001, messageID: 1)))
+
+            _ = try await uploader.upload(file: file, title: "T") { _ in /* progress not checked here */ }
+
+            #expect(calls.all.map(\.plan.codec) == [.h264, .h264])
+            #expect(calls.all.map(\.plan.width) == [1920, 1920])
+        }
+
+        @Test func oversizedUnreadableVideoCannotBeTranscoded() async throws {
+            let uploader = makeUploader(limitBytes: 100)
+            try await uploader.setConfiguration(TelegramConfiguration(botToken: "t", chat: "@c"))
+            let file = try makeFile(bytes: 200)
+            await #expect(throws: TranscodeError.cannotRead) {
                 _ = try await uploader.upload(file: file, title: "T") { _ in }
             }
             #expect(StubURLProtocol.requests.isEmpty)
@@ -100,4 +578,32 @@ extension NetworkSuite {
             #expect(try await uploader.configuration() == nil)
         }
     }
+}
+
+final class TranscodeCalls: @unchecked Sendable {
+    struct Call {
+        let input: URL
+        let plan: TranscodePlan
+        let output: URL
+    }
+    private let lock = NSLock()
+    private var stored: [Call] = []
+    var all: [Call] { lock.withLock { stored } }
+    func add(input: URL, plan: TranscodePlan, output: URL) {
+        lock.withLock { stored.append(Call(input: input, plan: plan, output: output)) }
+    }
+}
+
+final class AskedURLs: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [URL] = []
+    var all: [URL] { lock.withLock { stored } }
+    func add(_ url: URL) { lock.withLock { stored.append(url) } }
+}
+
+final class AskedStrings: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+    func add(_ value: String) { lock.withLock { stored.append(value) } }
+    var all: [String] { lock.withLock { stored } }
 }

@@ -3,7 +3,7 @@ import QuickTubeCore
 import SwiftUI
 
 /// Small always-on-top status pill at the bottom of the screen under the cursor.
-/// It never takes focus, and the recorder excludes QuickTube's own windows from capture.
+/// It never takes focus, and the recorder excludes it from capture by `windowNumber`.
 @MainActor
 final class HUDController {
     private let state: AppState
@@ -18,7 +18,8 @@ final class HUDController {
             contentRect: NSRect(x: 0, y: 0, width: 320, height: 44),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
-            defer: true)
+            // Not deferred: the window exists (and has a number to exclude) before it is first shown.
+            defer: false)
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
@@ -27,14 +28,27 @@ final class HUDController {
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = false
+        panel.sharingType = .none
         panel.contentView = hosting
         observe()
+    }
+
+    /// Invisible to every screen capture (Zoom, Meet, QuickTime) when on; the recorder excludes the
+    /// panel by window ID either way, so QuickTube's own recording never shows it.
+    var hiddenFromCapture: Bool = true {
+        didSet { panel.sharingType = hiddenFromCapture ? .none : .readOnly }
+    }
+
+    /// The panel's window-server ID, for the recorder's exclusion list.
+    var windowNumber: CGWindowID? {
+        panel.windowNumber > 0 ? CGWindowID(panel.windowNumber) : nil
     }
 
     /// Re-arms after every change: `withObservationTracking` fires once per mutation.
     private func observe() {
         withObservationTracking {
             _ = state.phase
+            _ = state.uploadStage
         } onChange: { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
@@ -50,7 +64,7 @@ final class HUDController {
         switch state.phase {
         case .idle:
             panel.orderOut(nil)
-        case .recording, .uploading:
+        case .recording, .paused, .uploading:
             show()
         case .done:
             show()
@@ -68,7 +82,14 @@ final class HUDController {
         let visible = screen.visibleFrame
         // Errors get the whole screen width so the server's message is readable.
         let maxWidth: CGFloat
-        if case .failed = state.phase { maxWidth = visible.width - 48 } else { maxWidth = 480 }
+        if case .failed = state.phase {
+            maxWidth = visible.width - 48
+        } else if case .uploading = state.phase, state.uploadStage.contains(" · ") {
+            // Compression details (before → after) need room.
+            maxWidth = visible.width - 48
+        } else {
+            maxWidth = 480
+        }
         hosting.rootView = HUDView(state: state, maxWidth: maxWidth)
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
@@ -89,7 +110,6 @@ final class HUDController {
 struct HUDView: View {
     let state: AppState
     let maxWidth: CGFloat
-    @State private var recordingStart = Date()
 
     var body: some View {
         HStack(spacing: 10) {
@@ -98,18 +118,29 @@ struct HUDView: View {
                 EmptyView()
             case .recording:
                 Circle().fill(Color.red).frame(width: 10, height: 10)
-                TimelineView(.periodic(from: recordingStart, by: 1)) { context in
-                    Text("Recording \(elapsed(since: recordingStart, now: context.date))")
-                        .monospacedDigit()
+                TimelineView(.periodic(from: Date(), by: 1)) { context in
+                    reserving("Recording 888:88") {
+                        Text("Recording \(clock(state.recordedDuration(at: context.date)))")
+                    }
                 }
-                .onAppear { recordingStart = Date() }
+            case .paused:
+                // The timer stands still: no TimelineView, the recorded time does not grow while paused.
+                reserving("Paused ⏸ 888:88") {
+                    Text("Paused ⏸ \(clock(state.recordedDuration(at: Date())))")
+                }
             case .uploading(let progress):
                 ProgressView(value: progress).frame(width: 120)
-                Text("Uploading \(Int(progress * 100))%").monospacedDigit()
+                Text(AppState.uploadText(stage: state.uploadStage, progress: progress)).monospacedDigit()
             case .done(let link):
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                Text("Link copied · \(link.host ?? "")\(link.path)")
-                    .onTapGesture { NSWorkspace.shared.open(link) }
+                Text(AppState.doneText(link: link, destination: state.destination))
+                    .onTapGesture {
+                        if link.isFileURL {
+                            NSWorkspace.shared.activateFileViewerSelecting([link])
+                        } else {
+                            NSWorkspace.shared.open(link)
+                        }
+                    }
             case .failed(let message, _):
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
                 Text(message).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
@@ -124,8 +155,17 @@ struct HUDView: View {
         .padding(6)
     }
 
-    private func elapsed(since start: Date, now: Date) -> String {
-        let seconds = max(0, Int(now.timeIntervalSince(start)))
+    /// The panel is sized once when shown; the clock grows later ("9:59" → "10:00"), so the
+    /// label reserves the width of the widest value it can reach instead of truncating.
+    private func reserving(_ widest: String, @ViewBuilder _ label: () -> Text) -> some View {
+        ZStack(alignment: .leading) {
+            Text(widest).monospacedDigit().hidden()
+            label().monospacedDigit()
+        }
+    }
+
+    private func clock(_ duration: TimeInterval) -> String {
+        let seconds = max(0, Int(duration))
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 }

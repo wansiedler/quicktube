@@ -8,12 +8,23 @@ let package = Package(
         .library(name: "QuickTubeCore", targets: ["QuickTubeCore"]),
         .executable(name: "QuickTube", targets: ["QuickTube"]),
     ],
+    dependencies: [
+        // Auto-updates for the app only; QuickTubeCore stays dependency-free.
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.7.0")
+    ],
     targets: [
         .target(name: "QuickTubeCore"),
         .executableTarget(
             name: "QuickTube",
-            dependencies: ["QuickTubeCore"],
-            exclude: ["Info.plist"]),
+            dependencies: [
+                "QuickTubeCore",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
+            exclude: ["Info.plist"],
+            // `make app` puts Sparkle.framework in Contents/Frameworks.
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])
+            ]),
         .testTarget(name: "QuickTubeCoreTests", dependencies: ["QuickTubeCore"]),
     ]
 )

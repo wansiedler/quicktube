@@ -8,6 +8,8 @@ final class StubURLProtocol: URLProtocol {
         var status: Int
         var headers: [String: String] = [:]
         var body: Data = Data()
+        /// When set, the request fails with this error instead of answering.
+        var error: URLError?
     }
 
     private static let lock = NSLock()
@@ -17,6 +19,7 @@ final class StubURLProtocol: URLProtocol {
     static var requests: [URLRequest] { lock.withLock { recorded } }
 
     static func makeSession() -> URLSession {
+        _ = CrashBacktrace.installed
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
         return URLSession(configuration: configuration)
@@ -55,6 +58,10 @@ final class StubURLProtocol: URLProtocol {
             return
         }
         let response = handler(request)
+        if let error = response.error {
+            client?.urlProtocol(self, didFailWithError: error)
+            return
+        }
         let http = HTTPURLResponse(
             url: request.url!, statusCode: response.status, httpVersion: "HTTP/1.1",
             headerFields: response.headers)!

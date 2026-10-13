@@ -5,24 +5,75 @@ import Testing
 final class FakeRecorder: ScreenRecorder, @unchecked Sendable {
     var startError: Error?
     var stopError: Error?
-    var file = URL(fileURLWithPath: "/tmp/rec.mp4")
+    var pauseError: Error?
+    var resumeError: Error?
+    /// What stop() returns; defaults to the single `file`.
+    var segments: [URL]?
+    /// A real empty file in a private temp directory, removed with the fake.
+    let directory = FileManager.default.temporaryDirectory.appending(path: "qt-rec-\(UUID().uuidString)")
+    var file: URL
+
+    init() {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        file = directory.appending(path: "rec.mp4")
+        FileManager.default.createFile(atPath: file.path, contents: Data([0]))
+    }
+
+    deinit {
+        // A test may have made the directory read-only.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+        try? FileManager.default.removeItem(at: directory)
+    }
     var starts = 0
     var stops = 0
+    var pauses = 0
+    var resumes = 0
+    var targets: [CaptureTarget] = []
     /// While true, start() and stop() suspend after counting the call.
     var hold = false
 
-    func start() async throws {
+    func start(target: CaptureTarget) async throws {
         starts += 1
+        targets.append(target)
         while hold { await Task.yield() }
         if let startError { throw startError }
     }
 
-    func stop() async throws -> URL {
+    func pause() async throws {
+        pauses += 1
+        if let pauseError { throw pauseError }
+    }
+
+    func resume() async throws {
+        resumes += 1
+        if let resumeError { throw resumeError }
+    }
+
+    func stop() async throws -> [URL] {
         stops += 1
         while hold { await Task.yield() }
         if let stopError { throw stopError }
-        return file
+        return segments ?? [file]
     }
+}
+
+final class FakeFinisher: RecordingFinishing, @unchecked Sendable {
+    var error: Error?
+    var calls: [(segments: [URL], trim: TrimSettings, output: URL)] = []
+
+    func finish(segments: [URL], trim: TrimSettings, output: URL) async throws -> URL {
+        calls.append((segments, trim, output))
+        if let error { throw error }
+        return output
+    }
+}
+
+/// A clock the test moves by hand.
+final class ManualClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = Date(timeIntervalSince1970: 0)
+    var now: Date { lock.withLock { current } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { current += seconds } }
 }
 
 final class FakeUploader: VideoUploader, @unchecked Sendable {
@@ -30,15 +81,27 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
     var error: Error?
     var progressValues: [Double] = []
     var uploads: [(URL, String)] = []
+    var contexts: [UploadContext] = []
     /// Called on the main actor after each progress value has had time to land.
     var onProgress: (@MainActor @Sendable (Double) -> Void)?
     var lastProgress: (@Sendable (Double) -> Void)?
+    /// Stages reported through the context, each followed by `onStage`.
+    var stages: [String] = []
+    var onStage: (@MainActor @Sendable (String) -> Void)?
 
     func upload(
-        file: URL, title: String, progress: @escaping @Sendable (Double) -> Void
+        file: URL, title: String, context: UploadContext,
+        progress: @escaping @Sendable (Double) -> Void
     ) async throws -> UploadResult {
         uploads.append((file, title))
+        contexts.append(context)
         lastProgress = progress
+        for stage in stages {
+            context.onStatus(stage)
+            for _ in 0..<5 { await Task.yield() }
+            await onStage?(stage)
+            for _ in 0..<5 { await Task.yield() }
+        }
         for value in progressValues {
             progress(value)
             for _ in 0..<5 { await Task.yield() }
@@ -57,8 +120,30 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
     func failed(_ message: String) { failures.append(message) }
 }
 
+@MainActor final class StageLog {
+    var values: [String] = []
+}
+
 @MainActor final class PhaseLog {
     var phases: [Phase] = []
+}
+
+final class LogLines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    func append(_ line: String) { lock.withLock { lines.append(line) } }
+    var all: [String] { lock.withLock { lines } }
+}
+
+/// Hands out queued results and records the modes it was asked for.
+@MainActor final class FakePicker: CaptureTargetPicker {
+    var results: [CaptureTarget?] = []
+    var modes: [CaptureMode] = []
+
+    func pick(mode: CaptureMode) async -> CaptureTarget? {
+        modes.append(mode)
+        return results.isEmpty ? nil : results.removeFirst()
+    }
 }
 
 @MainActor
@@ -69,8 +154,13 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
     let now = Date(timeIntervalSince1970: 1_791_624_600)
 
     func makeState() -> AppState {
-        AppState(recorder: recorder, uploader: uploader, notifier: notifier)
+        AppState(
+            recorder: recorder, uploader: uploader, notifier: notifier,
+            titleProvider: { [now] in TitleContext(date: now) })
     }
+
+    /// Where the fake recording ends up after the post-stop rename with the default template.
+    var renamed: URL { recorder.directory.appending(path: RecordingNaming.fileName(for: now)) }
 
     @Test func toggleStartsRecording() async {
         let state = makeState()
@@ -80,7 +170,6 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
     }
 
     @Test func secondToggleStopsUploadsAndPublishesLink() async {
-        recorder.file = URL(fileURLWithPath: "/tmp").appending(path: RecordingNaming.fileName(for: now))
         let state = makeState()
         await state.toggle()
         await state.toggle()
@@ -88,12 +177,110 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         #expect(state.phase == .done(link: link))
         #expect(state.lastLink == link)
         #expect(uploader.uploads.count == 1)
-        #expect(uploader.uploads[0].0 == recorder.file)
-        // Title is the file's own stem, i.e. the recording's start timestamp.
-        #expect(uploader.uploads[0].1 == recorder.file.deletingPathExtension().lastPathComponent)
+        #expect(uploader.uploads[0].0 == renamed)
         #expect(uploader.uploads[0].1 == RecordingNaming.title(for: now))
+        #expect(FileManager.default.fileExists(atPath: renamed.path))
         #expect(notifier.links.count == 1)
         #expect(notifier.links[0].1 == true)
+    }
+
+    @Test func uploadStageFollowsTheUploaderAndResets() async throws {
+        let file = FileManager.default.temporaryDirectory.appending(path: "qt-\(UUID().uuidString).mp4")
+        try Data([1]).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        recorder.file = file
+        uploader.stages = ["Compressing · x", "Uploading"]
+        let state = AppState(recorder: recorder, uploader: uploader, notifier: notifier)
+        let stagesSeen = StageLog()
+        let progressSeen = StageLog()
+        uploader.onStage = { _ in
+            stagesSeen.values.append(state.uploadStage)
+            if case .uploading(let value) = state.phase { progressSeen.values.append("\(value)") }
+            // Progress inside a stage; the next stage must start over at 0.
+            uploader.lastProgress?(0.42)
+        }
+        #expect(state.uploadStage == "Uploading")
+        await state.toggle()
+        await state.toggle()
+        #expect(stagesSeen.values == ["Compressing · x", "Uploading"])
+        #expect(progressSeen.values == ["0.0", "0.0"])
+        #expect(AppState.uploadText(stage: "Compressing · x", progress: 0.21) == "Compressing 21% · x")
+        #expect(AppState.uploadText(stage: "Uploading", progress: 0.6) == "Uploading 60%")
+    }
+
+    @Test func renderedTitleNamesTheFileAndTheUpload() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "qt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let recorded = directory.appending(path: RecordingNaming.fileName(for: now))
+        try Data([1, 2, 3]).write(to: recorded)
+        recorder.file = recorded
+        let context = TitleContext(
+            date: now, app: "Xcode", display: "Studio Display", timeZone: TimeZone(identifier: "UTC")!)
+        let state = AppState(
+            recorder: recorder, uploader: uploader, notifier: notifier,
+            titleProvider: { context }, titleTemplate: { "{date} {app} {display}" })
+        await state.toggle()
+        await state.toggle()
+
+        let title = "2026-10-10 09.30.00 Xcode Studio Display"
+        let renamed = directory.appending(path: "\(title).mp4")
+        #expect(uploader.uploads.count == 1)
+        #expect(uploader.uploads[0].1 == title)
+        #expect(uploader.uploads[0].0 == renamed)
+        #expect(uploader.contexts[0].display == "Studio Display")
+        #expect(FileManager.default.fileExists(atPath: renamed.path))
+        #expect(!FileManager.default.fileExists(atPath: recorded.path))
+    }
+
+    @Test func finishFailureKeepsSegmentsAndRetryFinishesAgain() async throws {
+        let lines = LogLines()
+        // A read-only directory: the segment cannot be moved to its final name inside it.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555], ofItemAtPath: recorder.directory.path)
+        let state = AppState(
+            recorder: recorder, uploader: uploader, notifier: notifier,
+            titleProvider: { [now] in TitleContext(date: now) }, log: { lines.append($0) })
+        await state.toggle()
+        await state.toggle()
+
+        let message = "Could not finalize the recording; segments are kept in the recordings folder."
+        #expect(state.phase == .failed(message: message, file: nil))
+        #expect(state.canRetry)
+        #expect(uploader.uploads.isEmpty)
+        #expect(notifier.failures == [message])
+        #expect(FileManager.default.fileExists(atPath: recorder.file.path))
+        #expect(lines.all.count == 1)
+        #expect(lines.all[0].contains(recorder.file.lastPathComponent))
+
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: recorder.directory.path)
+        await state.retry()
+        #expect(state.phase == .done(link: URL(string: "https://youtu.be/abc123")!))
+        #expect(uploader.uploads.count == 1)
+        #expect(uploader.uploads[0].0 == renamed)
+        #expect(uploader.uploads[0].1 == RecordingNaming.title(for: now))
+        #expect(!state.canRetry)
+    }
+
+    /// On a name clash only the file name changes; the upload keeps the plain title.
+    @Test func titleCollisionAppendsCounter() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "qt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([9]).write(to: directory.appending(path: "Talk.mp4"))
+        let recorded = directory.appending(path: "raw.mp4")
+        try Data([1]).write(to: recorded)
+        recorder.file = recorded
+        let state = AppState(
+            recorder: recorder, uploader: uploader, notifier: notifier,
+            titleProvider: { TitleContext() }, titleTemplate: { "Talk" })
+        await state.toggle()
+        await state.toggle()
+
+        #expect(uploader.uploads[0].0 == directory.appending(path: "Talk (2).mp4"))
+        #expect(uploader.uploads[0].1 == "Talk")
+        #expect(FileManager.default.fileExists(atPath: directory.appending(path: "Talk.mp4").path))
     }
 
     @Test func progressUpdatesPhaseWhileUploading() async {
@@ -181,7 +368,7 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         #expect(
             state.phase
                 == .failed(
-                    message: "Upload failed: exhaustedRetries", file: recorder.file))
+                    message: "Upload failed: exhaustedRetries", file: renamed))
 
         uploader.error = nil
         await state.retry()
@@ -220,22 +407,21 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         #expect(notifier.failures.count == 1)
     }
 
-    @Test func stopTimeoutKeepsFileForRetry() async {
-        let kept = URL(fileURLWithPath: "/tmp/kept.mp4")
-        recorder.stopError = RecorderError.stopTimedOut(file: kept)
+    @Test func stopTimeoutKeepsSegmentsForRetry() async {
+        recorder.stopError = RecorderError.stopTimedOut(segments: [recorder.file])
         let state = makeState()
         await state.toggle()
         await state.toggle()
         #expect(
             state.phase
                 == .failed(
-                    message: "Recording did not finalize in time; the file was kept. Try Retry Upload.",
-                    file: kept))
+                    message: AppState.message(for: RecorderError.stopTimedOut(segments: [])), file: nil))
+        #expect(state.canRetry)
         #expect(uploader.uploads.isEmpty)
 
         await state.retry()
         #expect(uploader.uploads.count == 1)
-        #expect(uploader.uploads[0].0 == kept)
+        #expect(uploader.uploads[0].0 == renamed)
         #expect(state.phase == .done(link: URL(string: "https://youtu.be/abc123")!))
     }
 
@@ -293,12 +479,13 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
         let telegram = FakeUploader()
         telegram.error = TelegramError.notConfigured
         let state = AppState(
-            recorder: recorder, uploaders: [.youtube: uploader, .telegram: telegram], notifier: notifier)
+            recorder: recorder, uploaders: [.youtube: uploader, .telegram: telegram], notifier: notifier,
+            titleProvider: { [now] in TitleContext(date: now) })
         await state.toggle()
         await state.toggle(destination: .telegram)
         #expect(
             state.phase
-                == .failed(message: AppState.message(for: TelegramError.notConfigured), file: recorder.file))
+                == .failed(message: AppState.message(for: TelegramError.notConfigured), file: renamed))
         telegram.error = nil
         telegram.result = UploadResult(link: URL(string: "https://t.me/c/1/3")!)
         await state.retry()
@@ -314,7 +501,278 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
             state.phase
                 == .failed(
                     message: AppState.message(for: DestinationError.unavailable(.telegram)),
-                    file: recorder.file))
+                    file: renamed))
+    }
+
+    // MARK: - Capture target selection
+
+    func makePickingState(picker: FakePicker, mode: CaptureMode) -> AppState {
+        AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            finisher: FakeFinisher(), captureTarget: { .display(7) }, picker: picker,
+            captureMode: { mode }, titleProvider: { [now] in TitleContext(date: now) })
+    }
+
+    @Test(arguments: [
+        (CaptureMode.selectWindow, CaptureTarget.window(42)),
+        (
+            CaptureMode.selectArea,
+            CaptureTarget.region(display: 3, rect: CGRect(x: 10, y: 20, width: 300, height: 200))
+        ),
+    ])
+    func selectModesRecordThePickedTarget(mode: CaptureMode, target: CaptureTarget) async {
+        let picker = FakePicker()
+        picker.results = [target]
+        let state = makePickingState(picker: picker, mode: mode)
+        await state.toggle()
+        #expect(picker.modes == [mode])
+        #expect(recorder.targets == [target])
+        #expect(state.phase == .recording)
+    }
+
+    @Test func cancelledSelectionStaysIdleSilently() async {
+        let picker = FakePicker()
+        picker.results = [nil]
+        let state = makePickingState(picker: picker, mode: .selectArea)
+        await state.toggle()
+        #expect(state.phase == .idle)
+        #expect(recorder.starts == 0)
+        #expect(notifier.failures.isEmpty)
+        // The transition is released: the next press picks again and records.
+        picker.results = [.window(9)]
+        await state.toggle()
+        #expect(picker.modes.count == 2)
+        #expect(recorder.targets == [.window(9)])
+        #expect(state.phase == .recording)
+    }
+
+    @Test func willStartHookRunsWithThePickedTargetBeforeTheRecorderStarts() async {
+        let picker = FakePicker()
+        let target = CaptureTarget.region(display: 3, rect: CGRect(x: 10, y: 20, width: 300, height: 200))
+        picker.results = [target]
+        let state = makePickingState(picker: picker, mode: .selectArea)
+        var seen: [(CaptureTarget, Int, Bool)] = []
+        state.onRecordingWillStart = { [recorder] target in
+            seen.append((target, recorder.starts, state.isStarting))
+        }
+        await state.toggle()
+        #expect(seen.count == 1)
+        #expect(seen.first?.0 == target)
+        #expect(seen.first?.1 == 0)
+        #expect(seen.first?.2 == true)
+        #expect(state.recordingTarget == target)
+        #expect(state.isStarting == false)
+        #expect(state.phase == .recording)
+    }
+
+    @Test func willStartHookIsSkippedWhenTheSelectionIsCancelled() async {
+        let picker = FakePicker()
+        picker.results = [nil]
+        let state = makePickingState(picker: picker, mode: .selectWindow)
+        var calls = 0
+        state.onRecordingWillStart = { _ in calls += 1 }
+        await state.toggle()
+        #expect(calls == 0)
+        #expect(state.phase == .idle)
+    }
+
+    @Test func failedStartStillEndsTheStartingState() async {
+        recorder.startError = RecorderError.noDisplay
+        let state = makeState()
+        var calls = 0
+        state.onRecordingWillStart = { _ in calls += 1 }
+        await state.toggle()
+        #expect(calls == 1)
+        #expect(state.isStarting == false)
+        if case .failed = state.phase {} else { Issue.record("expected .failed, got \(state.phase)") }
+    }
+
+    @Test func cancelAfterAFinishedRecordingReturnsToIdle() async {
+        let picker = FakePicker()
+        picker.results = [.window(1), nil]
+        let state = makePickingState(picker: picker, mode: .selectWindow)
+        await state.toggle()
+        await state.toggle()
+        #expect(state.phase == .done(link: URL(string: "https://youtu.be/abc123")!))
+        await state.toggle()
+        #expect(state.phase == .idle)
+        #expect(recorder.starts == 1)
+        #expect(notifier.failures.isEmpty)
+    }
+
+    @Test func displayModeSkipsThePicker() async {
+        let picker = FakePicker()
+        let state = makePickingState(picker: picker, mode: .displayUnderCursor)
+        await state.toggle()
+        #expect(picker.modes.isEmpty)
+        #expect(recorder.targets == [.display(7)])
+    }
+
+    @Test func selectModeWithoutAPickerFallsBackToTheDisplay() async {
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            captureTarget: { .display(7) }, captureMode: { .selectWindow })
+        await state.toggle()
+        #expect(recorder.targets == [.display(7)])
+    }
+
+    // MARK: - Pause, segments and the finisher
+
+    func makePausableState(
+        finisher: RecordingFinishing, trim: TrimSettings = .none, clock: ManualClock = ManualClock(),
+        log: @escaping @Sendable (String) -> Void = { _ in }
+    ) -> AppState {
+        AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, finisher: finisher,
+            trim: { trim }, captureTarget: { .display(7) }, clock: { clock.now },
+            titleProvider: { [now] in TitleContext(date: now) }, log: log)
+    }
+
+    @Test func startPassesTheCaptureTarget() async {
+        let state = makePausableState(finisher: FakeFinisher())
+        await state.toggle()
+        #expect(recorder.targets == [.display(7)])
+    }
+
+    @Test func pauseAndResumeSwitchPhases() async {
+        let state = makePausableState(finisher: FakeFinisher())
+        await state.toggle()
+        await state.pause()
+        #expect(state.phase == .paused)
+        #expect(recorder.pauses == 1)
+        await state.resume()
+        #expect(state.phase == .recording)
+        #expect(recorder.resumes == 1)
+        await state.togglePause()
+        #expect(state.phase == .paused)
+        await state.togglePause()
+        #expect(state.phase == .recording)
+        #expect(recorder.pauses == 2 && recorder.resumes == 2)
+    }
+
+    @Test func pauseAndResumeAreIgnoredInOtherPhases() async {
+        let state = makePausableState(finisher: FakeFinisher())
+        await state.togglePause()
+        await state.pause()
+        await state.resume()
+        #expect(state.phase == .idle)
+        await state.toggle()
+        await state.resume()
+        #expect(state.phase == .recording)
+        #expect(recorder.pauses == 0 && recorder.resumes == 0)
+    }
+
+    @Test func stopWhilePausedFinishesAllSegmentsAndUploads() async {
+        let finisher = FakeFinisher()
+        let first = recorder.directory.appending(path: "x.seg1.mp4")
+        let second = recorder.directory.appending(path: "x.seg2.mp4")
+        recorder.segments = [first, second]
+        let trim = TrimSettings(head: 0.5, tail: 1)
+        let state = makePausableState(finisher: finisher, trim: trim)
+        await state.toggle()
+        await state.pause()
+        await state.toggle(destination: .youtube)
+
+        #expect(recorder.stops == 1)
+        #expect(finisher.calls.count == 1)
+        #expect(finisher.calls[0].segments == [first, second])
+        #expect(finisher.calls[0].trim == trim)
+        #expect(finisher.calls[0].output == renamed)
+        #expect(uploader.uploads.count == 1)
+        #expect(uploader.uploads[0].0 == renamed)
+        #expect(state.phase == .done(link: URL(string: "https://youtu.be/abc123")!))
+    }
+
+    @Test func finisherFailureRetryRerunsTheFinisher() async {
+        let finisher = FakeFinisher()
+        finisher.error = RecorderError.finishFailed("export")
+        let segments = [URL(fileURLWithPath: "/tmp/a.seg1.mp4"), URL(fileURLWithPath: "/tmp/a.seg2.mp4")]
+        recorder.segments = segments
+        let lines = LogLines()
+        let state = makePausableState(finisher: finisher, log: { lines.append($0) })
+        await state.toggle()
+        await state.toggle()
+        #expect(
+            state.phase
+                == .failed(
+                    message: "Could not finalize the recording; segments are kept in the recordings folder.",
+                    file: nil))
+        #expect(state.canRetry)
+        #expect(uploader.uploads.isEmpty)
+        #expect(lines.all.count == 1)
+
+        finisher.error = nil
+        await state.retry()
+        #expect(finisher.calls.count == 2)
+        #expect(finisher.calls[1].segments == segments)
+        #expect(uploader.uploads.count == 1)
+        #expect(uploader.uploads[0].1 == RecordingNaming.title(for: now))
+        #expect(state.phase == .done(link: URL(string: "https://youtu.be/abc123")!))
+    }
+
+    @Test func noSegmentsFailsWithoutRetry() async {
+        recorder.segments = []
+        let finisher = FakeFinisher()
+        let state = makePausableState(finisher: finisher)
+        await state.toggle()
+        await state.toggle()
+        #expect(finisher.calls.isEmpty)
+        #expect(
+            state.phase
+                == .failed(
+                    message: AppState.message(for: RecorderError.finishFailed("")), file: nil))
+        #expect(!state.canRetry)
+        await state.retry()
+        #expect(finisher.calls.isEmpty)
+    }
+
+    @Test func canRetryOnlyWhenSomethingIsKept() async {
+        let state = makePausableState(finisher: FakeFinisher())
+        #expect(!state.canRetry)
+        recorder.startError = RecorderError.noDisplay
+        await state.toggle()
+        #expect(!state.canRetry)
+    }
+
+    @Test func pauseFailureIsLoggedAndStillPauses() async {
+        recorder.pauseError = RecorderError.stopTimedOut(segments: [])
+        let lines = LogLines()
+        let state = makePausableState(finisher: FakeFinisher(), log: { lines.append($0) })
+        await state.toggle()
+        await state.pause()
+        #expect(state.phase == .paused)
+        #expect(lines.all.count == 1)
+        #expect(notifier.failures.isEmpty)
+    }
+
+    @Test func resumeFailureStaysPausedAndReports() async {
+        recorder.resumeError = RecorderError.screenPermissionDenied
+        let lines = LogLines()
+        let state = makePausableState(finisher: FakeFinisher(), log: { lines.append($0) })
+        await state.toggle()
+        await state.pause()
+        await state.resume()
+        #expect(state.phase == .paused)
+        #expect(notifier.failures == [AppState.message(for: RecorderError.screenPermissionDenied)])
+        #expect(lines.all.count == 1)
+    }
+
+    @Test func recordedDurationExcludesPauses() async {
+        let clock = ManualClock()
+        let state = makePausableState(finisher: FakeFinisher(), clock: clock)
+        await state.toggle()
+        clock.advance(10)
+        #expect(state.recordedDuration(at: clock.now) == 10)
+        await state.pause()
+        clock.advance(100)
+        #expect(state.recordedDuration(at: clock.now) == 10)
+        await state.resume()
+        clock.advance(5)
+        #expect(state.recordedDuration(at: clock.now) == 15)
+        await state.toggle()
+        #expect(state.recordedDuration(at: clock.now) == 15)
+        await state.toggle()
+        #expect(state.recordedDuration(at: clock.now) == 0)
     }
 
     @Test func messagesAreHumanReadable() {
@@ -346,8 +804,12 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
             AppState.message(for: AuthError.badCallback, stage: .signIn)
                 == "Sign-in failed: the browser returned an unexpected response.")
         #expect(
-            AppState.message(for: RecorderError.stopTimedOut(file: URL(fileURLWithPath: "/tmp/x.mp4")))
-                == "Recording did not finalize in time; the file was kept. Try Retry Upload.")
+            AppState.message(for: RecorderError.stopTimedOut(segments: [URL(fileURLWithPath: "/tmp/x.mp4")]))
+                == "Recording did not finalize in time; segments are kept in the recordings folder. Try Retry."
+        )
+        #expect(
+            AppState.message(for: RecorderError.finishFailed("x"))
+                == "Could not finalize the recording; segments are kept in the recordings folder.")
         // Fallback names the stage; upload is the default.
         #expect(AppState.message(for: UploadError.badResponse(500)) == "Upload failed: badResponse(500)")
         #expect(
@@ -360,4 +822,313 @@ final class FakeUploader: VideoUploader, @unchecked Sendable {
             AppState.message(for: AuthError.badResponse(503), stage: .signIn)
                 == "Sign-in failed: badResponse(503)")
     }
+
+    // MARK: link history
+
+    private func record(_ state: AppState, to destination: Destination = .youtube) async {
+        await state.toggle(destination: destination)
+        await state.toggle(destination: destination)
+    }
+
+    @Test func successAddsAHistoryEntryWithDestinationAndTitle() async {
+        let telegram = FakeUploader()
+        telegram.result = UploadResult(link: URL(string: "https://t.me/c/1/2")!)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader, .telegram: telegram], notifier: notifier,
+            titleProvider: { TitleContext() }, titleTemplate: { "Talk" })
+        await record(state, to: .telegram)
+        #expect(state.history.count == 1)
+        #expect(state.history[0].link == URL(string: "https://t.me/c/1/2")!)
+        #expect(state.history[0].destination == .telegram)
+        #expect(state.history[0].title == "Talk")
+    }
+
+    @Test func historyKeepsTheNewestTwentyFirst() async {
+        // The real finisher moves the recording, so a second round would find no file.
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            finisher: FakeFinisher())
+        for index in 0..<22 {
+            uploader.result = UploadResult(link: URL(string: "https://example.com/\(index)")!)
+            await record(state)
+        }
+        #expect(state.history.count == 20)
+        #expect(state.history.first?.link.absoluteString == "https://example.com/21")
+        #expect(state.history.last?.link.absoluteString == "https://example.com/2")
+    }
+
+    @Test func disabledHistoryRecordsNothing() async {
+        let changes = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            historyEnabled: { false }, onHistoryChange: { _ in changes.append("changed") })
+        await record(state)
+        #expect(state.history.isEmpty)
+        #expect(changes.all.isEmpty)
+    }
+
+    @Test func failedUploadAddsNoHistoryEntry() async {
+        uploader.error = UploadError.sessionExpired
+        let state = AppState(recorder: recorder, uploader: uploader, notifier: notifier)
+        await record(state)
+        #expect(state.history.isEmpty)
+    }
+
+    @Test func clearHistoryEmptiesItAndReports() async {
+        let reported = HistoryLog()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            onHistoryChange: { reported.append($0) })
+        await record(state)
+        #expect(reported.all.map(\.count) == [1])
+        state.clearHistory()
+        #expect(state.history.isEmpty)
+        #expect(reported.all.map(\.count) == [1, 0])
+    }
+
+    @Test func seededHistoryIsKeptAndExtended() async {
+        let old = HistoryItem(
+            id: UUID(), link: URL(string: "https://example.com/old")!, destination: .drive,
+            date: Date(timeIntervalSince1970: 1), title: "Old")
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, history: [old])
+        await record(state)
+        #expect(state.history.count == 2)
+        #expect(state.history[1] == old)
+    }
+
+    // MARK: after upload
+
+    @Test func afterUploadRunsOnceWithTheUploadedFileOnSuccess() async {
+        let called = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            afterUpload: { called.append($0.path) })
+        await record(state)
+        #expect(called.all.count == 1)
+        #expect(called.all.first?.hasSuffix(".mp4") == true)
+        #expect(called.all.first == uploader.uploads.first?.0.path)
+    }
+
+    @Test func afterUploadIsNotCalledOnFailure() async {
+        uploader.error = UploadError.sessionExpired
+        let called = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            afterUpload: { called.append($0.path) })
+        await record(state)
+        #expect(called.all.isEmpty)
+    }
+
+    @Test func throwingAfterUploadKeepsDoneAndIsLogged() async {
+        let logs = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            log: { logs.append($0) }, afterUpload: { _ in throw CocoaError(.fileWriteNoPermission) })
+        await record(state)
+        guard case .done = state.phase else {
+            Issue.record("expected .done, got \(state.phase)")
+            return
+        }
+        #expect(notifier.failures.isEmpty)
+        #expect(logs.all.contains { $0.contains("Cleanup after upload") })
+    }
+
+    // MARK: Vimeo
+
+    @Test func vimeoUploadRecordsHistoryAndRunsAfterUpload() async {
+        let vimeo = FakeUploader()
+        let link = URL(string: "https://vimeo.com/123/abcdef")!
+        vimeo.result = UploadResult(link: link, videoID: "123", privacyStatus: "unlisted")
+        let called = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader, .vimeo: vimeo], notifier: notifier,
+            titleProvider: { [now] in TitleContext(date: now) },
+            afterUpload: { called.append($0.path) })
+        await record(state, to: .vimeo)
+        #expect(state.phase == .done(link: link))
+        #expect(state.destination == .vimeo)
+        #expect(vimeo.uploads.count == 1)
+        #expect(uploader.uploads.isEmpty)
+        #expect(notifier.links.first?.0 == link)
+        #expect(notifier.links.first?.1 == true)
+        #expect(state.history.first?.destination == .vimeo)
+        #expect(state.history.first?.link == link)
+        #expect(called.all.count == 1)
+        #expect(called.all.first == vimeo.uploads.first?.0.path)
+        #expect(AppState.doneText(link: link, destination: .vimeo) == "Link copied · vimeo.com/123/abcdef")
+    }
+
+    @Test func vimeoDestinationIsCodable() throws {
+        #expect(Destination.vimeo.label == "Vimeo")
+        #expect(Destination(rawValue: "vimeo") == .vimeo)
+        let item = HistoryItem(
+            link: URL(string: "https://vimeo.com/1")!, destination: .vimeo, date: now, title: "T")
+        let decoded = try JSONDecoder().decode(HistoryItem.self, from: JSONEncoder().encode(item))
+        #expect(decoded == item)
+    }
+
+    // MARK: GIF
+
+    @Test func gifDestinationFinishesThroughTheNormalDonePath() async {
+        let gif = FakeUploader()
+        let gifURL = URL(filePath: "/tmp/rec/clip.gif")
+        gif.result = UploadResult(link: gifURL)
+        gif.stages = ["Rendering GIF"]
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader, .gif: gif], notifier: notifier,
+            titleProvider: { [now] in TitleContext(date: now) })
+        await record(state, to: .gif)
+        #expect(state.phase == .done(link: gifURL))
+        #expect(state.destination == .gif)
+        #expect(state.lastLink == gifURL)
+        #expect(gif.uploads.count == 1)
+        #expect(uploader.uploads.isEmpty)
+        #expect(notifier.links.count == 1)
+        #expect(notifier.links.first?.0 == gifURL)
+        #expect(state.history.first?.destination == .gif)
+        #expect(state.history.first?.link == gifURL)
+    }
+
+    @Test func afterUploadIsSkippedForGIF() async {
+        let gif = FakeUploader()
+        gif.result = UploadResult(link: URL(filePath: "/tmp/rec/clip.gif"))
+        let called = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.gif: gif], notifier: notifier,
+            afterUpload: { called.append($0.path) })
+        await record(state, to: .gif)
+        guard case .done = state.phase else {
+            Issue.record("expected .done, got \(state.phase)")
+            return
+        }
+        #expect(called.all.isEmpty)
+    }
+
+    @Test func gifLabelIsGIF() {
+        #expect(Destination.gif.label == "GIF")
+        #expect(Destination(rawValue: "gif") == .gif)
+    }
+
+    @Test func doneTextNamesTheGIFSize() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "done-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appending(path: "clip.gif")
+        try Data(count: 3 << 19).write(to: file)  // 1.5 MB
+        #expect(AppState.doneText(link: file, destination: .gif) == "GIF ready · 1.5 MB")
+    }
+
+    @Test func doneTextForOtherDestinationsIsUnchanged() {
+        let link = URL(string: "https://youtu.be/abc123")!
+        #expect(AppState.doneText(link: link, destination: .youtube) == "Link copied · youtu.be/abc123")
+    }
+
+    @Test func gifErrorsAreHumanReadable() {
+        #expect(AppState.message(for: GIFError.cannotRead) == "Could not read the recording to make a GIF.")
+        #expect(
+            AppState.message(for: GIFError.cannotWrite) == "Could not write the GIF next to the recording.")
+        #expect(AppState.message(for: GIFError.noFrames) == "The recording has no frames to make a GIF from.")
+    }
+
+    // MARK: Save only
+
+    @Test func localDestinationFinishesWithTheFileAndSkipsAfterUpload() async {
+        let local = FakeUploader()
+        let fileURL = URL(filePath: "/tmp/rec/clip.mp4")
+        local.result = UploadResult(link: fileURL)
+        let called = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader, .local: local], notifier: notifier,
+            titleProvider: { [now] in TitleContext(date: now) },
+            afterUpload: { called.append($0.path) })
+        await record(state, to: .local)
+        #expect(state.phase == .done(link: fileURL))
+        #expect(state.destination == .local)
+        #expect(local.uploads.count == 1)
+        #expect(uploader.uploads.isEmpty)
+        #expect(notifier.links.first?.0 == fileURL)
+        #expect(state.history.first?.destination == .local)
+        #expect(state.history.first?.link == fileURL)
+        #expect(called.all.isEmpty)
+    }
+
+    @Test func localLabelIsSaveOnly() {
+        #expect(Destination.local.label == "Save only")
+        #expect(Destination(rawValue: "local") == .local)
+    }
+
+    @Test func doneTextNamesTheSavedSize() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "done-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appending(path: "clip.mp4")
+        try Data(count: 3 << 19).write(to: file)  // 1.5 MB
+        #expect(AppState.doneText(link: file, destination: .local) == "Saved · 1.5 MB")
+    }
+}
+
+@Suite struct TranscodeMessageTests {
+    @Test(arguments: [
+        (TranscodeError.cannotRead as Error, "Could not read the recording to compress it for Telegram."),
+        (TranscodeError.cannotWrite as Error, "Could not write the compressed copy for Telegram."),
+        (TranscodeError.failed("x") as Error, "Compressing for Telegram failed: x"),
+        (
+            TelegramError.fileTooLarge(limit: 50 << 20, actual: 75 << 20) as Error,
+            "File is 75 MB; the Telegram limit is 50 MB (Settings → Telegram)."
+        ),
+        (TelegramError.apiError("Bad Request") as Error, "Telegram refused the upload: Bad Request"),
+        (
+            DriveError.insufficientScope as Error,
+            "Google Drive access was not granted. Sign out and sign in again in Settings."
+        ),
+        (
+            SlackError.notConfigured as Error,
+            "Slack is not set up: add the bot token and channel ID in Settings."
+        ),
+        (SlackError.apiError("not_in_channel") as Error, "Slack refused the upload: not_in_channel"),
+        (UploadError.apiError(status: 400, message: "bad") as Error, "Upload failed (HTTP 400): bad"),
+        (
+            UploadError.apiError(status: 400, message: "exceeded the number of videos") as Error,
+            "YouTube's daily upload limit for this channel is reached; the file is kept. Retry tomorrow."
+        ),
+        (
+            DestinationError.unavailable(.slack) as Error,
+            "Slack is not set up in Settings."
+        ),
+        (
+            DestinationError.unavailable(.drive) as Error,
+            "Google Drive is not set up in Settings."
+        ),
+        (
+            DestinationError.unavailable(.youtube) as Error,
+            "YouTube is not set up in Settings."
+        ),
+        (RecorderError.windowGone as Error, "The chosen window is gone."),
+        (
+            VimeoError.notConfigured as Error,
+            "Vimeo is not set up: add the access token in Settings."
+        ),
+        (
+            VimeoError.apiError(status: 403, message: "You have exceeded your upload quota.") as Error,
+            "Vimeo: You have exceeded your upload quota."
+        ),
+        (
+            VimeoError.uploadIncomplete(offset: 3 << 20, size: 10 << 20) as Error,
+            "Vimeo: the upload stopped at 3 of 10 MB. Retry the upload."
+        ),
+        (VimeoError.badResponse(200) as Error, "Vimeo: unexpected response (HTTP 200)."),
+        (DestinationError.unavailable(.vimeo) as Error, "Vimeo is not set up in Settings."),
+    ])
+    @MainActor func messages(error: Error, expected: String) {
+        #expect(AppState.message(for: error) == expected)
+    }
+
+}
+
+final class HistoryLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [[HistoryItem]] = []
+    func append(_ items: [HistoryItem]) { lock.withLock { values.append(items) } }
+    var all: [[HistoryItem]] { lock.withLock { values } }
 }

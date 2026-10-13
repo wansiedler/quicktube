@@ -1,0 +1,228 @@
+name: Release
+
+# Tag v<version> → signed DMG → GitHub Release → Sparkle appcast on gh-pages.
+# The tag must match CFBundleShortVersionString in Sources/QuickTube/Info.plist;
+# bump it (and CFBundleVersion) before tagging. See docs/releasing.md.
+#
+# Secrets:
+#   APPLE_DEV_CERT_P12       base64 of the Apple Development certificate (.p12)
+#   APPLE_DEV_CERT_PASSWORD  the .p12 password
+#   SPARKLE_PRIVATE_KEY      the EdDSA private key from Sparkle's generate_keys -x
+
+on:
+  push:
+    tags: ["v*"]
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release
+    runs-on: macos-15
+    permissions:
+      contents: write   # create the release and push appcast.xml to gh-pages
+    env:
+      TAG: ${{ github.ref_name }}
+      SPARKLE_BIN: .build/artifacts/sparkle/Sparkle/bin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7
+        with:
+          persist-credentials: false
+
+      # Swift 6.2 is the floor: pick the newest Xcode 26 explicitly and fail loudly
+      # without one, instead of falling back to the image default (Swift 6.1).
+      - name: Select Xcode 26
+        run: |
+          shopt -s nullglob
+          candidates=(/Applications/Xcode_26*.app)
+          if [ "${#candidates[@]}" -eq 0 ]; then
+            echo "::error::No /Applications/Xcode_26*.app on this runner; Xcode 26 (Swift 6.2) is required."
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          xc=$(printf '%s\n' "${candidates[@]}" | sort -V | tail -n 1)
+          echo "Selecting $xc"
+          sudo xcode-select -s "$xc"
+          swift --version
+
+      - name: Check the tag matches the app version
+        run: |
+          version=$(make -s version)
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match CFBundleShortVersionString $version in Info.plist"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "DMG=build/QuickTube-$version.dmg" >> "$GITHUB_ENV"
+
+      # `make app` renders the icon from SVG.
+      - name: Install rsvg-convert
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install librsvg
+
+      - name: Import the signing certificate
+        env:
+          CERT_P12: ${{ secrets.APPLE_DEV_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_DEV_CERT_PASSWORD }}
+        run: |
+          # Fixed paths: the cleanup step deletes both even if this step fails half-way.
+          umask 077
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          p12="$RUNNER_TEMP/cert.p12"
+          trap 'rm -f "$p12"' EXIT
+          keychain_password=$(openssl rand -base64 24)
+          printf '%s' "$CERT_P12" | base64 --decode > "$p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$p12" -k "$keychain" -P "$CERT_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          # Put the release keychain first in the search list, keeping the existing ones.
+          existing=()
+          while IFS= read -r line; do
+            line=${line#*\"}
+            existing+=("${line%\"*}")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain" "${existing[@]}"
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk -F'"' '/Apple Development/ {print $2; exit}')
+          if [ -z "$identity" ]; then
+            echo "::error::No Apple Development identity in APPLE_DEV_CERT_P12"
+            exit 1
+          fi
+          echo "IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Build the DMG
+        run: |
+          make dmg IDENTITY="$IDENTITY"
+          codesign --verify --deep --strict QuickTube.app
+          codesign --verify "$DMG"
+
+      # Both checks run before anything is published: a placeholder key ships an app whose
+      # updater never starts, and a CFBundleVersion that is not above the feed's newest
+      # sparkle:version is never offered to installed copies.
+      - name: Check the built app can be updated
+        run: |
+          plist=QuickTube.app/Contents/Info.plist
+          key=$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$plist")
+          if [ -z "$key" ] || [ "$key" = REPLACE_WITH_PUBLIC_KEY ]; then
+            echo "::error::SUPublicEDKey in Info.plist is still the placeholder; see docs/releasing.md"
+            exit 1
+          fi
+          build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")
+
+          # The public repo's gh-pages branch holds the live feed; exit code 2 means no such branch yet.
+          rc=0
+          git ls-remote --exit-code --heads origin gh-pages > /dev/null || rc=$?
+          if [ "$rc" -eq 2 ]; then
+            echo "No gh-pages branch yet: first release, skipping the CFBundleVersion check"
+            exit 0
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::Could not read the gh-pages branch (git ls-remote exit $rc)"
+            exit 1
+          fi
+          git fetch -q --depth 1 origin gh-pages
+          if ! git cat-file -e FETCH_HEAD:appcast.xml 2> /dev/null; then
+            echo "gh-pages has no appcast.xml yet, skipping the CFBundleVersion check"
+            exit 0
+          fi
+          git show FETCH_HEAD:appcast.xml > "$RUNNER_TEMP/appcast-current.xml"
+          python3 - "$RUNNER_TEMP/appcast-current.xml" "$build" <<'EOF'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          ns = "{http://www.andymatuschak.org/xml-namespaces/sparkle}"
+
+          def key(v):
+              try:
+                  return tuple(int(p) for p in v.strip().split("."))
+              except ValueError:
+                  sys.exit(f"::error::Non-numeric build version {v!r}; use a dotted number")
+
+          feed, build = sys.argv[1], sys.argv[2]
+          versions = []
+          for item in ET.parse(feed).getroot().iter("item"):
+              v = item.findtext(ns + "version")
+              if v is None:
+                  enclosure = item.find("enclosure")
+                  v = enclosure.get(ns + "version") if enclosure is not None else None
+              if v:
+                  versions.append(v)
+          if not versions:
+              print("appcast.xml has no versions, skipping the CFBundleVersion check")
+              sys.exit(0)
+          newest = max(versions, key=key)
+          if key(build) <= key(newest):
+              sys.exit(f"::error::CFBundleVersion {build} is not greater than the newest "
+                       f"sparkle:version {newest} in appcast.xml; bump it in Info.plist")
+          print(f"CFBundleVersion {build} > newest sparkle:version {newest}")
+          EOF
+
+      - name: Sign the DMG for Sparkle
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          signature=$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_BIN/sign_update" --ed-key-file - "$DMG")
+          {
+            echo "## Sparkle signature"
+            echo ""
+            echo '```'
+            echo "$signature"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" "$DMG" --verify-tag --title "QuickTube $VERSION" --generate-notes
+
+      - name: Publish appcast.xml to gh-pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          pages="$RUNNER_TEMP/pages"
+          archives="$RUNNER_TEMP/archives"
+          generate_appcast="$PWD/$SPARKLE_BIN/generate_appcast"
+          mkdir -p "$archives"
+          cp "$DMG" "$archives/"
+
+          git init -q "$pages"
+          git -C "$pages" remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          if git -C "$pages" fetch -q --depth 1 origin gh-pages; then
+            git -C "$pages" checkout -q -b gh-pages FETCH_HEAD
+          else
+            git -C "$pages" checkout -q --orphan gh-pages
+          fi
+          # generate_appcast adds the new DMG to the existing feed and keeps the older items.
+          if [ -f "$pages/appcast.xml" ]; then cp "$pages/appcast.xml" "$archives/"; fi
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$generate_appcast" --ed-key-file - \
+            --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/" \
+            --link "https://github.com/$GITHUB_REPOSITORY" \
+            "$archives"
+
+          cp "$archives/appcast.xml" "$pages/appcast.xml"
+          touch "$pages/.nojekyll"
+          git -C "$pages" add appcast.xml .nojekyll
+          git -C "$pages" -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Appcast for $TAG"
+          git -C "$pages" -c credential.helper= -c credential.helper='!gh auth git-credential' \
+            push -q origin gh-pages
+
+      - name: Delete the temporary keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/release.keychain-db" 2> /dev/null || true
+          rm -f "$RUNNER_TEMP/cert.p12"

@@ -11,8 +11,7 @@ updates:
     commit-message:
       prefix: ci
 
-  # Package.swift declares no third-party dependencies today; this only
-  # becomes active if one is ever added.
+  # Sparkle (the app's only third-party package), pinned in Package.resolved.
   - package-ecosystem: swift
     directory: /
     schedule:

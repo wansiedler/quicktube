@@ -37,8 +37,21 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_26.app || sudo xcode-select -s /Applications/Xcode.app
+      # Swift 6.2 is the floor: pick the newest Xcode 26 explicitly and fail loudly
+      # without one, instead of falling back to the image default (Swift 6.1).
+      - name: Select Xcode 26
+        run: |
+          shopt -s nullglob
+          candidates=(/Applications/Xcode_26*.app)
+          if [ "${#candidates[@]}" -eq 0 ]; then
+            echo "::error::No /Applications/Xcode_26*.app on this runner; Xcode 26 (Swift 6.2) is required."
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          xc=$(printf '%s\n' "${candidates[@]}" | sort -V | tail -n 1)
+          echo "Selecting $xc"
+          sudo xcode-select -s "$xc"
+          swift --version
 
       - name: Build (release)
         run: |
@@ -79,45 +92,173 @@ jobs:
   # ------------------------------------------------------------------ #
   tests:
     runs-on: macos-15
+    # A hung AVFoundation test must not hold the runner for the 6 h default.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7
         with:
           persist-credentials: false
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_26.app || sudo xcode-select -s /Applications/Xcode.app
-
-      - name: Run tests with coverage
+      # Swift 6.2 is the floor: pick the newest Xcode 26 explicitly and fail loudly
+      # without one, instead of falling back to the image default (Swift 6.1).
+      - name: Select Xcode 26
         run: |
+          shopt -s nullglob
+          candidates=(/Applications/Xcode_26*.app)
+          if [ "${#candidates[@]}" -eq 0 ]; then
+            echo "::error::No /Applications/Xcode_26*.app on this runner; Xcode 26 (Swift 6.2) is required."
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          xc=$(printf '%s\n' "${candidates[@]}" | sort -V | tail -n 1)
+          echo "Selecting $xc"
+          sudo xcode-select -s "$xc"
+          swift --version
+
+      # The whole log goes to a file and is printed in full on failure: a crashed test
+      # process loses its tail, so `tail` alone hides which test was running. A crash
+      # (signal) in the parallel run is retried once with --no-parallel, which tells a
+      # race between concurrently running suites from a test that crashes on its own;
+      # the serial verdict decides the step, and the parallel crash stays a warning.
+      - name: Run tests with coverage
+        id: tests
+        run: |
+          mkdir -p test-logs
+          touch test-logs/.started
+          summary() { grep -E "Executed [0-9]+ tests|Test run with|unexpected signal" "$1" | tail -n 3; }
+          # CrashBacktrace (Tests/) prints the faulting thread between these markers.
+          backtraces() {
+            awk '/=== QuickTubeCoreTests: fatal signal/{p=1} p{print} /=== end of backtrace ===/{p=0}' "$1"
+          }
+          # A test process that hangs (or wedges while reporting a crash) must not eat the
+          # job's 30 minutes: SIGALRM ends the run after 10.
+          bounded() { perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 600 "$@"; }
           set +e
-          out=$(swift test --enable-code-coverage 2>&1)
+          bounded swift test --enable-code-coverage > test-logs/swift-test.log 2>&1
           rc=$?
           set -e
-          echo "$out" | tail -n 60
+          mode="parallel"
+          if [ "$rc" -ne 0 ]; then
+            echo "::group::Full output of the parallel run (exit $rc)"
+            cat test-logs/swift-test.log
+            echo "::endgroup::"
+            backtraces test-logs/swift-test.log
+            if grep -q "Exited with unexpected signal" test-logs/swift-test.log; then
+              sig=$(grep -oE "unexpected signal code [0-9]+" test-logs/swift-test.log | head -n 1)
+              echo "::warning::Parallel test run crashed ($sig); rerunning with --no-parallel"
+              echo "crashed=true" >> "$GITHUB_OUTPUT"
+              mode="serial rerun after a parallel crash ($sig)"
+              set +e
+              bounded swift test --enable-code-coverage --no-parallel > test-logs/swift-test-serial.log 2>&1
+              rc=$?
+              set -e
+              if [ "$rc" -ne 0 ]; then
+                echo "::group::Full output of the --no-parallel run (exit $rc)"
+                cat test-logs/swift-test-serial.log
+                echo "::endgroup::"
+                backtraces test-logs/swift-test-serial.log
+              else
+                tail -n 40 test-logs/swift-test-serial.log
+              fi
+            fi
+          else
+            tail -n 40 test-logs/swift-test.log
+          fi
           {
-            echo "## $([ $rc -eq 0 ] && echo '✅' || echo '❌') Tests"
+            echo "## $([ "$rc" -eq 0 ] && echo '✅' || echo '❌') Tests ($mode)"
             echo ""
             echo '```'
-            echo "$out" | grep -E "Executed [0-9]+ tests|Test run with" | tail -2
+            summary test-logs/swift-test.log
+            if [ -f test-logs/swift-test-serial.log ]; then
+              echo "--- --no-parallel:"
+              summary test-logs/swift-test-serial.log
+            fi
             echo '```'
+            if [ "$rc" -ne 0 ] || grep -q "fatal signal" test-logs/swift-test.log; then
+              echo ""
+              echo '```'
+              backtraces test-logs/swift-test.log | head -n 80
+              [ -f test-logs/swift-test-serial.log ] && backtraces test-logs/swift-test-serial.log | head -n 80
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+
+      # Crash reports written while the tests ran, next to the full logs.
+      - name: Collect crash reports
+        if: ${{ !cancelled() && (steps.tests.outcome == 'failure' || steps.tests.outputs.crashed == 'true') }}
+        run: |
+          mkdir -p test-logs/DiagnosticReports
+          # ReportCrash writes asynchronously; give it up to a minute.
+          for _ in $(seq 1 12); do
+            for dir in "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports; do
+              [ -d "$dir" ] || continue
+              find "$dir" -type f -newer test-logs/.started -exec cp {} test-logs/DiagnosticReports/ \; || true
+            done
+            [ -n "$(ls -A test-logs/DiagnosticReports)" ] && break
+            sleep 5
+          done
+          ls -la test-logs/DiagnosticReports
+          for f in test-logs/DiagnosticReports/*; do
+            [ -f "$f" ] || continue
+            echo "::group::$(basename "$f")"
+            head -c 200000 "$f"
+            echo
+            echo "::endgroup::"
+          done
+
+      - name: Upload test logs and crash reports
+        if: ${{ !cancelled() && !env.ACT && (steps.tests.outcome == 'failure' || steps.tests.outputs.crashed == 'true') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a   # v7
+        with:
+          name: test-logs
+          path: test-logs/
+          include-hidden-files: false
+          if-no-files-found: warn
+          retention-days: 30
 
       # Per-file floor: pure logic must stay fully tested. Add a file here
       # when it lands in QuickTubeCore and has no I/O of its own.
       - name: Coverage floor
         if: ${{ !cancelled() }}
+        env:
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
         run: |
           CODECOV_JSON=$(swift test --show-codecov-path)
           echo "codecov: $CODECOV_JSON"
+          # A crashed test run writes no coverage export. The tests step already failed
+          # then; say so instead of a traceback. A green run without the export fails.
+          if [ ! -f "$CODECOV_JSON" ]; then
+            if [ "$TESTS_OUTCOME" = "success" ]; then
+              echo "::error::Coverage export missing after a green test run: $CODECOV_JSON"
+              echo "## ❌ Coverage floor: export missing after a green test run" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            echo "::warning::Coverage floor skipped: no coverage export, the test run did not finish ($TESTS_OUTCOME)."
+            echo "## ⏭️ Coverage floor: skipped (tests $TESTS_OUTCOME, no coverage export)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           python3 - "$CODECOV_JSON" <<'EOF'
           import json, os, sys
 
+          # v2 floors are floor(measured) - 2. GIFUploader (88.29 %) and
+          # RecordingFinisher (100 %) were measured on the macos-15 runner, which
+          # has the encoders their AVFoundation end-to-end tests need; on a
+          # machine without them those tests skip and these two floors fail.
           floors = {
+              "AppSettings.swift": 82.0,
               "AppState.swift": 97.0,
+              "CameraLayout.swift": 98.0,
+              "CaptureTarget.swift": 89.0,
+              "GIFUploader.swift": 86.0,
               "GoogleAuth.swift": 87.0,
+              "HotkeyMigration.swift": 98.0,
+              "KeyComboFormatter.swift": 98.0,
+              "LocalSaver.swift": 98.0,
               "LoopbackServer.swift": 91.0,
               "PKCE.swift": 100.0,
+              "RecordingCleanup.swift": 90.0,
+              "RecordingFinisher.swift": 98.0,
               "RecordingNaming.swift": 100.0,
               "ShareLink.swift": 100.0,
               "YouTubeUploader.swift": 95.0,

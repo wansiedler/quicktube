@@ -20,16 +20,173 @@ struct SettingsView: View {
                 if let message = model.launchAtLoginMessage {
                     Text(message).font(.callout).foregroundStyle(.secondary)
                 }
+                HStack {
+                    Toggle(
+                        "Check for updates automatically",
+                        isOn: Binding(
+                            get: { model.settings.automaticUpdates },
+                            set: { model.setAutomaticUpdates($0) }))
+                    Spacer()
+                    Button("Check Now") { model.checkForUpdates() }
+                }
+                .disabled(!model.updater.isAvailable)
+                if !model.updater.isAvailable {
+                    Text("Updates are off in this build: it has no update signing key.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
             }
             Section("Recording") {
-                Picker("Quality", selection: $model.quality.resolution) {
+                Picker("Capture", selection: $model.settings.captureMode) {
+                    ForEach(CaptureMode.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Picker("Quality", selection: $model.settings.quality.resolution) {
                     ForEach(RecordingQuality.Resolution.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
-                Picker("Frame rate", selection: $model.quality.fps) {
+                .pickerStyle(.segmented)
+                Picker("Frame rate", selection: $model.settings.quality.fps) {
                     ForEach(RecordingQuality.frameRates, id: \.self) { Text("\($0) fps").tag($0) }
                 }
+                .pickerStyle(.segmented)
+                Picker("Bitrate", selection: $model.settings.quality.bitrate) {
+                    ForEach(RecordingQuality.Bitrate.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
                 Text(
-                    "Applies to the next recording. 1080p at 30 fps is about 12 MB per minute; native 6K at 60 fps about 55 MB."
+                    "Native 6K at 60 fps: High ≈ 39 Mbit/s, Balanced ≈ 15, Compact ≈ 7 (the old built-in encoder "
+                        + "used ≈ 21). Still screens take less."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+                Toggle("System audio", isOn: $model.settings.systemAudioEnabled)
+                Toggle("Microphone", isOn: $model.settings.microphoneEnabled)
+                Text(
+                    "Select area and Select window show a chooser first: drag an area or click a window, Esc cancels. "
+                        + "System audio records other apps' sound, never QuickTube's own."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+                Toggle(
+                    "Pause and resume (\(AppModel.pauseCombo.label))",
+                    isOn: Binding(
+                        get: { model.settings.pauseEnabled },
+                        set: { model.setPauseEnabled($0) }))
+                Stepper(
+                    "Trim start: \(seconds(model.settings.trimHeadSeconds))",
+                    value: $model.settings.trimHeadSeconds, in: 0...3, step: 0.5)
+                Stepper(
+                    "Trim end: \(seconds(model.settings.trimTailSeconds))",
+                    value: $model.settings.trimTailSeconds, in: 0...3, step: 0.5)
+                Text("Trim end removes the stop-shortcut press. At least half a second is always kept.")
+                    .font(.callout).foregroundStyle(.secondary)
+                TextField("Title template", text: $model.settings.titleTemplate)
+                Text(
+                    "Names the file and the upload. {date} is the start time, {app} the frontmost app, {display} the screen name."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+                Text(
+                    "Applies to the next recording. Balanced: up to about 8 MB per minute at 1080p 30 fps, 110 MB at native 6K 60 fps."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+            }
+            Section("Camera") {
+                Toggle(
+                    "Camera bubble",
+                    isOn: Binding(
+                        get: { model.settings.cameraEnabled },
+                        set: { model.setCameraEnabled($0) }))
+                Toggle("Always on", isOn: $model.settings.cameraAlwaysOn)
+                    .disabled(!model.settings.cameraEnabled)
+                Picker("Size", selection: $model.settings.cameraSize) {
+                    ForEach(CameraSize.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Picker("Corner", selection: $model.settings.cameraCorner) {
+                    ForEach(Corner.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                Text(
+                    "A round camera view shown while recording, or all the time with Always on. "
+                        + "It is part of the recording, in the chosen corner of the display or selected area; "
+                        + "drag it anywhere. Window recordings capture only that window, so they never "
+                        + "contain the bubble."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+            }
+            Section("History") {
+                Toggle("Keep recent links", isOn: $model.settings.historyEnabled)
+                HStack {
+                    Text("The last 20 uploaded links, under Recent Links in the menu.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Clear") { model.state.clearHistory() }
+                        .disabled(model.state.history.isEmpty)
+                }
+            }
+            Section("Overlays") {
+                Toggle("Highlight clicks", isOn: $model.settings.clickHighlightEnabled)
+                HStack {
+                    Toggle("Show keystrokes", isOn: $model.settings.keystrokeOverlayEnabled)
+                        // Turning it on needs the grant; turning it off never does (grant revoked later).
+                        .disabled(
+                            model.inputMonitoringStatus != .granted && !model.settings.keystrokeOverlayEnabled
+                        )
+                    Spacer()
+                    switch model.inputMonitoringStatus {
+                    case .granted:
+                        EmptyView()
+                    case .notDetermined:
+                        Button("Request") { model.requestInputMonitoring() }
+                    case .denied:
+                        Button("Open System Settings") {
+                            NSWorkspace.shared.open(Permissions.inputMonitoringPane)
+                        }
+                    }
+                }
+                Toggle(
+                    "Show only shortcuts (keys with ⌘ ⌃ ⌥)", isOn: $model.settings.keystrokeShortcutsOnly
+                )
+                .disabled(!model.settings.keystrokeOverlayEnabled)
+                Toggle("Show overlays in recording", isOn: $model.settings.overlaysInRecording)
+                Toggle("Hide the status pill from screen sharing", isOn: $model.settings.hudHiddenFromCapture)
+                Text(
+                    "While recording, a ring marks each click and a pill above the status bar shows the last "
+                        + "key combo. Keystrokes need Input Monitoring. \"Show only shortcuts\" leaves out plain "
+                        + "typing (letters with or without ⇧); nothing is shown while a password field is active. "
+                        + "With \"Show overlays in recording\" off "
+                        + "you still see them, but the video does not."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+            }
+            Section("Files") {
+                Toggle("Move to Trash after upload", isOn: $model.settings.deleteAfterUpload)
+                Stepper(
+                    value: $model.settings.deleteOlderThanDays, in: 0...365
+                ) {
+                    Text(
+                        model.settings.deleteOlderThanDays == 0
+                            ? "Trash old recordings: never"
+                            : "Trash recordings older than \(model.settings.deleteOlderThanDays) days")
+                }
+                Text(
+                    "Recordings go to the Trash, not away for good. Old ones are trashed when QuickTube starts."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+            }
+            Section("GIF") {
+                Toggle(
+                    "Make GIFs (\(model.combo(for: .gif).label))",
+                    isOn: Binding(
+                        get: { model.settings.gifEnabled },
+                        set: { model.setGIFEnabled($0) }))
+                Stepper(
+                    "Frame rate: \(model.settings.gifFPS) fps", value: $model.settings.gifFPS, in: 5...30)
+                Stepper(
+                    "Max width: \(model.settings.gifMaxWidth) px", value: $model.settings.gifMaxWidth,
+                    in: 320...1920, step: 80)
+                Stepper(
+                    "Max length: \(model.settings.gifMaxSeconds) s", value: $model.settings.gifMaxSeconds,
+                    in: 5...120, step: 5)
+                Text(
+                    "Stopping with the GIF shortcut saves a GIF next to the recording instead of uploading, "
+                        + "copies it and shows it in Finder. Long recordings are cut after the maximum length."
                 )
                 .font(.callout).foregroundStyle(.secondary)
             }
@@ -41,6 +198,13 @@ struct SettingsView: View {
                     "Screen Recording", status: model.screenRecordingStatus,
                     pane: Permissions.screenRecordingPane,
                     request: { model.requestScreenRecording() })
+                permissionRow(
+                    "Camera", status: model.cameraStatus, pane: Permissions.cameraPane,
+                    request: { model.requestCamera() })
+                permissionRow(
+                    "Input Monitoring", status: model.inputMonitoringStatus,
+                    pane: Permissions.inputMonitoringPane,
+                    request: { model.requestInputMonitoring() })
                 Text("macOS applies a new Screen Recording grant after QuickTube is relaunched.")
                     .font(.callout).foregroundStyle(.secondary)
             }
@@ -65,14 +229,34 @@ struct SettingsView: View {
             }
             Section("Telegram") {
                 SecureField("Bot token", text: $model.telegramToken)
-                TextField("Channel (@name or -100… id)", text: $model.telegramChat)
+                TextField("Channel (@name or -100… id), or your user id", text: $model.telegramChat)
                 HStack {
                     Button("Save Telegram") { model.saveTelegram() }
                     Spacer()
                     Text(model.telegramConfigured ? "Configured" : "Not set up").foregroundStyle(.secondary)
                 }
+                Toggle(
+                    "Mobile-friendly (H.264, up to 1080p) — needed for phones",
+                    isOn: $model.settings.telegramMobileFriendly)
                 Text(
-                    "Create a bot with @BotFather, add it to your channel as admin. Bots accept files up to 50 MB."
+                    "Telegram's phone apps show a white screen for large HEVC recordings. On: every recording is "
+                        + "sent as H.264 at most 1920×1080 (frame rate kept), re-encoded unless it already is one."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+                Toggle("Compress to fit the limit", isOn: $model.settings.telegramCompressToFit)
+                Toggle("Allow downscaling when compressing", isOn: $model.settings.telegramAllowDownscale)
+                Text(
+                    "With mobile-friendly off, compression only lowers video and audio quality and the frame "
+                        + "size stays unless downscaling is allowed. Mobile-friendly always caps it at 1080p."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+                Stepper(
+                    "Limit (MB): \(model.settings.telegramLimitMB)", value: $model.settings.telegramLimitMB,
+                    in: 10...2000, step: 10)
+                Text(
+                    "Create a bot with @BotFather, add it to your channel as admin. The Bot API accepts files "
+                        + "up to 50 MB; raise the limit only for a self-hosted Bot API server. Larger recordings "
+                        + "are re-encoded to fit when compression is on."
                 )
                 .font(.callout).foregroundStyle(.secondary)
                 if let message = model.telegramMessage {
@@ -102,13 +286,45 @@ struct SettingsView: View {
                     Text(message).font(.callout).foregroundStyle(.secondary)
                 }
             }
+            Section("Vimeo") {
+                SecureField("Access token", text: $model.vimeoToken)
+                Picker("Privacy", selection: $model.settings.vimeoPrivacy) {
+                    ForEach(VimeoPrivacy.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                HStack {
+                    Button("Save Vimeo") { model.saveVimeo() }
+                    Spacer()
+                    Text(model.vimeoConfigured ? "Configured" : "Not set up").foregroundStyle(.secondary)
+                }
+                Text(
+                    "Create an app at developer.vimeo.com, generate a personal access token with the upload, "
+                        + "private and edit scopes."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+                if let message = model.vimeoMessage {
+                    Text(message).font(.callout).foregroundStyle(.secondary)
+                }
+            }
             Section("Shortcuts") {
+                shortcutRow("Record / Save only", destination: .local)
                 shortcutRow("Record → YouTube", destination: .youtube)
                 shortcutRow("Record → Telegram", destination: .telegram)
                 shortcutRow("Record → Google Drive", destination: .drive)
                 shortcutRow("Record → Slack", destination: .slack)
+                shortcutRow("Record → Vimeo", destination: .vimeo)
+                if model.settings.gifEnabled {
+                    shortcutRow("Record → GIF", destination: .gif)
+                }
+                if model.settings.pauseEnabled {
+                    HStack {
+                        Text("Pause / Resume")
+                        Spacer()
+                        Text(AppModel.pauseCombo.label).font(.title3.monospaced())
+                        Text("fixed").foregroundStyle(.secondary)
+                    }
+                }
                 Text(
-                    "Hold ⌘ or ⌃ (plus any other modifiers). Either shortcut starts a recording; the one you press to stop picks the destination."
+                    "Hold ⌘ or ⌃ (plus any other modifiers). ⌃⌥⌘R starts a recording; press it again to just save the file, or press a destination shortcut to stop and upload there. The GIF and Pause rows appear when those features are on."
                 )
                 .font(.callout).foregroundStyle(.secondary)
                 if let message = model.hotkeyMessage {
@@ -119,9 +335,11 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(minWidth: 480, idealWidth: 520, minHeight: 420, idealHeight: Self.idealHeight)
         .onAppear {
+            Self.fitWindowToScreen()
             model.refreshAuth()
             model.refreshTelegram()
             model.refreshSlack()
+            model.refreshVimeo()
             model.refreshLaunchAtLogin()
             model.refreshPermissions()
         }
@@ -132,6 +350,44 @@ struct SettingsView: View {
     private static var idealHeight: CGFloat {
         let screen = NSScreen.main?.visibleFrame.height ?? 900
         return max(420, screen - 60)
+    }
+
+    /// Sizes the window to its content, capped at the screen height (then the form scrolls).
+    /// macOS restores the last frame otherwise, so this runs on every open, after layout.
+    private static func fitWindowToScreen() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            guard let window = NSApp.windows.first(where: { $0.title.hasSuffix("Settings") }),
+                let screen = window.screen ?? NSScreen.main,
+                let content = window.contentView
+            else { return }
+            let visible = screen.visibleFrame
+            let chrome = window.frame.height - content.frame.height
+            let wanted = (documentHeight(in: content) ?? idealHeight) + chrome
+            var frame = window.frame
+            frame.size.height = min(max(wanted, 420), visible.height - 40)
+            frame.size.width = max(frame.width, 520)
+            // Keep the top edge where it was; clamp the whole window onto the screen.
+            frame.origin.y = window.frame.maxY - frame.height
+            if frame.minY < visible.minY { frame.origin.y = visible.minY }
+            if frame.maxY > visible.maxY { frame.origin.y = visible.maxY - frame.height }
+            if frame.maxX > visible.maxX { frame.origin.x = visible.maxX - frame.width }
+            window.setFrame(frame, display: true, animate: false)
+        }
+    }
+
+    /// The grouped form is an NSScrollView under the hood; its document view is the full content.
+    private static func documentHeight(in view: NSView) -> CGFloat? {
+        if let scroll = view as? NSScrollView, let document = scroll.documentView {
+            return document.frame.height + scroll.contentInsets.top + scroll.contentInsets.bottom
+        }
+        for child in view.subviews {
+            if let height = documentHeight(in: child) { return height }
+        }
+        return nil
+    }
+
+    private func seconds(_ value: Double) -> String {
+        value.formatted(.number.precision(.fractionLength(1))) + " s"
     }
 
     @ViewBuilder

@@ -20,8 +20,17 @@ public struct UploadResult: Sendable, Equatable {
         self.privacyStatus = nil
     }
 
-    /// False means YouTube overrode the request, usually the unverified-API-project lock.
-    public var isUnlisted: Bool { privacyStatus == nil || privacyStatus == "unlisted" }
+    /// A destination with its own link, video id and privacy (Vimeo's `privacy.view`).
+    public init(link: URL, videoID: String, privacyStatus: String) {
+        self.link = link
+        self.videoID = videoID
+        self.privacyStatus = privacyStatus
+    }
+
+    /// False means YouTube overrode the requested "unlisted" with "private", usually the
+    /// unverified-API-project lock. Other destinations' privacy values (Vimeo's "anybody", "nobody") are
+    /// what the user chose, so they never count as an override.
+    public var isUnlisted: Bool { privacyStatus != "private" }
 }
 
 public enum UploadError: Error, Equatable {
@@ -36,9 +45,33 @@ public enum UploadError: Error, Equatable {
     case sessionExpired
 }
 
+/// Extra facts about a recording that some destinations put in their post.
+public struct UploadContext: Sendable {
+    /// Name of the screen that was recorded.
+    public var display: String?
+    /// Reports a stage change ("Compressing · details", "Uploading"); may be called from any thread.
+    public var onStatus: @Sendable (String) -> Void
+
+    public init(display: String? = nil, onStatus: @escaping @Sendable (String) -> Void = { _ in }) {
+        self.display = display
+        self.onStatus = onStatus
+    }
+}
+
 public protocol VideoUploader: Sendable {
-    func upload(file: URL, title: String, progress: @escaping @Sendable (Double) -> Void) async throws
-        -> UploadResult
+    func upload(
+        file: URL, title: String, context: UploadContext,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> UploadResult
+}
+
+extension VideoUploader {
+    /// For callers (and fakes) that have no context to pass.
+    public func upload(
+        file: URL, title: String, progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> UploadResult {
+        try await upload(file: file, title: title, context: UploadContext(), progress: progress)
+    }
 }
 
 /// Resumable `videos.insert`: one session, fixed-size chunks, resume on failure.
@@ -71,8 +104,10 @@ public actor YouTubeUploader: VideoUploader {
     }
 
     public func upload(
-        file: URL, title: String, progress: @escaping @Sendable (Double) -> Void
+        file: URL, title: String, context: UploadContext = UploadContext(),
+        progress: @escaping @Sendable (Double) -> Void
     ) async throws -> UploadResult {
+        context.onStatus("Uploading")
         let size: Int
         let handle: FileHandle
         do {
