@@ -66,27 +66,41 @@ final class HUDController {
         }
     }
 
+    /// Only a change of phase (not progress) picks the screen under the cursor again; anything else
+    /// re-measures the pill in place, so background progress cannot move it between displays mid-recording.
     private func phaseChanged() {
         let moved = state.phase != shownPhase
+        let repick = shownPhase.map { !Self.sameKind($0, state.phase) } ?? true
         shownPhase = state.phase
         switch state.phase {
         case .idle:
             cancelHide()
-            showOrHideBackground()
+            showOrHideBackground(repick: repick)
         case .recording, .paused, .uploading:
             cancelHide()
-            show()
+            show(repick: repick)
         case .done, .failed:
             if moved {
                 cancelHide()
-                show()
+                show(repick: repick)
                 hide(after: delay(for: state.phase))
             } else if expired {
-                showOrHideBackground()
+                showOrHideBackground(repick: false)
             } else {
                 // A background upload changed; re-measure and keep the running timer.
-                show()
+                show(repick: false)
             }
+        }
+    }
+
+    /// Same case, whatever the progress or link.
+    private static func sameKind(_ lhs: Phase, _ rhs: Phase) -> Bool {
+        switch (lhs, rhs) {
+        case (.idle, .idle), (.recording, .recording), (.paused, .paused), (.uploading, .uploading),
+            (.done, .done), (.failed, .failed):
+            return true
+        default:
+            return false
         }
     }
 
@@ -102,18 +116,20 @@ final class HUDController {
     }
 
     /// With background uploads left the pill shows them; otherwise it goes away.
-    private func showOrHideBackground() {
+    private func showOrHideBackground(repick: Bool) {
         if state.backgroundUploads.isEmpty {
             panel.orderOut(nil)
         } else {
-            show()
+            show(repick: repick)
         }
     }
 
-    private func show() {
+    /// `repick` places the pill on the screen under the cursor; otherwise it stays on its current screen.
+    private func show(repick: Bool) {
+        let current = !repick && panel.isVisible ? panel.screen : nil
         let mouse = NSEvent.mouseLocation
         let underCursor = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
-        guard let screen = underCursor ?? NSScreen.main else { return }
+        guard let screen = current ?? underCursor ?? NSScreen.main else { return }
         let visible = screen.visibleFrame
         // Errors get the whole screen width so the server's message is readable.
         let maxWidth: CGFloat
@@ -142,7 +158,7 @@ final class HUDController {
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled, let self else { return }
             self.expired = true
-            self.showOrHideBackground()
+            self.showOrHideBackground(repick: false)
         }
     }
 }

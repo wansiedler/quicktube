@@ -470,6 +470,9 @@ public final class AppState {
         phase = .uploading(progress: 0)
         let title = title ?? pendingTitle ?? file.deletingPathExtension().lastPathComponent
         var context = context ?? pendingUploadContext
+        // `retry()` of this upload reuses them, also when they were passed in (a background failure's retry).
+        pendingTitle = title
+        pendingUploadContext = UploadContext(display: context.display)
         guard let uploader = uploaders[destination] else {
             uploadFailed(
                 id, error: DestinationError.unavailable(destination), file: file, destination: destination,
@@ -493,12 +496,15 @@ public final class AppState {
                 phase = .done(link: link)
             } else {
                 backgroundUploads.removeAll { $0.id == id }
+                // Not while a recording is starting (`busy`), nor over a recording, upload or failure on
+                // screen: the notification carries the link.
                 switch phase {
                 case .idle, .done:
-                    self.destination = destination
-                    phase = .done(link: link)
+                    if !busy {
+                        self.destination = destination
+                        phase = .done(link: link)
+                    }
                 default:
-                    // Recording, uploading or a failure on screen: the notification carries the link.
                     break
                 }
             }
