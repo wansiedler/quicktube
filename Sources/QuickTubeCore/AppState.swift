@@ -112,7 +112,35 @@ public enum Phase: Equatable, Sendable {
     case failed(message: String, file: URL?)
 }
 
+/// An upload that keeps running after the hotkey started the next recording.
+public struct BackgroundUpload: Identifiable, Sendable, Equatable {
+    public let id: UUID
+    public let destination: Destination
+    /// Stage text as in `AppState.uploadStage`.
+    public var stage: String
+    public var progress: Double
+    public let file: URL
+
+    public init(id: UUID = UUID(), destination: Destination, stage: String, progress: Double, file: URL) {
+        self.id = id
+        self.destination = destination
+        self.stage = stage
+        self.progress = progress
+        self.file = file
+    }
+}
+
+/// The newest background upload that failed; `retry()` uploads its file again once nothing else is shown.
+public struct BackgroundFailure: Sendable, Equatable {
+    public let message: String
+    public let file: URL
+    public let destination: Destination
+    public let title: String
+    public let display: String?
+}
+
 /// idle → recording ⇄ paused → (finish) → uploading → done; failed keeps the file or the segments for a retry.
+/// The hotkey during an upload moves it to `backgroundUploads` and starts the next recording.
 @MainActor
 @Observable
 public final class AppState {
@@ -132,6 +160,11 @@ public final class AppState {
     /// Called right before the recorder starts, once the target is known, so windows that belong in the
     /// recording (the camera bubble) can already be on screen for its first frame.
     @ObservationIgnored public var onRecordingWillStart: (@MainActor (CaptureTarget) -> Void)?
+
+    /// Uploads that run on while `phase` shows something else, oldest first.
+    public private(set) var backgroundUploads: [BackgroundUpload] = []
+    /// Kept until `retry()` uploads it again; a newer background failure replaces it.
+    public private(set) var lastBackgroundFailure: BackgroundFailure?
 
     /// The last `Self.historyLimit` successful uploads, newest first.
     public private(set) var history: [HistoryItem]
@@ -166,7 +199,10 @@ public final class AppState {
     /// Recorded time before the current stretch, and when that stretch began (nil while paused).
     private var recordedBefore: TimeInterval = 0
     private var stretchStart: Date?
-    /// Set while a transition is in flight, so a second hotkey press cannot re-enter it.
+    /// The upload `phase` shows; nil once it ended or moved to `backgroundUploads`.
+    private var foregroundUpload: BackgroundUpload?
+    /// Set while a recording transition is in flight, so a second hotkey press cannot re-enter it.
+    /// Uploads run outside it: the hotkey can start the next recording while one is in progress.
     private var busy = false
 
     public convenience init(
@@ -234,19 +270,41 @@ public final class AppState {
         return recordedBefore + running
     }
 
-    /// The hotkey action; the destination only matters when it stops a recording.
+    /// True while a background upload failed and nothing else is shown, so `retry()` can re-run it.
+    public var canRetryBackgroundFailure: Bool {
+        guard lastBackgroundFailure != nil else { return false }
+        switch phase {
+        case .idle, .done: return true
+        default: return false
+        }
+    }
+
+    /// The hotkey action; the destination only matters when it stops a recording. During an upload it
+    /// starts a new recording and the upload carries on in `backgroundUploads`.
     public func toggle(destination: Destination = .youtube) async {
         guard !busy else { return }
         busy = true
-        defer { busy = false }
         switch phase {
-        case .idle, .done, .failed:
+        case .idle, .done, .failed, .uploading:
+            moveUploadToBackground()
             await startRecording()
+            busy = false
         case .recording, .paused:
-            await stopAndUpload(to: destination)
-        case .uploading:
-            break
+            let file = await stopAndFinish()
+            // The upload can take minutes; the hotkey must be able to start the next recording meanwhile.
+            busy = false
+            if let file { await upload(file, to: destination) }
         }
+    }
+
+    /// Hands the foreground upload over to `backgroundUploads` with its current stage and progress.
+    private func moveUploadToBackground() {
+        guard var upload = foregroundUpload, case .uploading(let progress) = phase else { return }
+        upload.stage = uploadStage
+        upload.progress = progress
+        backgroundUploads.append(upload)
+        foregroundUpload = nil
+        phase = .idle
     }
 
     /// The pause hotkey: pauses while recording, resumes while paused, otherwise does nothing.
@@ -290,17 +348,31 @@ public final class AppState {
         }
     }
 
+    /// Retries the failed cycle; without one, the last failed background upload (see `canRetryBackgroundFailure`).
     public func retry() async {
-        guard !busy, case .failed(_, let file) = phase else { return }
-        if let segments = pendingSegments {
-            busy = true
-            defer { busy = false }
-            await finishAndUpload(segments, to: destination)
-        } else if let file {
-            busy = true
-            defer { busy = false }
-            await upload(file, to: destination)
+        guard !busy else { return }
+        guard case .failed(_, let file) = phase else {
+            await retryLastBackgroundFailure()
+            return
         }
+        busy = true
+        let ready: URL?
+        if let segments = pendingSegments {
+            ready = await finish(segments)
+        } else {
+            ready = file
+        }
+        busy = false
+        if let ready { await upload(ready, to: destination) }
+    }
+
+    /// Uploads the file of the last failed background upload again, as a foreground upload.
+    public func retryLastBackgroundFailure() async {
+        guard !busy, canRetryBackgroundFailure, let failure = lastBackgroundFailure else { return }
+        lastBackgroundFailure = nil
+        await upload(
+            failure.file, to: failure.destination, title: failure.title,
+            context: UploadContext(display: failure.display))
     }
 
     /// In the select modes the picker runs first; cancelling it returns to `.idle` without a notification.
@@ -332,10 +404,10 @@ public final class AppState {
         }
     }
 
-    private func stopAndUpload(to destination: Destination) async {
+    /// Stops the recorder and finishes the segments; nil after a failure, which is already reported.
+    private func stopAndFinish() async -> URL? {
         pendingTitle = RecordingNaming.render(template: titleTemplate(), context: titleContext)
         pendingUploadContext = UploadContext(display: titleContext.display)
-        self.destination = destination
         recordedBefore = recordedDuration(at: clock())
         stretchStart = nil
         let segments: [URL]
@@ -345,18 +417,18 @@ public final class AppState {
             // The segments survive a timeout; finishing them may work once the last one is closed.
             if case RecorderError.stopTimedOut(let kept) = error { pendingSegments = kept }
             fail(error, file: nil, stage: .recording)
-            return
+            return nil
         }
-        await finishAndUpload(segments, to: destination)
+        return await finish(segments)
     }
 
-    /// Joins and trims the segments into `<recordings folder>/<title>.mp4`, then uploads that file.
+    /// Joins and trims the segments into `<recordings folder>/<title>.mp4` and returns that file.
     /// On failure the segments are remembered so `retry()` can finish them again.
-    private func finishAndUpload(_ segments: [URL], to destination: Destination) async {
+    private func finish(_ segments: [URL]) async -> URL? {
         guard let first = segments.first else {
             pendingSegments = nil
             fail(RecorderError.finishFailed("No segments were recorded."), file: nil, stage: .recording)
-            return
+            return nil
         }
         let title = pendingTitle ?? RecordingNaming.title(for: titleContext.date)
         let output = Self.availableURL(in: first.deletingLastPathComponent(), title: title)
@@ -367,10 +439,10 @@ public final class AppState {
             log("Finishing \(segments.map(\.lastPathComponent)) failed: \(error)")
             pendingSegments = segments
             fail(error, file: nil, stage: .recording)
-            return
+            return nil
         }
         pendingSegments = nil
-        await upload(file, to: destination)
+        return file
     }
 
     /// `<title>.mp4` in `directory`; on a name clash " (2)", " (3)", … is appended. Only the file name
@@ -385,36 +457,84 @@ public final class AppState {
         return target
     }
 
-    private func upload(_ file: URL, to destination: Destination) async {
+    /// Starts as the foreground upload; if the hotkey moves it to `backgroundUploads` meanwhile, it ends
+    /// there: the link is copied and announced as usual, but the phase only changes when nothing else shows.
+    private func upload(
+        _ file: URL, to destination: Destination, title: String? = nil, context: UploadContext? = nil
+    ) async {
         self.destination = destination
+        let id = UUID()
+        foregroundUpload = BackgroundUpload(
+            id: id, destination: destination, stage: "Uploading", progress: 0, file: file)
         uploadStage = "Uploading"
         phase = .uploading(progress: 0)
+        let title = title ?? pendingTitle ?? file.deletingPathExtension().lastPathComponent
+        var context = context ?? pendingUploadContext
+        // `retry()` of this upload reuses them, also when they were passed in (a background failure's retry).
+        pendingTitle = title
+        pendingUploadContext = UploadContext(display: context.display)
         guard let uploader = uploaders[destination] else {
-            fail(DestinationError.unavailable(destination), file: file, stage: .upload)
+            uploadFailed(
+                id, error: DestinationError.unavailable(destination), file: file, destination: destination,
+                title: title, display: context.display)
             return
         }
-        let title = pendingTitle ?? file.deletingPathExtension().lastPathComponent
         do {
-            var context = pendingUploadContext
             context.onStatus = { stage in
-                Task { @MainActor in self.setStage(stage) }
+                Task { @MainActor in self.setStage(stage, upload: id) }
             }
             let result = try await uploader.upload(
                 file: file, title: title, context: context
             ) {
                 value in
-                Task { @MainActor in self.setProgress(value) }
+                Task { @MainActor in self.setProgress(value, upload: id) }
             }
             let link = result.link
             lastLink = link
-            phase = .done(link: link)
+            if foregroundUpload?.id == id {
+                foregroundUpload = nil
+                phase = .done(link: link)
+            } else {
+                backgroundUploads.removeAll { $0.id == id }
+                // Not while a recording is starting (`busy`), nor over a recording, upload or failure on
+                // screen: the notification carries the link.
+                switch phase {
+                case .idle, .done:
+                    if !busy {
+                        self.destination = destination
+                        phase = .done(link: link)
+                    }
+                default:
+                    break
+                }
+            }
             record(link: link, destination: destination, title: title)
             notifier.linkReady(link, isUnlisted: result.isUnlisted)
             // A GIF is made from the recording and "Save only" keeps it; neither uploaded the recording.
             if destination != .gif, destination != .local { runAfterUpload(file) }
         } catch {
-            fail(error, file: file, stage: .upload)
+            uploadFailed(
+                id, error: error, file: file, destination: destination, title: title, display: context.display
+            )
         }
+    }
+
+    /// A foreground failure ends in `.failed` as before; a background one is announced and remembered for
+    /// `retry()`, and the phase stays as it is.
+    private func uploadFailed(
+        _ id: UUID, error: Error, file: URL, destination: Destination, title: String, display: String?
+    ) {
+        if foregroundUpload?.id == id {
+            foregroundUpload = nil
+            fail(error, file: file, stage: .upload)
+            return
+        }
+        backgroundUploads.removeAll { $0.id == id }
+        let message = Self.message(for: error, stage: .upload)
+        log("Background upload of \(file.lastPathComponent) to \(destination.label) failed: \(error)")
+        lastBackgroundFailure = BackgroundFailure(
+            message: message, file: file, destination: destination, title: title, display: display)
+        notifier.failed(message)
     }
 
     private func runAfterUpload(_ file: URL) {
@@ -461,16 +581,32 @@ public final class AppState {
         return "\(stage[..<split.lowerBound]) \(percent) · \(stage[split.upperBound...])"
     }
 
-    private func setStage(_ stage: String) {
-        guard case .uploading = phase else { return }
-        uploadStage = stage
-        // Progress is per stage: a new stage starts again at 0.
-        phase = .uploading(progress: 0)
+    /// "Uploading to Telegram 43%, YouTube 10% in background"; nil without background uploads.
+    public static func backgroundStatus(_ uploads: [BackgroundUpload]) -> String? {
+        guard !uploads.isEmpty else { return nil }
+        let parts = uploads.map { "\($0.destination.label) \(Int($0.progress * 100))%" }
+        return "Uploading to \(parts.joined(separator: ", ")) in background"
     }
 
-    private func setProgress(_ value: Double) {
-        guard case .uploading = phase else { return }
-        phase = .uploading(progress: value)
+    /// Updates whichever upload `id` is: the foreground one in `phase`, or its background entry. A late
+    /// callback from an upload that already ended matches neither and is dropped.
+    private func setStage(_ stage: String, upload id: UUID) {
+        // Progress is per stage: a new stage starts again at 0.
+        if foregroundUpload?.id == id, case .uploading = phase {
+            uploadStage = stage
+            phase = .uploading(progress: 0)
+        } else if let index = backgroundUploads.firstIndex(where: { $0.id == id }) {
+            backgroundUploads[index].stage = stage
+            backgroundUploads[index].progress = 0
+        }
+    }
+
+    private func setProgress(_ value: Double, upload id: UUID) {
+        if foregroundUpload?.id == id, case .uploading = phase {
+            phase = .uploading(progress: value)
+        } else if let index = backgroundUploads.firstIndex(where: { $0.id == id }) {
+            backgroundUploads[index].progress = value
+        }
     }
 
     private func fail(_ error: Error, file: URL?, stage: Stage) {

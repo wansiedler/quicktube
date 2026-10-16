@@ -8,6 +8,9 @@ struct MenuContent: View {
 
     var body: some View {
         Text(statusText)
+        if let background = AppState.backgroundStatus(model.state.backgroundUploads) {
+            Text(background)
+        }
         Divider()
         switch model.state.phase {
         case .recording, .paused:
@@ -27,9 +30,8 @@ struct MenuContent: View {
             if model.settings.gifEnabled {
                 Button("Stop and Make GIF") { Task { await model.state.toggle(destination: .gif) } }
             }
-        case .uploading:
-            Button("Uploading…") {}.disabled(true)
         default:
+            // During an upload too: it carries on in the background.
             Button("Start Recording") { Task { await model.state.toggle() } }
         }
         if case .failed(_, let file) = model.state.phase {
@@ -39,6 +41,9 @@ struct MenuContent: View {
             if let pane = privacyPane {
                 Button("Open Privacy Settings…") { NSWorkspace.shared.open(pane) }
             }
+        }
+        if model.state.canRetryBackgroundFailure {
+            Button("Retry Background Upload") { Task { await model.state.retry() } }
         }
         if model.state.lastLink != nil {
             Button("Copy Last Link") { model.copyLastLink() }

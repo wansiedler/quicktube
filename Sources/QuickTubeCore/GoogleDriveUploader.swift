@@ -16,6 +16,8 @@ public actor GoogleDriveUploader: VideoUploader {
     private let uploadBase: URL
     private let log: @Sendable (String) -> Void
     private var folderID: String?
+    /// The folder lookup in flight: concurrent first uploads share it instead of creating two folders.
+    private var folderLookup: Task<String, Error>?
 
     public init(
         tokens: TokenProvider,
@@ -68,6 +70,16 @@ public actor GoogleDriveUploader: VideoUploader {
 
     private func ensureFolder() async throws -> String {
         if let folderID { return folderID }
+        if let folderLookup { return try await folderLookup.value }
+        let task = Task { try await findOrCreateFolder() }
+        folderLookup = task
+        defer { folderLookup = nil }
+        let id = try await task.value
+        folderID = id
+        return id
+    }
+
+    private func findOrCreateFolder() async throws -> String {
         let query =
             "name = '\(Self.folderName)' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
         var components = URLComponents(url: apiBase.appending(path: "files"), resolvingAgainstBaseURL: false)!
@@ -80,7 +92,6 @@ public actor GoogleDriveUploader: VideoUploader {
         let (listBody, listResponse) = try await session.data(for: lookup)
         _ = try check(listResponse, body: listBody, expecting: [200])
         if let existing = try JSONDecoder().decode(FileList.self, from: listBody).files.first {
-            folderID = existing.id
             return existing.id
         }
         var create = try await authorized(URLRequest(url: apiBase.appending(path: "files")))
@@ -90,9 +101,7 @@ public actor GoogleDriveUploader: VideoUploader {
             ["name": Self.folderName, "mimeType": "application/vnd.google-apps.folder"])
         let (body, response) = try await session.data(for: create)
         _ = try check(response, body: body, expecting: [200])
-        let created = try JSONDecoder().decode(DriveFile.self, from: body)
-        folderID = created.id
-        return created.id
+        return try JSONDecoder().decode(DriveFile.self, from: body).id
     }
 
     private struct Metadata: Encodable {
