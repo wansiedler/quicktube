@@ -383,18 +383,6 @@ final class LogLines: @unchecked Sendable {
         #expect(uploader.uploads.isEmpty)
     }
 
-    @Test func toggleIsIgnoredWhileUploading() async {
-        uploader.progressValues = [0.5]
-        let state = makeState()
-        await state.toggle()
-        async let upload: Void = state.toggle()
-        for _ in 0..<100 where state.phase == .recording { await Task.yield() }
-        await state.toggle()  // ignored: still uploading
-        await upload
-        #expect(recorder.starts == 1)
-        #expect(uploader.uploads.count == 1)
-    }
-
     @Test func stopFailureGoesToFailedWithoutUpload() async {
         recorder.stopError = RecorderError.notRecording
         let state = makeState()
@@ -1131,4 +1119,221 @@ final class HistoryLog: @unchecked Sendable {
     private var values: [[HistoryItem]] = []
     func append(_ items: [HistoryItem]) { lock.withLock { values.append(items) } }
     var all: [[HistoryItem]] { lock.withLock { values } }
+}
+
+/// Holds each upload until the test opens it, so an upload stays in progress. Uploads are numbered
+/// from 0 in the order they start; upload `n` returns `link(n)`.
+final class GateUploader: VideoUploader, @unchecked Sendable {
+    private let lock = NSLock()
+    private var opened: Set<Int> = []
+    private var allOpen = false
+    private var failures: [Int: Error] = [:]
+    private var uploaded: [URL] = []
+    private var progressSinks: [@Sendable (Double) -> Void] = []
+    private var statusSinks: [@Sendable (String) -> Void] = []
+
+    var calls: Int { lock.withLock { uploaded.count } }
+    var files: [URL] { lock.withLock { uploaded } }
+
+    func link(_ call: Int) -> URL { URL(string: "https://example.com/v\(call)")! }
+    func open(_ call: Int) { lock.withLock { _ = opened.insert(call) } }
+    func openAll() { lock.withLock { allOpen = true } }
+    func fail(_ call: Int, with error: Error) { lock.withLock { failures[call] = error } }
+    func reportProgress(_ call: Int, _ value: Double) { lock.withLock { progressSinks[call] }(value) }
+    func reportStatus(_ call: Int, _ stage: String) { lock.withLock { statusSinks[call] }(stage) }
+
+    func upload(
+        file: URL, title: String, context: UploadContext,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> UploadResult {
+        let call = lock.withLock {
+            uploaded.append(file)
+            progressSinks.append(progress)
+            statusSinks.append(context.onStatus)
+            return uploaded.count - 1
+        }
+        while !lock.withLock({ allOpen || opened.contains(call) }) { await Task.yield() }
+        if let error = lock.withLock({ failures[call] }) { throw error }
+        return UploadResult(link: link(call))
+    }
+}
+
+// MARK: - Recording while an upload runs
+
+extension AppStateTests {
+    func makeGatedState(
+        _ gate: GateUploader, picker: FakePicker? = nil, afterUpload: LogLines? = nil
+    ) -> AppState {
+        let cleanup: (@Sendable (URL) throws -> Void)? = afterUpload.map { log in
+            { @Sendable file in log.append(file.lastPathComponent) }
+        }
+        return AppState(
+            recorder: recorder, uploaders: [.youtube: gate, .telegram: gate], notifier: notifier,
+            finisher: FakeFinisher(), captureTarget: { .display(1) }, picker: picker,
+            captureMode: { picker == nil ? .displayUnderCursor : .selectArea },
+            titleProvider: { [now] in TitleContext(date: now) }, afterUpload: cleanup)
+    }
+
+    func waitUntil(_ condition: () -> Bool) async {
+        for _ in 0..<10_000 where !condition() { await Task.yield() }
+    }
+
+    /// Lets the main-actor hops of progress and stage callbacks land.
+    func settle() async {
+        for _ in 0..<20 { await Task.yield() }
+    }
+
+    @Test func hotkeyDuringUploadStartsARecordingAndTheUploadFinishesInTheBackground() async {
+        let gate = GateUploader()
+        let cleaned = LogLines()
+        let state = makeGatedState(gate, afterUpload: cleaned)
+        await state.toggle()
+        async let first: Void = state.toggle()
+        await waitUntil { gate.calls == 1 }
+        #expect(state.phase == .uploading(progress: 0))
+
+        await state.toggle()
+        #expect(recorder.starts == 2)
+        #expect(state.phase == .recording)
+        #expect(state.backgroundUploads.map(\.destination) == [.youtube])
+        #expect(state.backgroundUploads.map(\.file) == gate.files)
+
+        gate.open(0)
+        await first
+        #expect(state.phase == .recording)
+        #expect(state.backgroundUploads.isEmpty)
+        #expect(notifier.links.map(\.0) == [gate.link(0)])
+        #expect(state.history.map(\.link) == [gate.link(0)])
+        #expect(state.lastLink == gate.link(0))
+        #expect(cleaned.all == gate.files.map(\.lastPathComponent))
+    }
+
+    @Test func backgroundProgressUpdatesTheEntryNotThePhase() async {
+        let gate = GateUploader()
+        let state = makeGatedState(gate)
+        await state.toggle()
+        async let first: Void = state.toggle()
+        await waitUntil { gate.calls == 1 }
+        gate.reportProgress(0, 0.3)
+        await settle()
+        #expect(state.phase == .uploading(progress: 0.3))
+
+        await state.toggle()
+        #expect(state.backgroundUploads.first?.stage == "Uploading")
+        #expect(state.backgroundUploads.first?.progress == 0.3)
+
+        gate.reportStatus(0, "Compressing · 10 MB → 4 MB")
+        await settle()
+        #expect(state.backgroundUploads.first?.stage == "Compressing · 10 MB → 4 MB")
+        #expect(state.backgroundUploads.first?.progress == 0)
+        gate.reportProgress(0, 0.4)
+        await settle()
+        #expect(state.backgroundUploads.first?.progress == 0.4)
+        #expect(state.phase == .recording)
+        #expect(state.uploadStage == "Uploading")
+
+        gate.open(0)
+        await first
+        gate.reportProgress(0, 0.9)  // late: the upload is gone
+        await settle()
+        #expect(state.phase == .recording)
+        #expect(state.backgroundUploads.isEmpty)
+    }
+
+    @Test func backgroundSuccessWhenIdleShowsDone() async {
+        let gate = GateUploader()
+        let picker = FakePicker()
+        picker.results = [.display(1), nil]
+        let state = makeGatedState(gate, picker: picker)
+        await state.toggle(destination: .telegram)
+        async let first: Void = state.toggle(destination: .telegram)
+        await waitUntil { gate.calls == 1 }
+        await state.toggle()  // selection cancelled: idle while the upload runs on
+        #expect(state.phase == .idle)
+        #expect(state.backgroundUploads.count == 1)
+
+        gate.open(0)
+        await first
+        #expect(state.phase == .done(link: gate.link(0)))
+        #expect(state.destination == .telegram)
+        #expect(state.backgroundUploads.isEmpty)
+        #expect(notifier.links.count == 1)
+    }
+
+    @Test func backgroundFailureNotifiesKeepsThePhaseAndRetryWorksWhenIdle() async {
+        let gate = GateUploader()
+        gate.fail(0, with: UploadError.exhaustedRetries)
+        let state = makeGatedState(gate)
+        await state.toggle()
+        async let first: Void = state.toggle()
+        await waitUntil { gate.calls == 1 }
+        await state.toggle()
+        gate.open(0)
+        await first
+        #expect(state.phase == .recording)
+        #expect(state.backgroundUploads.isEmpty)
+        #expect(notifier.failures == ["Upload failed: exhaustedRetries"])
+        #expect(state.lastBackgroundFailure?.message == "Upload failed: exhaustedRetries")
+        #expect(state.lastBackgroundFailure?.file == gate.files[0])
+        #expect(state.history.isEmpty)
+        #expect(!state.canRetryBackgroundFailure)
+
+        await state.retry()  // still recording: nothing to do
+        #expect(gate.calls == 1)
+
+        gate.openAll()
+        await state.toggle()
+        #expect(state.phase == .done(link: gate.link(1)))
+        #expect(state.canRetryBackgroundFailure)
+
+        await state.retry()
+        #expect(gate.calls == 3)
+        #expect(gate.files[2] == gate.files[0])
+        #expect(state.phase == .done(link: gate.link(2)))
+        #expect(state.lastBackgroundFailure == nil)
+        #expect(!state.canRetryBackgroundFailure)
+    }
+
+    @Test func twoBackgroundUploadsAreTrackedSeparately() async {
+        let gate = GateUploader()
+        let state = makeGatedState(gate)
+        await state.toggle()
+        async let first: Void = state.toggle(destination: .youtube)
+        await waitUntil { gate.calls == 1 }
+        await state.toggle()
+        async let second: Void = state.toggle(destination: .telegram)
+        await waitUntil { gate.calls == 2 }
+        await state.toggle()
+        #expect(recorder.starts == 3)
+        #expect(state.phase == .recording)
+        #expect(state.backgroundUploads.map(\.destination) == [.youtube, .telegram])
+        #expect(Set(state.backgroundUploads.map(\.id)).count == 2)
+
+        gate.reportProgress(1, 0.7)
+        await settle()
+        #expect(state.backgroundUploads.map(\.progress) == [0, 0.7])
+
+        gate.open(1)
+        await second
+        #expect(state.backgroundUploads.map(\.destination) == [.youtube])
+        #expect(notifier.links.map(\.0) == [gate.link(1)])
+
+        gate.open(0)
+        await first
+        #expect(state.backgroundUploads.isEmpty)
+        #expect(notifier.links.map(\.0) == [gate.link(1), gate.link(0)])
+        #expect(state.phase == .recording)
+    }
+
+    @Test func backgroundStatusNamesEachUpload() {
+        let file = URL(fileURLWithPath: "/tmp/a.mp4")
+        #expect(AppState.backgroundStatus([]) == nil)
+        let telegram = BackgroundUpload(
+            destination: .telegram, stage: "Uploading", progress: 0.43, file: file)
+        #expect(AppState.backgroundStatus([telegram]) == "Uploading to Telegram 43% in background")
+        let youtube = BackgroundUpload(destination: .youtube, stage: "Uploading", progress: 0.1, file: file)
+        #expect(
+            AppState.backgroundStatus([telegram, youtube])
+                == "Uploading to Telegram 43%, YouTube 10% in background")
+    }
 }
