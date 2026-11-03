@@ -146,6 +146,10 @@ struct SettingsView: View {
                 .disabled(!model.settings.keystrokeOverlayEnabled)
                 Toggle("Show overlays in recording", isOn: $model.settings.overlaysInRecording)
                 Toggle("Hide the status pill from screen sharing", isOn: $model.settings.hudHiddenFromCapture)
+                Picker("Status pill", selection: $model.settings.hudPosition) {
+                    ForEach(HUDPosition.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
                 Text(
                     "While recording, a ring marks each click and a pill above the status bar shows the last "
                         + "key combo. Keystrokes need Input Monitoring. \"Show only shortcuts\" leaves out plain "

@@ -33,6 +33,18 @@ public enum CameraSize: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// Where the status pill sits on the screen under the cursor.
+public enum HUDPosition: String, Codable, CaseIterable, Sendable {
+    case top, bottom
+
+    public var label: String {
+        switch self {
+        case .top: "Top"
+        case .bottom: "Bottom"
+        }
+    }
+}
+
 public enum Corner: String, Codable, CaseIterable, Sendable {
     case topLeft, topRight, bottomLeft, bottomRight
 
@@ -64,6 +76,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var overlaysInRecording = true
     /// The status pill is invisible to every screen capture (Zoom, Meet, QuickTime), not only to QuickTube's.
     public var hudHiddenFromCapture = true
+    public var hudPosition: HUDPosition = .top
     public var trimTailSeconds = 1.0
     public var trimHeadSeconds = 0.0
     public var titleTemplate = "{date}"
@@ -95,6 +108,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         case captureMode, cameraEnabled, cameraAlwaysOn, cameraSize, cameraCorner, pauseEnabled
         case systemAudioEnabled, microphoneEnabled, historyEnabled, clickHighlightEnabled
         case keystrokeOverlayEnabled, keystrokeShortcutsOnly, overlaysInRecording, hudHiddenFromCapture
+        case hudPosition
         case trimTailSeconds, trimHeadSeconds
         case titleTemplate, deleteAfterUpload, deleteOlderThanDays, automaticUpdates
         case gifEnabled, gifFPS, gifMaxWidth, gifMaxSeconds, quality
@@ -127,6 +141,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
             c.lenient(Bool.self, .overlaysInRecording) ?? d.overlaysInRecording
         hudHiddenFromCapture =
             c.lenient(Bool.self, .hudHiddenFromCapture) ?? d.hudHiddenFromCapture
+        hudPosition = c.lenient(HUDPosition.self, .hudPosition) ?? d.hudPosition
         trimTailSeconds =
             c.lenient(Double.self, .trimTailSeconds) ?? d.trimTailSeconds
         trimHeadSeconds =

@@ -12,8 +12,11 @@ import SwiftUI
 /// excluded from capture.
 @MainActor
 final class KeystrokeOverlay {
-    /// The HUD sits 24 pt above the bottom of the visible frame and is about 48 pt tall.
+    /// Above the HUD when that sits at the bottom (24 pt inset, about 48 pt tall); else 24 pt up.
     private static let bottomInset: CGFloat = 24 + 48 + 12
+    private static let edgeInset: CGFloat = 24
+    /// Settings → Overlays "Status pill"; read when the pill is placed.
+    var hudPosition: () -> HUDPosition = { .top }
     private static let size = NSSize(width: 480, height: 64)
     private static let visibleFor: Duration = .milliseconds(1500)
 
@@ -47,8 +50,8 @@ final class KeystrokeOverlay {
             ?? NSScreen.main
         {
             let visible = screen.visibleFrame
-            panel.setFrameOrigin(
-                NSPoint(x: visible.midX - Self.size.width / 2, y: visible.minY + Self.bottomInset))
+            let inset = hudPosition() == .bottom ? Self.bottomInset : Self.edgeInset
+            panel.setFrameOrigin(NSPoint(x: visible.midX - Self.size.width / 2, y: visible.minY + inset))
         }
         keystroke.text = nil
         panel.orderFrontRegardless()
