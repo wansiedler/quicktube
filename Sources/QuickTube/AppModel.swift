@@ -19,6 +19,8 @@ final class AppModel {
     /// The windows the recorder leaves out; filled in once the HUD exists.
     private let exclusions = WindowExclusions()
     @ObservationIgnored private var activationObserver: NSObjectProtocol?
+    /// Hands default-input changes to the recorder, which follows them while recording with the microphone.
+    @ObservationIgnored private var inputObserver: DefaultInputObserver?
     private static let comboKeys: [Destination: String] = [
         .youtube: "hotkey.combo", .telegram: "hotkey.telegramCombo",
         .drive: "hotkey.driveCombo", .slack: "hotkey.slackCombo", .gif: "hotkey.gifCombo",
@@ -79,6 +81,7 @@ final class AppModel {
     }
 
     init() {
+        DiagnosticsLog.start()
         let store = KeychainStore()
         self.secrets = store
         self.settingsStore = SettingsStore()
@@ -98,15 +101,21 @@ final class AppModel {
         let notifier = AppNotifier()
         self.notifier = notifier
         let exclusions = exclusions
+        let recorder = Recorder(
+            options: {
+                // The store persists every change to UserDefaults; read it back at each start.
+                let settings = AppSettings.load(from: .standard)
+                return RecorderOptions(
+                    quality: settings.quality, systemAudio: settings.systemAudioEnabled,
+                    microphone: settings.microphoneEnabled)
+            }, excludedWindows: { exclusions.windows() }, log: { DiagnosticsLog.append($0) })
+        // Cheap enough to run all the time; the recorder ignores changes unless it records the microphone.
+        self.inputObserver = DefaultInputObserver { device in
+            guard let uid = device.uid else { return }
+            Task { await recorder.microphoneChanged(uid: uid, name: device.name ?? uid) }
+        }
         self.state = AppState(
-            recorder: Recorder(
-                options: {
-                    // The store persists every change to UserDefaults; read it back at each start.
-                    let settings = AppSettings.load(from: .standard)
-                    return RecorderOptions(
-                        quality: settings.quality, systemAudio: settings.systemAudioEnabled,
-                        microphone: settings.microphoneEnabled)
-                }, excludedWindows: { exclusions.windows() }, log: { DiagnosticsLog.append($0) }),
+            recorder: recorder,
             uploaders: [
                 .youtube: YouTubeUploader(tokens: auth, log: { DiagnosticsLog.append($0) }),
                 .telegram: telegram,
@@ -199,6 +208,11 @@ final class AppModel {
             guard let self, self.state.failureKind == .auth else { return }
             self.refreshAuth()
         }
+        // A microphone switch that could not reopen the capture pauses the recording in the UI too.
+        let onInterruption: @Sendable (String) -> Void = { [weak state] reason in
+            Task { @MainActor in await state?.recordingInterrupted(reason) }
+        }
+        Task { await recorder.setInterruptionHandler(onInterruption) }
         let hud = HUDController(state: state)
         self.hud = hud
         // The HUD and the selection overlay stay out of recordings; the camera bubble is recorded; the

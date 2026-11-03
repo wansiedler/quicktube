@@ -73,6 +73,43 @@ extension NetworkSuite {
             #expect(meta["parents"] as? [String] == ["old"])
         }
 
+        /// Answers by request, whatever the order the two uploads' requests arrive in.
+        static func route(_ request: URLRequest) -> StubURLProtocol.Response {
+            let path = request.url?.path ?? ""
+            switch (request.httpMethod ?? "GET", path) {
+            case ("GET", "/v3/files"):
+                return .init(status: 200, body: Data("{\"files\":[]}".utf8))
+            case ("POST", "/v3/files"):
+                return .init(status: 200, body: Data("{\"id\":\"folder1\"}".utf8))
+            case ("POST", "/upload/files"):
+                return .init(status: 200, headers: ["Location": "https://drive.example/session/\(UUID())"])
+            case ("PUT", _):
+                return .init(status: 200, body: Data("{\"id\":\"f\"}".utf8))
+            default:
+                return .init(status: 200, body: Data("{\"id\":\"p\"}".utf8))
+            }
+        }
+
+        @Test func concurrentFirstUploadsShareOneFolder() async throws {
+            let uploader = makeUploader()
+            for _ in 0..<12 { StubURLProtocol.enqueue(Self.route) }
+            let first = try makeFile(bytes: 2)
+            let second = try makeFile(bytes: 3)
+            async let a = uploader.upload(file: first, title: "A") { _ in }
+            async let b = uploader.upload(file: second, title: "B") { _ in }
+            _ = try await (a, b)
+            let requests = StubURLProtocol.requests
+            let lookups = requests.filter { $0.httpMethod == "GET" && $0.url?.path == "/v3/files" }
+            let creates = requests.filter { $0.httpMethod == "POST" && $0.url?.path == "/v3/files" }
+            #expect(lookups.count == 1)
+            #expect(creates.count == 1)
+            let parents = try requests.filter { $0.url?.path == "/upload/files" }.map {
+                (try JSONSerialization.jsonObject(with: $0.httpBody!) as! [String: Any])["parents"]
+                    as? [String]
+            }
+            #expect(parents == [["folder1"], ["folder1"]])
+        }
+
         @Test func missingScopeIsReported() async throws {
             let uploader = makeUploader()
             let file = try makeFile(bytes: 2)

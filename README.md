@@ -176,6 +176,9 @@ modifiers).
   160 kbit/s and microphone 128 kbit/s, two separate AAC tracks).
 - **System audio** next to the microphone; QuickTube's own sounds are never
   recorded.
+- **Microphone follows the default input**: switch to headphones mid-recording
+  and the recording continues on the new microphone from the next segment (a
+  short gap); the log says "Microphone switched to …".
 - **Pause and resume**: each pause starts a new segment; on stop the segments
   are joined into one file. The status pill shows "Paused".
 - **Trimming**: "Trim end" (default 1 s) cuts the stop-shortcut press, "Trim
