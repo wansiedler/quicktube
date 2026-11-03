@@ -27,8 +27,9 @@ enum DiagnosticsLog {
         lock.withLock {
             do {
                 try write(data)
+                reportedFailure = false
             } catch {
-                // Only once, so a broken log location does not flood the system log.
+                // Once per outage, so a broken log location does not flood the system log.
                 guard !reportedFailure else { return }
                 reportedFailure = true
                 NSLog("QuickTube: cannot write \(url.path): \(error)")

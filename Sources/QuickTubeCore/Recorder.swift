@@ -33,12 +33,9 @@ public actor Recorder: ScreenRecorder {
         let output: StreamOutput
         let index: Int
         let bitrate: Int
-        /// The live configuration's parts a microphone update keeps: size and region.
-        let width: Int
-        let height: Int
-        let sourceRect: CGRect?
         /// The input device the microphone was opened on; nil when unknown or not recorded.
         let microphoneUID: String?
+        let microphoneName: String?
     }
 
     private enum State {
@@ -51,11 +48,14 @@ public actor Recorder: ScreenRecorder {
         /// Closing a segment and opening the next one for a microphone switch; outside callers see
         /// recording, since `pause()` and `stop()` wait for it.
         case rolling
+        /// A microphone switch closed the segment but could not open the next one. Outside callers still
+        /// see recording: `pause()` takes effect without a segment to close, `stop()` returns the segments.
+        case interrupted
         case stopping
     }
 
     /// The recording in progress: where it captures, with what, its file stem, and the closed segments.
-    private struct Take {
+    private struct Take: Sendable {
         let target: CaptureTarget
         let options: RecorderOptions
         let stem: String
@@ -73,8 +73,13 @@ public actor Recorder: ScreenRecorder {
     private var state = State.idle
     private var take: Take?
     private var follower = MicrophoneFollower()
-    /// A segment roll for a microphone switch in progress.
-    private var roll: Task<Void, Never>?
+    /// The segment roll for a microphone switch in progress, and its closing half.
+    private var roll: Task<RollOutcome, Never>?
+    private var closing: Task<Void, Never>?
+    /// Bumped by `pause()` and `stop()`: a roll begun before stops at its next step.
+    private var epoch = 0
+    /// Segments a roll could not close in time; `stop()` reports them as `stopTimedOut`.
+    private var unfinished: [URL] = []
 
     /// `options` is read at the start of every recording, so Settings changes apply to the next one.
     /// `excludedWindows` lists the app's windows to keep out of display and region recordings (the HUD,
@@ -110,12 +115,14 @@ public actor Recorder: ScreenRecorder {
     public func start(target: CaptureTarget) async throws {
         guard case .idle = state else { throw RecorderError.alreadyRecording }
         state = .starting
+        await waitForRoll()
         let take = Take(target: target, options: options(), stem: RecordingNaming.title(for: Date()))
         do {
             let session = try await beginSession(take, index: 1)
             state = .recording(session)
             self.take = take
             follower.began(uid: session.microphoneUID)
+            followIfDefaultMoved(since: session)
         } catch {
             state = .idle
             throw error
@@ -123,139 +130,212 @@ public actor Recorder: ScreenRecorder {
     }
 
     /// Closes the current segment. If closing fails the recorder is still paused (the stream is gone),
-    /// keeping the segment file if one was written, and the error is rethrown.
+    /// keeping the segment file if one was written, and the error is rethrown. During or after a microphone
+    /// switch that has no segment open there is nothing to close, and pausing just takes effect.
     public func pause() async throws {
-        await waitForRoll()
-        guard case .recording(let session) = state else { throw RecorderError.notRecording }
-        state = .pausing
-        follower.paused()
-        defer { state = .paused }
-        do {
-            try await end(session)
-            take?.segments.append(session.fileURL)
-        } catch {
-            if FileManager.default.fileExists(atPath: session.fileURL.path) {
+        await takeOverFromRoll()
+        switch state {
+        case .rolling, .interrupted:
+            state = .paused
+            follower.paused()
+            return
+        case .recording(let session):
+            state = .pausing
+            follower.paused()
+            defer { state = .paused }
+            do {
+                try await end(session)
                 take?.segments.append(session.fileURL)
+            } catch {
+                if FileManager.default.fileExists(atPath: session.fileURL.path) {
+                    take?.segments.append(session.fileURL)
+                }
+                throw error
             }
-            throw error
+        default:
+            throw RecorderError.notRecording
         }
     }
 
     public func resume() async throws {
-        guard case .paused = state, let take else { throw RecorderError.notPaused }
+        guard case .paused = state, take != nil else { throw RecorderError.notPaused }
         state = .resuming
+        // A roll still opening its segment would take the same file name; it is discarded when done.
+        await waitForRoll()
+        guard let take else { throw RecorderError.notPaused }
         do {
             let session = try await beginSession(take, index: take.segments.count + 1)
             state = .recording(session)
             follower.began(uid: session.microphoneUID)
+            followIfDefaultMoved(since: session)
         } catch {
             state = .paused
             throw error
         }
     }
 
-    /// The system default input changed to the device `uid` (`name` for the log). While recording with the
-    /// microphone, the live stream is pointed at it; when no microphone sample arrives within
-    /// `MicrophoneFollower.grace` after that (or the update is refused), the segment is rolled: closed and
-    /// the next one opened on the new device, the recording carrying on as one. While paused nothing is
+    /// The system default input changed (to `uid`, `name`: what the observer saw; the device is read
+    /// again here, since reports can arrive out of order). While recording with the microphone, the
+    /// segment is rolled: closed, and the next one opened on the new device; the recording carries on as
+    /// one, with a short gap. One roll runs at a time; changes during it coalesce, and one more roll
+    /// follows only if the default input then differs from the device rolled to. While paused nothing is
     /// done: resuming opens the capture on the default input of that moment. Ignored otherwise.
     public func microphoneChanged(uid: String, name: String) async {
         guard let take, take.options.microphone else { return }
-        // Starting, resuming and rolling read the default input themselves; a roll checks again after.
-        switch state {
-        case .recording, .paused: break
-        default: return
-        }
-        let wasPaused = if case .paused = state { true } else { false }
-        let before = follower.configuredUID
-        let action = follower.deviceChanged(uid: uid, at: Self.hostNow())
-        if wasPaused, before != uid {
-            log("Microphone switched to \(name) (from the next segment)")
+        let device = DefaultInputObserver.currentDefaultInput()
+        let current = device?.uid ?? uid
+        if case .paused = state, current != follower.recordingUID {
+            log("Microphone changed to \(device?.name ?? name) while paused; the next segment uses it")
             return
         }
-        guard case .updateConfiguration(let target) = action, case .recording(let session) = state else {
-            return
-        }
-        var next = MicrophoneFollower.Action.none
-        do {
-            try await updateMicrophone(of: session, to: target, options: take.options)
-            follower.configurationApplied(at: Self.hostNow())
-        } catch {
-            log("Recorder: the live microphone update failed: \(error.localizedDescription)")
-            next = follower.updateFailed()
-        }
-        while next == .none {
-            // Stopped, paused, rolled or superseded by a newer change: that path takes over.
-            guard isCurrent(session), follower.configuredUID == target else { return }
-            if let sample = session.output.lastMicrophoneSample {
-                next = follower.microphoneSampleArrived(at: sample)
-            }
-            guard follower.isAwaitingSample else {
-                log("Microphone switched to \(name) (live)")
+        guard follower.deviceChanged(uid: current) == .rollSegment else { return }
+        let epoch = self.epoch
+        while true {
+            let task = Task { await self.performRoll() }
+            roll = task
+            let outcome = await task.value
+            // A pause or stop took over; it resets the follower.
+            guard epoch == self.epoch else { return }
+            guard case .opened(let rolledTo) = outcome else {
+                follower.rollFailed()
                 return
             }
-            next = follower.tick(now: Self.hostNow())
-            if next == .none { try? await Task.sleep(for: .milliseconds(100)) }
+            let now = DefaultInputObserver.currentDefaultInput()?.uid
+            guard follower.rollFinished(rolledTo: rolledTo, currentDefault: now) == .rollSegment else {
+                return
+            }
         }
-        await rollSegment(for: name)
     }
 
-    private func isCurrent(_ session: Session) -> Bool {
-        guard case .recording(let current) = state else { return false }
-        return current.index == session.index
+    /// After a start or resume: a change that came while the segment was opening.
+    private func followIfDefaultMoved(since session: Session) {
+        guard take?.options.microphone == true, let device = DefaultInputObserver.currentDefaultInput(),
+            let uid = device.uid, uid != session.microphoneUID
+        else { return }
+        Task { await self.microphoneChanged(uid: uid, name: device.name ?? uid) }
     }
 
-    private static func hostNow() -> TimeInterval {
-        CMClockGetTime(CMClockGetHostTimeClock()).seconds
+    /// For `pause()` and `stop()`: no further roll starts, and a running one is waited for only while it
+    /// closes its segment (bounded by `stopTimeout`); one that is opening the next segment is left to
+    /// finish on its own and discards it.
+    private func takeOverFromRoll() async {
+        epoch += 1
+        if let closing { await closing.value }
     }
 
-    /// Lets `pause()` and `stop()` act on the segment a microphone switch opened.
+    /// Waits for a running roll to finish completely.
     private func waitForRoll() async {
-        if let roll { await roll.value }
+        while let roll { _ = await roll.value }
     }
 
-    private func rollSegment(for name: String) async {
-        let task = Task { await self.performRoll(for: name) }
-        roll = task
-        await task.value
+    private enum RollOutcome {
+        /// The next segment captures the device with this UID (nil when unknown).
+        case opened(String?)
+        case notOpened
     }
 
-    /// Closes the segment and opens the next one with the same take; the public state stays recording.
-    /// Closing is bounded by the stop timeouts. If the next segment cannot open, the recorder is paused
-    /// (stop still returns every segment, resume tries again).
-    private func performRoll(for name: String) async {
+    /// Closes the segment and opens the next one with the same take; outside callers still see recording.
+    /// Both steps are bounded by `stopTimeout`. If the next segment cannot open, nothing is captured until
+    /// the recording is paused or stopped (`.interrupted`). A pause or stop during the roll takes over:
+    /// the roll then opens nothing, or discards what it opened.
+    private func performRoll() async -> RollOutcome {
         defer { roll = nil }
-        guard case .recording(let session) = state else { return }
+        guard case .recording(let session) = state else { return .notOpened }
         state = .rolling
+        let epoch = self.epoch
+        let close = Task { await self.closeForRoll(session) }
+        closing = close
+        await close.value
+        closing = nil
+        guard epoch == self.epoch, case .rolling = state, let take else { return .notOpened }
+        do {
+            let next = try await openSession(take, index: take.segments.count + 1)
+            guard epoch == self.epoch, case .rolling = state else {
+                await discard(Unchecked(value: next))
+                return .notOpened
+            }
+            state = .recording(next)
+            log("Microphone switched to \(next.microphoneName ?? "the default input") (segment rolled)")
+            return .opened(next.microphoneUID)
+        } catch {
+            guard epoch == self.epoch, case .rolling = state else { return .notOpened }
+            state = .interrupted
+            log(
+                "Recorder: reopening the capture for the microphone switch failed (\(error)); "
+                    + "nothing is recorded until the recording is paused or stopped")
+            return .notOpened
+        }
+    }
+
+    /// The closing half of a roll. A segment that did not close in time is remembered, so `stop()`
+    /// reports it as `stopTimedOut` and finishing can be retried.
+    private func closeForRoll(_ session: Session) async {
         do {
             try await end(session)
+        } catch RecorderError.stopTimedOut {
+            unfinished.append(session.fileURL)
+            log("Recorder: segment \(session.index) did not close in time for the microphone switch")
         } catch {
             log("Recorder: closing segment \(session.index) for the microphone switch failed: \(error)")
         }
         if FileManager.default.fileExists(atPath: session.fileURL.path) {
             take?.segments.append(session.fileURL)
         }
-        guard let take else {
-            state = .paused
-            return
-        }
+    }
+
+    /// `beginSession` bounded by `stopTimeout`. A session that opens after the deadline is closed and its
+    /// file removed.
+    private func openSession(_ take: Take, index: Int) async throws -> Session {
+        let pending = PendingSession()
         do {
-            let next = try await beginSession(take, index: take.segments.count + 1)
-            state = .recording(next)
-            follower.began(uid: next.microphoneUID)
-            log("Microphone switched to \(name) (segment rolled)")
+            try await Deadline.run(timeout: Self.stopTimeout, error: ReopenTimedOut()) {
+                let session = try await self.beginUnchecked(take, index: index)
+                if !pending.deliver(session) { await self.discard(session) }
+            }
         } catch {
-            state = .paused
-            follower.paused()
-            log("Recorder: reopening the capture for the microphone switch failed, paused: \(error)")
-            return
+            if let late = pending.abandon() { await discard(late) }
+            throw error
         }
-        // A change that came while the segment was being rolled.
-        if let device = DefaultInputObserver.currentDefaultInput(), let uid = device.uid,
-            uid != follower.configuredUID
-        {
-            await microphoneChanged(uid: uid, name: device.name ?? uid)
+        guard let session = pending.abandon() else { throw ReopenTimedOut() }
+        return session.value
+    }
+
+    private func beginUnchecked(_ take: Take, index: Int) async throws -> Unchecked<Session> {
+        Unchecked(value: try await beginSession(take, index: index))
+    }
+
+    private func discard(_ session: Unchecked<Session>) async {
+        try? await end(session.value)
+        try? FileManager.default.removeItem(at: session.value.fileURL)
+    }
+
+    /// Hands a session opened under a deadline back, unless the deadline passed first.
+    private final class PendingSession: @unchecked Sendable {
+        private let lock = NSLock()
+        private var session: Unchecked<Session>?
+        private var abandoned = false
+
+        /// False when the deadline passed: the caller discards the session.
+        func deliver(_ session: Unchecked<Session>) -> Bool {
+            lock.withLock {
+                guard !abandoned else { return false }
+                self.session = session
+                return true
+            }
         }
+
+        /// Takes the delivered session, if any; later deliveries are refused.
+        func abandon() -> Unchecked<Session>? {
+            lock.withLock {
+                abandoned = true
+                defer { session = nil }
+                return session
+            }
+        }
+    }
+
+    private struct ReopenTimedOut: LocalizedError {
+        var errorDescription: String? { "the capture did not start in time" }
     }
 
     /// Lets a non-Sendable SDK result cross back into the actor; it is used from the actor only.
@@ -275,29 +355,6 @@ public actor Recorder: ScreenRecorder {
     /// Same reason: awaiting `stopCapture()` on actor-owned stream state counts as sending it.
     private nonisolated static func stopCapture(_ stream: Unchecked<SCStream>) async throws {
         try await stream.value.stopCapture()
-    }
-
-    /// Same reason as `stopCapture`.
-    private nonisolated static func updateConfiguration(
-        _ stream: Unchecked<SCStream>, _ configuration: Unchecked<SCStreamConfiguration>
-    ) async throws {
-        try await stream.value.updateConfiguration(configuration.value)
-    }
-
-    /// A copy of the session's configuration with the microphone on `uid`, applied to the live stream;
-    /// bounded by `stopCaptureTimeout`.
-    private func updateMicrophone(of session: Session, to uid: String, options: RecorderOptions) async throws
-    {
-        let configuration = Self.baseConfiguration(options)
-        configuration.width = session.width
-        configuration.height = session.height
-        if let sourceRect = session.sourceRect { configuration.sourceRect = sourceRect }
-        configuration.microphoneCaptureDeviceID = uid
-        let stream = Unchecked(value: session.stream)
-        let update = Unchecked(value: configuration)
-        try await Deadline.run(timeout: Self.stopCaptureTimeout, error: MicrophoneUpdateTimedOut()) {
-            try await Self.updateConfiguration(stream, update)
-        }
     }
 
     /// Same reason as `stopCapture`.
@@ -366,8 +423,8 @@ public actor Recorder: ScreenRecorder {
         configuration.width = Int(size.width)
         configuration.height = Int(size.height)
         // Explicitly the default input of this moment: a segment opened after a switch uses the new device.
-        let microphoneUID = options.microphone ? DefaultInputObserver.currentDefaultInput()?.uid : nil
-        if let microphoneUID { configuration.microphoneCaptureDeviceID = microphoneUID }
+        let microphone = options.microphone ? DefaultInputObserver.currentDefaultInput() : nil
+        if let uid = microphone?.uid { configuration.microphoneCaptureDeviceID = uid }
 
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appending(path: "\(take.stem).seg\(index).mp4")
@@ -388,8 +445,7 @@ public actor Recorder: ScreenRecorder {
         }
         return Session(
             stream: stream, writer: writer, fileURL: url, output: output, index: index, bitrate: bitrate,
-            width: configuration.width, height: configuration.height, sourceRect: sourceRect,
-            microphoneUID: microphoneUID)
+            microphoneUID: microphone?.uid, microphoneName: microphone?.name)
     }
 
     /// Everything but the size: frame rate, cursor, audio, and 420v BT.709 frames for the HEVC encoder.
@@ -415,27 +471,31 @@ public actor Recorder: ScreenRecorder {
     /// Closes the open segment, if any, and returns every segment. A segment that does not close in time
     /// surfaces as `stopTimedOut` carrying all segments, so finishing them can be retried.
     public func stop() async throws -> [URL] {
-        await waitForRoll()
+        await takeOverFromRoll()
         let session: Session?
         switch state {
         case .recording(let current): session = current
-        case .paused: session = nil
+        case .paused, .rolling, .interrupted: session = nil
         default: throw RecorderError.notRecording
         }
         state = .stopping
         follower.stopped()
         var segments = take?.segments ?? []
+        let timedOut = !unfinished.isEmpty
         defer {
             state = .idle
             take = nil
+            unfinished = []
         }
-        guard let session else { return segments }
-        do {
-            try await end(session)
-        } catch RecorderError.stopTimedOut {
-            throw RecorderError.stopTimedOut(segments: segments + [session.fileURL])
+        if let session {
+            do {
+                try await end(session)
+            } catch RecorderError.stopTimedOut {
+                throw RecorderError.stopTimedOut(segments: segments + [session.fileURL])
+            }
+            segments.append(session.fileURL)
         }
-        segments.append(session.fileURL)
+        if timedOut { throw RecorderError.stopTimedOut(segments: segments) }
         return segments
     }
 
@@ -478,9 +538,6 @@ public actor Recorder: ScreenRecorder {
 
     private struct StopCaptureTimedOut: Error {}
 
-    private struct MicrophoneUpdateTimedOut: LocalizedError {
-        var errorDescription: String? { "the stream did not take the new configuration in time" }
-    }
 }
 
 /// Receives the stream's sample buffers on one serial queue and hands them to the segment's writer; keeps
@@ -491,7 +548,6 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate, @u
     private let queue = DispatchQueue(label: "QuickTube.Recorder.samples", qos: .userInteractive)
     private let lock = NSLock()
     private var failure: Error?
-    private var microphoneSample: TimeInterval?
 
     init(writer: RecordingWriter, log: @escaping @Sendable (String) -> Void) {
         self.writer = writer
@@ -508,9 +564,6 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate, @u
     /// The error the stream stopped with, if it did.
     var streamError: Error? { lock.withLock { failure } }
 
-    /// When the last microphone sample arrived (host clock seconds); nil before the first.
-    var lastMicrophoneSample: TimeInterval? { lock.withLock { microphoneSample } }
-
     func stream(
         _ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType
     ) {
@@ -518,10 +571,7 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate, @u
         switch type {
         case .screen: writer.append(screen: sampleBuffer)
         case .audio: writer.append(audio: sampleBuffer, kind: .system)
-        case .microphone:
-            let now = CMClockGetTime(CMClockGetHostTimeClock()).seconds
-            lock.withLock { microphoneSample = now }
-            writer.append(audio: sampleBuffer, kind: .microphone)
+        case .microphone: writer.append(audio: sampleBuffer, kind: .microphone)
         @unknown default: return
         }
     }
