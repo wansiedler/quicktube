@@ -208,6 +208,11 @@ final class AppModel {
             guard let self, self.state.failureKind == .auth else { return }
             self.refreshAuth()
         }
+        // A microphone switch that could not reopen the capture pauses the recording in the UI too.
+        let onInterruption: @Sendable (String) -> Void = { [weak state] reason in
+            Task { @MainActor in await state?.recordingInterrupted(reason) }
+        }
+        Task { await recorder.setInterruptionHandler(onInterruption) }
         let hud = HUDController(state: state)
         self.hud = hud
         // The HUD and the selection overlay stay out of recordings; the camera bubble is recorded; the

@@ -60,6 +60,15 @@ public actor Recorder: ScreenRecorder {
         let options: RecorderOptions
         let stem: String
         var segments: [URL] = []
+        /// The index for the next segment opened. Bumped on every attempt, so a segment a timed-out roll
+        /// still opens never shares a file with the one that follows; gaps in the numbering are harmless.
+        var nextIndex = 1
+
+        /// Takes the next segment index.
+        mutating func claimIndex() -> Int {
+            defer { nextIndex += 1 }
+            return nextIndex
+        }
     }
 
     private static let stopTimeout: Duration = .seconds(10)
@@ -73,13 +82,14 @@ public actor Recorder: ScreenRecorder {
     private var state = State.idle
     private var take: Take?
     private var follower = MicrophoneFollower()
-    /// The segment roll for a microphone switch in progress, and its closing half.
-    private var roll: Task<RollOutcome, Never>?
+    /// The closing half of a segment roll for a microphone switch in progress.
     private var closing: Task<Void, Never>?
     /// Bumped by `pause()` and `stop()`: a roll begun before stops at its next step.
     private var epoch = 0
     /// Segments a roll could not close in time; `stop()` reports them as `stopTimedOut`.
     private var unfinished: [URL] = []
+    /// Told when a microphone switch closed the segment but could not open the next one.
+    private var onInterruption: (@Sendable (String) -> Void)?
 
     /// `options` is read at the start of every recording, so Settings changes apply to the next one.
     /// `excludedWindows` lists the app's windows to keep out of display and region recordings (the HUD,
@@ -115,10 +125,10 @@ public actor Recorder: ScreenRecorder {
     public func start(target: CaptureTarget) async throws {
         guard case .idle = state else { throw RecorderError.alreadyRecording }
         state = .starting
-        await waitForRoll()
-        let take = Take(target: target, options: options(), stem: RecordingNaming.title(for: Date()))
+        var take = Take(target: target, options: options(), stem: RecordingNaming.title(for: Date()))
+        let index = take.claimIndex()
         do {
-            let session = try await beginSession(take, index: 1)
+            let session = try await beginSession(take, index: index)
             state = .recording(session)
             self.take = take
             follower.began(uid: session.microphoneUID)
@@ -158,13 +168,12 @@ public actor Recorder: ScreenRecorder {
     }
 
     public func resume() async throws {
-        guard case .paused = state, take != nil else { throw RecorderError.notPaused }
+        guard case .paused = state, var take else { throw RecorderError.notPaused }
         state = .resuming
-        // A roll still opening its segment would take the same file name; it is discarded when done.
-        await waitForRoll()
-        guard let take else { throw RecorderError.notPaused }
+        let index = take.claimIndex()
+        self.take = take
         do {
-            let session = try await beginSession(take, index: take.segments.count + 1)
+            let session = try await beginSession(take, index: index)
             state = .recording(session)
             follower.began(uid: session.microphoneUID)
             followIfDefaultMoved(since: session)
@@ -191,9 +200,7 @@ public actor Recorder: ScreenRecorder {
         guard follower.deviceChanged(uid: current) == .rollSegment else { return }
         let epoch = self.epoch
         while true {
-            let task = Task { await self.performRoll() }
-            roll = task
-            let outcome = await task.value
+            let outcome = await performRoll()
             // A pause or stop took over; it resets the follower.
             guard epoch == self.epoch else { return }
             guard case .opened(let rolledTo) = outcome else {
@@ -205,6 +212,13 @@ public actor Recorder: ScreenRecorder {
                 return
             }
         }
+    }
+
+    /// `handler` is called (on the recorder) with a short reason when the recorder stops capturing on its
+    /// own: a microphone switch closed the segment but could not open the next one. The recorder is then
+    /// waiting for `pause()` (which takes effect at once) or `stop()`.
+    public func setInterruptionHandler(_ handler: @escaping @Sendable (String) -> Void) {
+        onInterruption = handler
     }
 
     /// After a start or resume: a change that came while the segment was opening.
@@ -223,11 +237,6 @@ public actor Recorder: ScreenRecorder {
         if let closing { await closing.value }
     }
 
-    /// Waits for a running roll to finish completely.
-    private func waitForRoll() async {
-        while let roll { _ = await roll.value }
-    }
-
     private enum RollOutcome {
         /// The next segment captures the device with this UID (nil when unknown).
         case opened(String?)
@@ -239,7 +248,6 @@ public actor Recorder: ScreenRecorder {
     /// the recording is paused or stopped (`.interrupted`). A pause or stop during the roll takes over:
     /// the roll then opens nothing, or discards what it opened.
     private func performRoll() async -> RollOutcome {
-        defer { roll = nil }
         guard case .recording(let session) = state else { return .notOpened }
         state = .rolling
         let epoch = self.epoch
@@ -247,9 +255,11 @@ public actor Recorder: ScreenRecorder {
         closing = close
         await close.value
         closing = nil
-        guard epoch == self.epoch, case .rolling = state, let take else { return .notOpened }
+        guard epoch == self.epoch, case .rolling = state, var take else { return .notOpened }
+        let index = take.claimIndex()
+        self.take = take
         do {
-            let next = try await openSession(take, index: take.segments.count + 1)
+            let next = try await openSession(take, index: index)
             guard epoch == self.epoch, case .rolling = state else {
                 await discard(Unchecked(value: next))
                 return .notOpened
@@ -263,6 +273,7 @@ public actor Recorder: ScreenRecorder {
             log(
                 "Recorder: reopening the capture for the microphone switch failed (\(error)); "
                     + "nothing is recorded until the recording is paused or stopped")
+            onInterruption?("Microphone switch failed")
             return .notOpened
         }
     }
@@ -272,14 +283,14 @@ public actor Recorder: ScreenRecorder {
     private func closeForRoll(_ session: Session) async {
         do {
             try await end(session)
-        } catch RecorderError.stopTimedOut {
-            unfinished.append(session.fileURL)
-            log("Recorder: segment \(session.index) did not close in time for the microphone switch")
+            if FileManager.default.fileExists(atPath: session.fileURL.path) {
+                take?.segments.append(session.fileURL)
+            }
         } catch {
-            log("Recorder: closing segment \(session.index) for the microphone switch failed: \(error)")
-        }
-        if FileManager.default.fileExists(atPath: session.fileURL.path) {
+            // Kept in order even if the file is not there yet: stop() reports it as stopTimedOut.
+            unfinished.append(session.fileURL)
             take?.segments.append(session.fileURL)
+            log("Recorder: segment \(session.index) did not close for the microphone switch: \(error)")
         }
     }
 
@@ -495,7 +506,10 @@ public actor Recorder: ScreenRecorder {
             }
             segments.append(session.fileURL)
         }
-        if timedOut { throw RecorderError.stopTimedOut(segments: segments) }
+        if timedOut {
+            throw RecorderError.stopTimedOut(
+                segments: segments + unfinished.filter { !segments.contains($0) })
+        }
         return segments
     }
 
