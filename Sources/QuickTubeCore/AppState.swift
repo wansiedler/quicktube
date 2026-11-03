@@ -332,6 +332,16 @@ public final class AppState {
         phase = .paused
     }
 
+    /// The recorder stopped capturing on its own (`reason`, e.g. a microphone switch could not reopen the
+    /// capture). The recording is paused, so the HUD and the clock match what is recorded, and the user is
+    /// told; resuming opens a new segment. Ignored unless recording and idle otherwise.
+    public func recordingInterrupted(_ reason: String) async {
+        guard !busy, phase == .recording else { return }
+        log("Recording interrupted: \(reason)")
+        await pause()
+        notifier.failed("\(reason) — recording paused; press pause to resume")
+    }
+
     /// Opens a new segment. On failure the recording stays paused (it can still be stopped) and the
     /// error is reported.
     public func resume() async {

@@ -641,6 +641,33 @@ final class LogLines: @unchecked Sendable {
         #expect(recorder.pauses == 2 && recorder.resumes == 2)
     }
 
+    @Test func interruptedRecordingPausesAndNotifies() async {
+        let state = makePausableState(finisher: FakeFinisher())
+        await state.toggle()
+        await state.recordingInterrupted("Microphone switch failed")
+        #expect(state.phase == .paused)
+        #expect(recorder.pauses == 1)
+        #expect(notifier.failures == ["Microphone switch failed — recording paused; press pause to resume"])
+        // The clock stops with it.
+        let held = state.recordedDuration(at: Date().addingTimeInterval(60))
+        #expect(state.recordedDuration(at: Date().addingTimeInterval(120)) == held)
+        await state.togglePause()
+        #expect(state.phase == .recording)
+        #expect(recorder.resumes == 1)
+    }
+
+    @Test func interruptionOutsideRecordingIsIgnored() async {
+        let state = makePausableState(finisher: FakeFinisher())
+        await state.recordingInterrupted("Microphone switch failed")
+        #expect(state.phase == .idle)
+        await state.toggle()
+        await state.pause()
+        await state.recordingInterrupted("Microphone switch failed")
+        #expect(state.phase == .paused)
+        #expect(recorder.pauses == 1)
+        #expect(notifier.failures.isEmpty)
+    }
+
     @Test func pauseAndResumeAreIgnoredInOtherPhases() async {
         let state = makePausableState(finisher: FakeFinisher())
         await state.togglePause()
