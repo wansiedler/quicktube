@@ -51,6 +51,23 @@ public enum RecordingNaming {
             .replacingOccurrences(of: ":", with: "-")
     }
 
+    /// The title a video host shows: "2026-11-10 16.57.33 · Pro Display XDR · 1:42 · 26 MB". Unknown
+    /// parts are left out, a display already named in the title is not repeated, and the result fits
+    /// YouTube's rules (no angle brackets, at most 100 characters).
+    public static func uploadTitle(
+        _ title: String, display: String?, duration: TimeInterval?, fileSize: Int?
+    ) -> String {
+        var parts = [title]
+        if let display, !display.isEmpty, !title.contains(display) { parts.append(display) }
+        if let duration, duration > 0 { parts.append(HistoryItem.durationText(duration)) }
+        // Under a kilobyte is no recording; "0 KB" would only be noise.
+        if let fileSize, fileSize >= 1000 { parts.append(HistoryItem.sizeText(fileSize, compact: true)) }
+        let joined = parts.joined(separator: " · ")
+            .replacingOccurrences(of: "<", with: "")
+            .replacingOccurrences(of: ">", with: "")
+        return String(joined.prefix(100))
+    }
+
     /// "Built-in Retina Display · 1920×1080 · 30 fps"; the display is left out when unknown.
     /// "Pro Display XDR · 6016×3384 · 43 fps · 138 MB", or "… · 138 MB → 49 MB" when a smaller
     /// copy was sent (`sentBytes` is the size of the transcoded file).
