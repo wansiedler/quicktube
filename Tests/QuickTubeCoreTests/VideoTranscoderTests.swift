@@ -1,8 +1,9 @@
 import AVFoundation
 import Foundation
-import QuickTubeCore
 import Testing
 import VideoToolbox
+
+@testable import QuickTubeCore
 
 @Suite struct VideoTranscoderTests {
     static let fiftyMB = 50 << 20
@@ -498,6 +499,112 @@ import VideoToolbox
         #expect(!FileManager.default.fileExists(atPath: output.path))
     }
 
+    /// Cancels a transcode at `stage` (or, with `afterFrames`, once that many frames were written) and
+    /// checks it throws `CancellationError` quickly and leaves no output.
+    private func cancelTranscode(
+        at stage: VideoTranscoder.Stage?, afterFrames: Int? = nil, hardwareEncoder: Bool = true
+    ) async throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appending(path: "clip.mov")
+        try await ClipMaker.make(input, width: 640, height: 480, fps: 30, seconds: 2, audio: true)
+        let plan = TranscodePlan(width: 320, height: 240, videoBitrate: 300_000, audioBitrate: 64_000)
+        let output = dir.appending(path: "clip.telegram.mp4")
+        let cancel = CancelSwitch()
+        let frames = FrameCounter()
+        let task = Task {
+            try await VideoTranscoder.transcode(
+                input, plan: plan, output: output, hardwareEncoder: hardwareEncoder, log: nil,
+                stage: { reached in if reached == stage { cancel.fire() } },
+                progress: { _ in
+                    if let afterFrames, frames.increment() == afterFrames { cancel.fire() }
+                })
+        }
+        cancel.arm(task)
+        let clock = ContinuousClock()
+        let start = clock.now
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        #expect(start.duration(to: clock.now) < .seconds(15))
+        #expect(!FileManager.default.fileExists(atPath: output.path))
+        #expect(cancel.fired)
+    }
+
+    @Test(
+        .enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() }, .timeLimit(.minutes(1)),
+        arguments: [VideoTranscoder.Stage.loaded, .writerStarted, .pumping])
+    func cancellationAtEachStageEndsPromptly(stage: VideoTranscoder.Stage) async throws {
+        try await cancelTranscode(at: stage)
+    }
+
+    @Test(
+        .enabled("needs H.264 and a software HEVC encoder") { ClipMaker.softwareHEVCAvailable() },
+        .timeLimit(.minutes(1)), arguments: [VideoTranscoder.Stage.loaded, .writerStarted, .pumping])
+    func cancellationOnTheSoftwareEncoderEndsPromptly(stage: VideoTranscoder.Stage) async throws {
+        try await cancelTranscode(at: stage, hardwareEncoder: false)
+    }
+
+    @Test(
+        .enabled("needs H.264 and HEVC encoders") { ClipMaker.encodersAvailable() }, .timeLimit(.minutes(1)),
+        arguments: [1, 10])
+    func cancellationAfterSomeFramesEndsPromptly(frames: Int) async throws {
+        try await cancelTranscode(at: nil, afterFrames: frames)
+    }
+
+    @Test(
+        .enabled("needs H.264 and a software HEVC encoder") { ClipMaker.softwareHEVCAvailable() },
+        .timeLimit(.minutes(1)))
+    func cancellationAfterSomeFramesOnTheSoftwareEncoderEndsPromptly() async throws {
+        try await cancelTranscode(at: nil, afterFrames: 5, hardwareEncoder: false)
+    }
+
+    @Test(.timeLimit(.minutes(1))) func awaitBoundedGivesUpOnAWorkerThatIgnoresCancellation() async {
+        let abandoned = CancelSwitch()
+        // A worker that never checks cancellation and outlives the grace period.
+        let worker = Task<Int, Error>.detached {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().asyncAfter(deadline: .now() + 3) { continuation.resume() }
+            }
+            return 1
+        }
+        let caller = Task {
+            try await VideoTranscoder.awaitBounded(worker, grace: .milliseconds(100)) { abandoned.fire() }
+        }
+        caller.cancel()
+        let clock = ContinuousClock()
+        let start = clock.now
+        await #expect(throws: CancellationError.self) { _ = try await caller.value }
+        #expect(start.duration(to: clock.now) < .seconds(2))
+        #expect(abandoned.fired)
+        #expect(worker.isCancelled)
+    }
+
+    @Test(.timeLimit(.minutes(1))) func awaitBoundedReturnsTheWorkersResult() async throws {
+        let worker = Task<Int, Error>.detached { 42 }
+        let value = try await VideoTranscoder.awaitBounded(worker, grace: .seconds(5)) {}
+        #expect(value == 42)
+        let failing = Task<Int, Error>.detached { throw TranscodeError.cannotRead }
+        await #expect(throws: TranscodeError.cannotRead) {
+            _ = try await VideoTranscoder.awaitBounded(failing, grace: .seconds(5)) {}
+        }
+    }
+
+    @Test(.timeLimit(.minutes(1))) func resultGateResumesOnceWhicheverComesFirst() async throws {
+        let early = VideoTranscoder.ResultGate<Int>()
+        #expect(early.deliver(.success(1)))
+        #expect(!early.deliver(.success(2)))
+        let first = try await withCheckedThrowingContinuation { early.install($0) }
+        #expect(first == 1)
+        let late = VideoTranscoder.ResultGate<Int>()
+        let second = try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Int, Error>) in
+            late.install(continuation)
+            late.deliver(.success(3))
+            late.deliver(.failure(CancellationError()))
+        }
+        #expect(second == 3)
+    }
+
     @Test func unreadableInputThrowsCannotRead() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "transcode-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -651,7 +758,7 @@ enum ClipMaker {
         // deadlock them against each other (lock-step feeding hung on 2 s clips with audio).
         let count = Int(fps) * seconds
         var feeders = [
-            Feeder(input: input, count: count, label: "video") { frame in
+            Feeder(writer: writer, input: input, count: count, label: "video") { frame in
                 guard let pool = adaptor.pixelBufferPool else { return false }
                 var buffer: CVPixelBuffer?
                 CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer)
@@ -667,7 +774,7 @@ enum ClipMaker {
         ]
         for (index, sound) in sounds.enumerated() {
             feeders.append(
-                Feeder(input: sound.input, count: count, label: "audio\(index)") { frame in
+                Feeder(writer: writer, input: sound.input, count: count, label: "audio\(index)") { frame in
                     guard let chunk = try? sound.chunk(index: frame) else { return false }
                     return sound.input.append(chunk)
                 })
@@ -682,46 +789,134 @@ enum ClipMaker {
             throw Failure()
         }
         writer.endSession(atSourceTime: CMTime(value: Int64(fps) * Int64(seconds), timescale: fps))
-        await writer.finishWritingOnce()
+        // Bounded, so a writer that never completes fails the test instead of hanging the test process.
+        let box = WriterBox(writer: writer)
+        try await Deadline.run(timeout: .seconds(20), error: Failure()) {
+            await box.writer.finishWritingOnce()
+        }
         guard writer.status == .completed else { throw Failure() }
     }
 }
 
+/// Cancels a task once both `arm` and `fire` were called, in either order.
+final class CancelSwitch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: (any CancellableTask)?
+    private var requested = false
+
+    var fired: Bool { lock.withLock { requested } }
+
+    func arm<T: Sendable>(_ task: Task<T, Error>) {
+        let now = lock.withLock { () -> Bool in
+            self.task = task
+            return requested
+        }
+        if now { task.cancel() }
+    }
+
+    func fire() {
+        let task = lock.withLock { () -> (any CancellableTask)? in
+            requested = true
+            return self.task
+        }
+        task?.cancelTask()
+    }
+}
+
+protocol CancellableTask: Sendable { func cancelTask() }
+extension Task: CancellableTask { func cancelTask() { cancel() } }
+
+/// Hands a writer to a `@Sendable` closure; only one side uses it at a time.
+private struct WriterBox: @unchecked Sendable {
+    let writer: AVAssetWriter
+}
+
+/// A thread-safe counter.
+final class FrameCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    /// The count after this increment.
+    func increment() -> Int {
+        lock.withLock {
+            count += 1; return count
+        }
+    }
+}
+
 /// Appends `count` samples to one writer input on its own queue whenever the input is ready, then marks it
-/// finished. `append` returns false on failure, which ends the feed.
+/// finished. `append` returns false on failure, which ends the feed. A watchdog on the same queue ends the
+/// feed as a failure when the writer leaves `.writing` or nothing is appended for `stallLimit`:
+/// `requestMediaDataWhenReady` never calls back again after the writer fails, which would hang the test.
 private final class Feeder: @unchecked Sendable {
+    static let stallLimit: Duration = .seconds(20)
+
+    private let writer: AVAssetWriter
     private let input: AVAssetWriterInput
     private let count: Int
     private let queue: DispatchQueue
     private let append: (Int) -> Bool
-    /// Touched only on `queue`.
+    private let clock = ContinuousClock()
+    // Touched only on `queue`.
     private var index = 0
     private var done = false
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var watchdog: DispatchSourceTimer?
+    private var lastProgress: ContinuousClock.Instant
 
-    init(input: AVAssetWriterInput, count: Int, label: String, append: @escaping (Int) -> Bool) {
+    init(
+        writer: AVAssetWriter, input: AVAssetWriterInput, count: Int, label: String,
+        append: @escaping (Int) -> Bool
+    ) {
+        self.writer = writer
         self.input = input
         self.count = count
         self.queue = DispatchQueue(label: "ClipMaker.\(label)")
         self.append = append
+        self.lastProgress = clock.now
     }
 
-    /// True once every sample was appended.
+    /// True once every sample was appended; false when appending failed, the writer failed or the feed stalled.
     func run() async -> Bool {
         await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            input.requestMediaDataWhenReady(on: queue) { [self] in
-                while !done && input.isReadyForMoreMediaData {
-                    let finished = index >= count
-                    let ok = finished || append(index)
-                    if finished || !ok {
-                        done = true
-                        input.markAsFinished()
-                        continuation.resume(returning: ok)
-                        return
+            queue.sync {
+                self.continuation = continuation
+                lastProgress = clock.now
+                let timer = DispatchSource.makeTimerSource(queue: queue)
+                timer.schedule(deadline: .now() + .milliseconds(250), repeating: .milliseconds(250))
+                timer.setEventHandler { [self] in
+                    guard !done else { return }
+                    if writer.status != .writing || lastProgress.duration(to: clock.now) > Self.stallLimit {
+                        end(ok: false)
                     }
-                    index += 1
+                }
+                watchdog = timer
+                timer.resume()
+                input.requestMediaDataWhenReady(on: queue) { [self] in
+                    while !done && input.isReadyForMoreMediaData {
+                        let finished = index >= count
+                        let ok = finished || append(index)
+                        if finished || !ok {
+                            end(ok: ok)
+                            return
+                        }
+                        index += 1
+                        lastProgress = clock.now
+                    }
                 }
             }
         }
+    }
+
+    /// Runs on `queue`; ends the feed once.
+    private func end(ok: Bool) {
+        guard !done else { return }
+        done = true
+        if writer.status == .writing { input.markAsFinished() }
+        watchdog?.cancel()
+        watchdog = nil
+        continuation?.resume(returning: ok)
+        continuation = nil
     }
 }
 
