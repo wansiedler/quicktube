@@ -516,14 +516,14 @@ import VideoToolbox
         let landed = Flag()
         let task = Task {
             try await VideoTranscoder.transcode(
-                input, plan: plan, output: output, hardwareEncoder: hardwareEncoder, log: nil,
-                stage: { reached in
-                    guard reached == stage else { return }
-                    cancel.fire()
-                    // The cancel reaches the worker synchronously, so it is cancelled at this very stage.
-                    if Task.isCancelled { landed.set() }
-                },
-                stallLimit: VideoTranscoder.defaultStallLimit,
+                VideoTranscoder.TranscodeJob(
+                    input: input, plan: plan, output: output, hardwareEncoder: hardwareEncoder,
+                    stage: { reached in
+                        guard reached == stage else { return }
+                        cancel.fire()
+                        // The cancel reaches the worker synchronously, so it is cancelled at this very stage.
+                        if Task.isCancelled { landed.set() }
+                    }),
                 progress: { _ in
                     if let afterFrames, frames.increment() == afterFrames { cancel.fire() }
                 })
@@ -569,9 +569,9 @@ import VideoToolbox
         // The first progress call parks the video pump for 3 s: no sample moves while the writer still writes.
         await #expect(throws: TranscodeError.failed("transcoding stopped early")) {
             _ = try await VideoTranscoder.transcode(
-                input, plan: plan, output: output, hardwareEncoder: true, log: { lines.append($0) },
-                stage: nil,
-                stallLimit: .milliseconds(500),
+                VideoTranscoder.TranscodeJob(
+                    input: input, plan: plan, output: output, log: { lines.append($0) },
+                    stallLimit: .milliseconds(500)),
                 progress: { _ in if frames.increment() == 1 { Thread.sleep(forTimeInterval: 3) } })
         }
         #expect(start.duration(to: clock.now) < .seconds(15))
@@ -592,7 +592,9 @@ import VideoToolbox
         let output = dir.appending(path: "clip.telegram.mp4")
         try Data("stale".utf8).write(to: output)
 
-        let result = try await VideoTranscoder.transcode(input, plan: plan, output: output) { _ in }
+        let result = try await VideoTranscoder.transcode(input, plan: plan, output: output) {
+            _ in /* progress unused */
+        }
 
         #expect(result == output)
         let info = try await VideoInfo.read(output)
@@ -652,11 +654,13 @@ import VideoToolbox
 
     @Test(.timeLimit(.minutes(1))) func awaitBoundedReturnsTheWorkersResult() async throws {
         let worker = Task<Int, Error>.detached { 42 }
-        let value = try await VideoTranscoder.awaitBounded(worker, grace: .seconds(5)) {}
+        let value = try await VideoTranscoder.awaitBounded(worker, grace: .seconds(5))
+        { /* nothing to abandon */  }
         #expect(value == 42)
         let failing = Task<Int, Error>.detached { throw TranscodeError.cannotRead }
         await #expect(throws: TranscodeError.cannotRead) {
-            _ = try await VideoTranscoder.awaitBounded(failing, grace: .seconds(5)) {}
+            _ = try await VideoTranscoder.awaitBounded(failing, grace: .seconds(5))
+            { /* nothing to abandon */  }
         }
     }
 

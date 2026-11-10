@@ -194,8 +194,39 @@ public enum VideoTranscoder {
         log: (@Sendable (String) -> Void)? = nil, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> URL {
         try await transcode(
-            input, plan: plan, output: output, hardwareEncoder: hardwareEncoder, log: log, stage: nil,
-            stallLimit: defaultStallLimit, progress: progress)
+            TranscodeJob(
+                input: input, plan: plan, output: output, hardwareEncoder: hardwareEncoder, log: log),
+            progress: progress)
+    }
+
+    /// Everything one transcode attempt needs except its progress callback.
+    struct TranscodeJob: Sendable {
+        let input: URL
+        let plan: TranscodePlan
+        let output: URL
+        /// This attempt's own file, moved onto `output` only on success.
+        let partial: URL
+        let hardwareEncoder: Bool
+        let log: (@Sendable (String) -> Void)?
+        /// Test hook, called at each `Stage`.
+        let stage: (@Sendable (Stage) -> Void)?
+        /// No sample on any track for this long (awake time) fails the transcode.
+        let stallLimit: Duration
+
+        init(
+            input: URL, plan: TranscodePlan, output: URL, hardwareEncoder: Bool = true,
+            log: (@Sendable (String) -> Void)? = nil, stage: (@Sendable (Stage) -> Void)? = nil,
+            stallLimit: Duration = VideoTranscoder.defaultStallLimit
+        ) {
+            self.input = input
+            self.plan = plan
+            self.output = output
+            self.partial = VideoTranscoder.partialURL(for: output)
+            self.hardwareEncoder = hardwareEncoder
+            self.log = log
+            self.stage = stage
+            self.stallLimit = stallLimit
+        }
     }
 
     /// Points a transcode passes, in order; tests cancel at each to prove cancellation ends it.
@@ -221,27 +252,20 @@ public enum VideoTranscoder {
             path: "\(output.lastPathComponent).partial-\(UUID().uuidString).mp4")
     }
 
-    /// `transcode` with a `stage` hook and a `stallLimit` (tests). Cancellation is bounded: the worker is
+    /// `transcode` for a whole `TranscodeJob` (tests set its `stage` hook and `stallLimit`). Cancellation is
+    /// bounded: the worker is
     /// cancelled and awaited for at most `cancelGrace`; past that its partial file is removed,
     /// `CancellationError` is thrown, and the worker is left to finish on its own (it only ever touches its
     /// own partial file, which it also removes on every exit).
     static func transcode(
-        _ input: URL, plan: TranscodePlan, output: URL, hardwareEncoder: Bool,
-        log: (@Sendable (String) -> Void)?, stage: (@Sendable (Stage) -> Void)?, stallLimit: Duration,
-        progress: @escaping @Sendable (Double) -> Void
+        _ job: TranscodeJob, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> URL {
         try Task.checkCancellation()
-        let partial = partialURL(for: output)
         // Reader and writer are not Sendable; they live and die inside this detached task.
-        let task = Task.detached(priority: .utility) {
-            try await run(
-                input, plan: plan, output: output, partial: partial, hardwareEncoder: hardwareEncoder,
-                log: log,
-                stage: stage, stallLimit: stallLimit, progress: progress)
-        }
+        let task = Task.detached(priority: .utility) { try await run(job, progress: progress) }
         return try await awaitBounded(task, grace: cancelGrace) {
-            try? FileManager.default.removeItem(at: partial)
-            log?("transcode did not stop within \(cancelGrace) of cancellation; abandoned it")
+            try? FileManager.default.removeItem(at: job.partial)
+            job.log?("transcode did not stop within \(cancelGrace) of cancellation; abandoned it")
         }
     }
 
@@ -307,11 +331,13 @@ public enum VideoTranscoder {
         }
     }
 
-    private static func run(
-        _ input: URL, plan: TranscodePlan, output: URL, partial: URL, hardwareEncoder: Bool,
-        log: (@Sendable (String) -> Void)?, stage: (@Sendable (Stage) -> Void)?, stallLimit: Duration,
-        progress: @escaping @Sendable (Double) -> Void
-    ) async throws -> URL {
+    private static func run(_ job: TranscodeJob, progress: @escaping @Sendable (Double) -> Void) async throws
+        -> URL
+    {
+        let (input, plan, output, partial) = (job.input, job.plan, job.output, job.partial)
+        let (hardwareEncoder, log, stage, stallLimit) = (
+            job.hardwareEncoder, job.log, job.stage, job.stallLimit
+        )
         // Whatever happens, this attempt's partial file does not outlive it (after success it is already moved).
         defer { try? FileManager.default.removeItem(at: partial) }
         let clock = ContinuousClock()
@@ -511,7 +537,7 @@ public enum VideoTranscoder {
                 Pump(
                     output: audioOutput, input: audioInput, writer: writerBox, label: "audio",
                     activity: activity,
-                    log: log, onSample: { _ in }))
+                    log: log, onSample: { _ in /* audio progress is not reported */ }))
         }
         // Stops every pump, including one parked waiting for `isReadyForMoreMediaData`, so the group always ends.
         let readerBox = Unchecked(reader)
