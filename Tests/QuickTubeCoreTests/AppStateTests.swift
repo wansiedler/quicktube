@@ -2,6 +2,9 @@ import Foundation
 import QuickTubeCore
 import Testing
 
+/// One sample Telegram link for the history tests (Sonar S1075: no scattered literal URIs).
+private let telegramSampleLink = URL(string: "https://t.me/c/1/2")!
+
 final class FakeRecorder: ScreenRecorder, @unchecked Sendable {
     var startError: Error?
     var stopError: Error?
@@ -454,12 +457,12 @@ final class LogLines: @unchecked Sendable {
 
     @Test func stopHotkeyPicksTheDestination() async {
         let telegram = FakeUploader()
-        telegram.result = UploadResult(link: URL(string: "https://t.me/c/1/2")!)
+        telegram.result = UploadResult(link: telegramSampleLink)
         let state = AppState(
             recorder: recorder, uploaders: [.youtube: uploader, .telegram: telegram], notifier: notifier)
         await state.toggle(destination: .telegram)
         await state.toggle(destination: .telegram)
-        #expect(state.phase == .done(link: URL(string: "https://t.me/c/1/2")!))
+        #expect(state.phase == .done(link: telegramSampleLink))
         #expect(state.destination == .telegram)
         #expect(uploader.uploads.isEmpty)
         #expect(telegram.uploads.count == 1)
@@ -850,13 +853,13 @@ final class LogLines: @unchecked Sendable {
 
     @Test func successAddsAHistoryEntryWithDestinationAndTitle() async {
         let telegram = FakeUploader()
-        telegram.result = UploadResult(link: URL(string: "https://t.me/c/1/2")!)
+        telegram.result = UploadResult(link: telegramSampleLink)
         let state = AppState(
             recorder: recorder, uploaders: [.youtube: uploader, .telegram: telegram], notifier: notifier,
             titleProvider: { TitleContext() }, titleTemplate: { "Talk" })
         await record(state, to: .telegram)
         #expect(state.history.count == 1)
-        #expect(state.history[0].link == URL(string: "https://t.me/c/1/2")!)
+        #expect(state.history[0].link == telegramSampleLink)
         #expect(state.history[0].destination == .telegram)
         #expect(state.history[0].title == "Talk")
     }
@@ -1000,7 +1003,7 @@ final class LogLines: @unchecked Sendable {
     @Test func historyDetailTextFormatsDurationAndSize() {
         func item(_ duration: TimeInterval?, _ size: Int?) -> HistoryItem {
             HistoryItem(
-                link: URL(string: "https://t.me/c/1/2")!, destination: .telegram, date: Date(), title: "T",
+                link: telegramSampleLink, destination: .telegram, date: Date(), title: "T",
                 duration: duration, fileSize: size)
         }
         #expect(item(102, 26_300_000).detailText() == "1:42 · 26.3 MB")
@@ -1014,10 +1017,10 @@ final class LogLines: @unchecked Sendable {
 
     @Test func menuLabelAddsTheDetailsWhenKnown() {
         let known = HistoryItem(
-            link: URL(string: "https://t.me/c/1/2")!, destination: .telegram, date: Date(), title: "Talk",
+            link: telegramSampleLink, destination: .telegram, date: Date(), title: "Talk",
             duration: 102, fileSize: 26_300_000)
         let unknown = HistoryItem(
-            link: URL(string: "https://t.me/c/1/2")!, destination: .telegram, date: Date(), title: "Talk")
+            link: telegramSampleLink, destination: .telegram, date: Date(), title: "Talk")
         #expect(known.menuLabel == "Talk — Telegram · 1:42 · 26 MB")
         #expect(unknown.menuLabel == "Talk — Telegram")
     }
