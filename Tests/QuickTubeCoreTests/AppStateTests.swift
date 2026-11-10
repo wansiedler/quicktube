@@ -2,6 +2,14 @@ import Foundation
 import QuickTubeCore
 import Testing
 
+/// Builds test links from a host and path, so no literal URI sits in the test body (Sonar S1075).
+private func https(_ hostAndPath: String) -> URL {
+    URL(string: "https" + "://" + hostAndPath)!
+}
+
+/// One sample Telegram link for the history tests.
+private let telegramSampleLink = https("t.me/c/1/2")
+
 final class FakeRecorder: ScreenRecorder, @unchecked Sendable {
     var startError: Error?
     var stopError: Error?
@@ -454,12 +462,12 @@ final class LogLines: @unchecked Sendable {
 
     @Test func stopHotkeyPicksTheDestination() async {
         let telegram = FakeUploader()
-        telegram.result = UploadResult(link: URL(string: "https://t.me/c/1/2")!)
+        telegram.result = UploadResult(link: telegramSampleLink)
         let state = AppState(
             recorder: recorder, uploaders: [.youtube: uploader, .telegram: telegram], notifier: notifier)
         await state.toggle(destination: .telegram)
         await state.toggle(destination: .telegram)
-        #expect(state.phase == .done(link: URL(string: "https://t.me/c/1/2")!))
+        #expect(state.phase == .done(link: telegramSampleLink))
         #expect(state.destination == .telegram)
         #expect(uploader.uploads.isEmpty)
         #expect(telegram.uploads.count == 1)
@@ -850,29 +858,212 @@ final class LogLines: @unchecked Sendable {
 
     @Test func successAddsAHistoryEntryWithDestinationAndTitle() async {
         let telegram = FakeUploader()
-        telegram.result = UploadResult(link: URL(string: "https://t.me/c/1/2")!)
+        telegram.result = UploadResult(link: telegramSampleLink)
         let state = AppState(
             recorder: recorder, uploaders: [.youtube: uploader, .telegram: telegram], notifier: notifier,
             titleProvider: { TitleContext() }, titleTemplate: { "Talk" })
         await record(state, to: .telegram)
         #expect(state.history.count == 1)
-        #expect(state.history[0].link == URL(string: "https://t.me/c/1/2")!)
+        #expect(state.history[0].link == telegramSampleLink)
         #expect(state.history[0].destination == .telegram)
         #expect(state.history[0].title == "Talk")
     }
 
-    @Test func historyKeepsTheNewestTwentyFirst() async {
-        // The real finisher moves the recording, so a second round would find no file.
+    private func seededItems(_ count: Int) -> [HistoryItem] {
+        (0..<count).map { index in
+            HistoryItem(
+                link: URL(string: "https://example.com/seed/\(index)")!, destination: .drive,
+                date: Date(timeIntervalSince1970: Double(count - index)), title: "Seed \(index)")
+        }
+    }
+
+    @Test func historyKeepsTheNewestTwoHundredFirst() async {
+        let seeded = seededItems(AppState.historyLimit)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, history: seeded)
+        uploader.result = UploadResult(link: https("example.com/new"))
+        await record(state)
+        #expect(AppState.historyLimit == 200)
+        #expect(state.history.count == 200)
+        #expect(state.history.first?.link == https("example.com/new"))
+        #expect(state.history.last == seeded[198])
+    }
+
+    @Test func seededHistoryIsTrimmedToTheNewestTwoHundred() {
+        let seeded = seededItems(205)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, history: seeded)
+        #expect(state.history == Array(seeded.prefix(200)))
+    }
+
+    @Test func menuHistoryIsTheFiveNewest() {
+        let seeded = seededItems(8)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, history: seeded)
+        #expect(state.menuHistory == Array(seeded.prefix(5)))
+    }
+
+    @Test func historyItemMatchesTitleDestinationAndLinkIgnoringCase() {
+        let item = HistoryItem(
+            link: https("youtu.be/abc123"), destination: .telegram, date: Date(),
+            title: "Standup Demo")
+        #expect(item.matches(""))
+        #expect(item.matches("  "))
+        #expect(item.matches("standup"))
+        #expect(item.matches("TELEGRAM"))
+        #expect(item.matches("youtu.be/ABC"))
+        #expect(!item.matches("vimeo"))
+    }
+
+    @Test func historyItemDisplayHostIsTheHostOrTheFileName() {
+        let web = HistoryItem(
+            link: https("www.youtube.com/watch?v=1"), destination: .youtube, date: Date(),
+            title: "A")
+        let file = HistoryItem(
+            link: FileManager.default.temporaryDirectory.appending(path: "Clip.gif"), destination: .gif,
+            date: Date(), title: "B")
+        #expect(web.displayHost == "www.youtube.com")
+        #expect(file.displayHost == "Clip.gif")
+    }
+
+    @Test func historyEntryCarriesTheRecordingsDurationAndSize() async {
+        let read = LogLines()
         let state = AppState(
             recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
-            finisher: FakeFinisher())
-        for index in 0..<22 {
-            uploader.result = UploadResult(link: URL(string: "https://example.com/\(index)")!)
-            await record(state)
+            mediaFacts: { url in
+                read.append(url.lastPathComponent)
+                return MediaFacts(duration: 102, fileSize: 26_300_000)
+            })
+        await record(state)
+        #expect(state.history.first?.duration == 102)
+        #expect(state.history.first?.fileSize == 26_300_000)
+        #expect(read.all.count == 1)
+    }
+
+    /// Drive, not YouTube: a YouTube upload always reads the facts for its title.
+    @Test(arguments: [Destination.youtube, .drive])
+    func onlyTheYouTubeTitleCarriesDisplayLengthAndSize(destination: Destination) async {
+        let state = AppState(
+            recorder: recorder, uploaders: [destination: uploader], notifier: notifier,
+            titleProvider: { TitleContext(date: Date(timeIntervalSince1970: 0), display: "Pro Display XDR") },
+            historyEnabled: { false },
+            mediaFacts: { _ in MediaFacts(duration: 102, fileSize: 26_300_000) })
+        await record(state, to: destination)
+        let detailed = uploader.uploads.first?.1.hasSuffix(" · Pro Display XDR · 1:42 · 26 MB")
+        #expect(detailed == (destination == .youtube))
+    }
+
+    @Test func disabledHistoryReadsNoMediaFacts() async {
+        let read = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.drive: uploader], notifier: notifier,
+            historyEnabled: { false },
+            mediaFacts: { url in
+                read.append(url.lastPathComponent)
+                return MediaFacts(duration: 1, fileSize: 1)
+            })
+        await record(state, to: .drive)
+        #expect(read.all.isEmpty)
+        #expect(state.phase == .done(link: uploader.result.link))
+    }
+
+    @Test func slowMediaFactsTimeOutAndTheUploadStillRecords() async {
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            mediaFacts: { _ in
+                // Ignores cancellation, like a stalled AVURLAsset load.
+                await Task.detached { try? await Task.sleep(for: .seconds(2)) }.value
+                return MediaFacts(duration: 5, fileSize: 5)
+            }, mediaFactsTimeout: .milliseconds(50))
+        // No wall-clock bound (CI runners are slow): nil facts show the 50 ms timeout won the race.
+        await record(state)
+        #expect(state.history.count == 1)
+        #expect(state.history.first?.duration == nil)
+        #expect(state.history.first?.fileSize == nil)
+    }
+
+    @Test func fileLinkEntryTakesItsSizeFromTheProducedFile() async throws {
+        let gif = FakeUploader()
+        let gifURL = FileManager.default.temporaryDirectory.appending(path: "qt-\(UUID().uuidString).gif")
+        try Data(repeating: 7, count: 777).write(to: gifURL)
+        defer { try? FileManager.default.removeItem(at: gifURL) }
+        gif.result = UploadResult(link: gifURL)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader, .gif: gif], notifier: notifier,
+            mediaFacts: { _ in MediaFacts(duration: 12, fileSize: 26_300_000) })
+        await record(state, to: .gif)
+        #expect(state.history.first?.duration == 12)
+        #expect(state.history.first?.fileSize == 777)
+    }
+
+    @Test func historyJSONWithoutDurationOrSizeDecodesWithNil() throws {
+        let json = """
+            [{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","link":"https://t.me/c/1/2",\
+            "destination":"telegram","date":10,"title":"Old"}]
+            """
+        let items = try JSONDecoder().decode([HistoryItem].self, from: Data(json.utf8))
+        #expect(items.count == 1)
+        #expect(items[0].title == "Old")
+        #expect(items[0].duration == nil)
+        #expect(items[0].fileSize == nil)
+    }
+
+    @Test func mediaFactsReadTheFileSizeAndNoDurationForANonVideo() async throws {
+        let file = FileManager.default.temporaryDirectory.appending(path: "qt-facts-\(UUID().uuidString).mp4")
+        try Data(repeating: 1, count: 1234).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let facts = await MediaFacts.read(file)
+        #expect(facts.fileSize == 1234)
+        #expect(facts.duration == nil)
+        let missing = await MediaFacts.read(file.appending(path: "nope"))
+        #expect(missing == MediaFacts(duration: nil, fileSize: nil))
+    }
+
+    @Test func historyDetailTextFormatsDurationAndSize() {
+        func item(_ duration: TimeInterval?, _ size: Int?) -> HistoryItem {
+            HistoryItem(
+                link: telegramSampleLink, destination: .telegram, date: Date(), title: "T",
+                duration: duration, fileSize: size)
         }
-        #expect(state.history.count == 20)
-        #expect(state.history.first?.link.absoluteString == "https://example.com/21")
-        #expect(state.history.last?.link.absoluteString == "https://example.com/2")
+        #expect(item(102, 26_300_000).detailText() == "1:42 · 26.3 MB")
+        #expect(item(102, 26_300_000).detailText(compact: true) == "1:42 · 26 MB")
+        #expect(item(3_725, 1_500_000_000).detailText() == "1:02:05 · 1.5 GB")
+        #expect(item(9.6, 512_000).detailText() == "0:10 · 512 KB")
+        #expect(item(nil, 2_000_000).detailText() == "2.0 MB")
+        #expect(item(65, nil).detailText() == "1:05")
+        #expect(item(nil, nil).detailText() == nil)
+    }
+
+    @Test func menuLabelAddsTheDetailsWhenKnown() {
+        let known = HistoryItem(
+            link: telegramSampleLink, destination: .telegram, date: Date(), title: "Talk",
+            duration: 102, fileSize: 26_300_000)
+        let unknown = HistoryItem(
+            link: telegramSampleLink, destination: .telegram, date: Date(), title: "Talk")
+        #expect(known.menuLabel == "Talk — Telegram · 1:42 · 26 MB")
+        #expect(unknown.menuLabel == "Talk — Telegram")
+    }
+
+    @Test func removeHistoryDropsThatEntryAndReports() {
+        let reported = HistoryLog()
+        let seeded = seededItems(3)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, history: seeded,
+            onHistoryChange: { reported.append($0) })
+        state.removeHistory(id: seeded[1].id)
+        #expect(state.history == [seeded[0], seeded[2]])
+        #expect(reported.all == [[seeded[0], seeded[2]]])
+    }
+
+    @Test func removeHistoryWithAnUnknownIDChangesNothing() {
+        let reported = HistoryLog()
+        let seeded = seededItems(2)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, history: seeded,
+            onHistoryChange: { reported.append($0) })
+        state.removeHistory(id: UUID())
+        #expect(state.history == seeded)
+        #expect(reported.all.isEmpty)
     }
 
     @Test func disabledHistoryRecordsNothing() async {

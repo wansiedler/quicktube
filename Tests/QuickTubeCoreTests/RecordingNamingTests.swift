@@ -96,6 +96,23 @@ import Testing
                 == "6016×3384 · 43 fps · 20 MB")
     }
 
+    @Test func uploadTitleAddsDisplayLengthAndSize() {
+        let base = "2026-11-10 16.57.33"
+        #expect(
+            RecordingNaming.uploadTitle(base, display: "Pro Display XDR", duration: 102, fileSize: 26_300_000)
+                == "2026-11-10 16.57.33 · Pro Display XDR · 1:42 · 26 MB")
+        #expect(RecordingNaming.uploadTitle(base, display: nil, duration: nil, fileSize: nil) == base)
+        #expect(
+            RecordingNaming.uploadTitle(
+                "Demo Pro Display XDR", display: "Pro Display XDR", duration: 5, fileSize: 0)
+                == "Demo Pro Display XDR · 0:05")
+        let long = RecordingNaming.uploadTitle(
+            String(repeating: "x", count: 120), display: "<Display>", duration: 1, fileSize: 1)
+        #expect(long.count == 100)
+        #expect(
+            RecordingNaming.uploadTitle("T", display: "<LG>", duration: nil, fileSize: nil) == "T · LG")
+    }
+
     @Test func metadataLineSkipsUnknownFps() {
         let info = VideoInfo(width: 1280, height: 720, fps: nil, duration: 2)
         #expect(RecordingNaming.metadataLine(display: "Display", info: info) == "Display · 1280×720")

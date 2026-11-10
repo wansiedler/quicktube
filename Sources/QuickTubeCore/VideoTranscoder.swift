@@ -181,7 +181,9 @@ public enum VideoTranscoder {
     /// AVAssetReader → AVAssetWriter, reporting progress 0…1. Video is re-encoded to `plan.codec` at
     /// `plan.videoBitrate`;
     /// a single AAC audio track is copied untouched, several tracks are mixed to stereo 48 kHz AAC at
-    /// `plan.audioBitrate` (clamped to 64–320 kbit/s). Replaces `output` if it exists and removes it again on failure. Returns `output`.
+    /// `plan.audioBitrate` (clamped to 64–320 kbit/s). Each attempt writes a unique `<output>.partial-<UUID>.mp4`
+    /// next to `output` and moves it into place only on success, so an abandoned attempt never touches another's
+    /// file. A stale `output` is removed when the writer starts, so it never outlives a failure. Returns `output`.
     /// `log` gets the software-encoder fallback and, on success, a throughput line (frames, seconds, fps, codec,
     /// size). The hardware encoder is required first; only if the writer rejects its settings or starting it fails
     /// with an encoder-unavailable error does the transcode fall back to the software encoder (a hardware failure surfacing later, at an append,
@@ -191,24 +193,153 @@ public enum VideoTranscoder {
         _ input: URL, plan: TranscodePlan, output: URL, hardwareEncoder: Bool = true,
         log: (@Sendable (String) -> Void)? = nil, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> URL {
-        // Reader and writer are not Sendable; they live and die inside this detached task.
-        let task = Task.detached(priority: .utility) {
-            try await run(
-                input, plan: plan, output: output, hardwareEncoder: hardwareEncoder, log: log,
-                progress: progress)
-        }
-        return try await withTaskCancellationHandler {
-            try await task.value
-        } onCancel: {
-            task.cancel()
+        try await transcode(
+            TranscodeJob(
+                input: input, plan: plan, output: output, hardwareEncoder: hardwareEncoder, log: log),
+            progress: progress)
+    }
+
+    /// Everything one transcode attempt needs except its progress callback.
+    struct TranscodeJob: Sendable {
+        let input: URL
+        let plan: TranscodePlan
+        let output: URL
+        /// This attempt's own file, moved onto `output` only on success.
+        let partial: URL
+        let hardwareEncoder: Bool
+        let log: (@Sendable (String) -> Void)?
+        /// Test hook, called at each `Stage`.
+        let stage: (@Sendable (Stage) -> Void)?
+        /// No sample on any track for this long (awake time) fails the transcode.
+        let stallLimit: Duration
+
+        init(
+            input: URL, plan: TranscodePlan, output: URL, hardwareEncoder: Bool = true,
+            log: (@Sendable (String) -> Void)? = nil, stage: (@Sendable (Stage) -> Void)? = nil,
+            stallLimit: Duration = VideoTranscoder.defaultStallLimit
+        ) {
+            self.input = input
+            self.plan = plan
+            self.output = output
+            self.partial = VideoTranscoder.partialURL(for: output)
+            self.hardwareEncoder = hardwareEncoder
+            self.log = log
+            self.stage = stage
+            self.stallLimit = stallLimit
         }
     }
 
-    private static func run(
-        _ input: URL, plan: TranscodePlan, output: URL, hardwareEncoder: Bool,
-        log: (@Sendable (String) -> Void)?,
-        progress: @escaping @Sendable (Double) -> Void
+    /// Points a transcode passes, in order; tests cancel at each to prove cancellation ends it.
+    enum Stage: Sendable, Equatable {
+        /// The source is loaded; no writer exists yet.
+        case loaded
+        /// The writer is started (after any software fallback); reading has not begun.
+        case writerStarted
+        /// The session is started; the pumps are about to run.
+        case pumping
+    }
+
+    /// How long a cancelled transcode waits for its worker to wind down before giving up on it.
+    static let cancelGrace: Duration = .seconds(5)
+    /// The most `cancelWriting()` may take when a transcode is torn down.
+    static let teardownLimit: Duration = .seconds(5)
+    /// No sample on any track for this long (awake time), with the writer still writing, fails the transcode.
+    static let defaultStallLimit: Duration = .seconds(60)
+
+    /// The unique file one attempt writes before it is moved to `output`.
+    static func partialURL(for output: URL) -> URL {
+        output.deletingLastPathComponent().appending(
+            path: "\(output.lastPathComponent).partial-\(UUID().uuidString).mp4")
+    }
+
+    /// `transcode` for a whole `TranscodeJob` (tests set its `stage` hook and `stallLimit`). Cancellation is
+    /// bounded: the worker is
+    /// cancelled and awaited for at most `cancelGrace`; past that its partial file is removed,
+    /// `CancellationError` is thrown, and the worker is left to finish on its own (it only ever touches its
+    /// own partial file, which it also removes on every exit).
+    static func transcode(
+        _ job: TranscodeJob, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> URL {
+        try Task.checkCancellation()
+        // Reader and writer are not Sendable; they live and die inside this detached task.
+        let task = Task.detached(priority: .utility) { try await run(job, progress: progress) }
+        return try await awaitBounded(task, grace: cancelGrace) {
+            try? FileManager.default.removeItem(at: job.partial)
+            job.log?("transcode did not stop within \(cancelGrace) of cancellation; abandoned it")
+        }
+    }
+
+    /// Awaits `task`. Once the caller is cancelled, `task` is cancelled too and awaited for at most `grace`;
+    /// past that `onAbandon` runs and only then is `CancellationError` thrown, while `task` winds down on its
+    /// own.
+    static func awaitBounded<T: Sendable>(
+        _ task: Task<T, Error>, grace: Duration, onAbandon: @escaping @Sendable () -> Void
+    ) async throws -> T {
+        let gate = ResultGate<T>()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+                gate.install(continuation)
+                Task.detached { gate.deliver(await task.result) }
+            }
+        } onCancel: {
+            task.cancel()
+            Task.detached {
+                try? await Task.sleep(for: grace)
+                gate.deliver(.failure(CancellationError()), beforeResume: onAbandon)
+            }
+        }
+    }
+
+    /// Resumes one continuation exactly once with the first delivered result, whether that arrives before or
+    /// after the continuation is installed; later results are ignored.
+    final class ResultGate<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<T, Error>?
+        private var pending: Result<T, Error>?
+        private var delivered = false
+
+        func install(_ continuation: CheckedContinuation<T, Error>) {
+            let ready = lock.withLock { () -> Result<T, Error>? in
+                guard let pending else {
+                    self.continuation = continuation
+                    return nil
+                }
+                self.pending = nil
+                return pending
+            }
+            if let ready { continuation.resume(with: ready) }
+        }
+
+        /// Claims the gate for `result`; when this is the first result, `beforeResume` runs, then the
+        /// continuation is resumed (or the result kept until `install`). True when this result was delivered.
+        @discardableResult
+        func deliver(_ result: Result<T, Error>, beforeResume: (() -> Void)? = nil) -> Bool {
+            let first = lock.withLock { () -> Bool in
+                guard !delivered else { return false }
+                delivered = true
+                return true
+            }
+            guard first else { return false }
+            beforeResume?()
+            let waiting = lock.withLock { () -> CheckedContinuation<T, Error>? in
+                defer { continuation = nil }
+                if continuation == nil { pending = result }
+                return continuation
+            }
+            waiting?.resume(with: result)
+            return true
+        }
+    }
+
+    private static func run(_ job: TranscodeJob, progress: @escaping @Sendable (Double) -> Void) async throws
+        -> URL
+    {
+        let (input, plan, output, partial) = (job.input, job.plan, job.output, job.partial)
+        let (hardwareEncoder, log, stage, stallLimit) = (
+            job.hardwareEncoder, job.log, job.stage, job.stallLimit
+        )
+        // Whatever happens, this attempt's partial file does not outlive it (after success it is already moved).
+        defer { try? FileManager.default.removeItem(at: partial) }
         let clock = ContinuousClock()
         let start = clock.now
         let asset = AVURLAsset(url: input)
@@ -240,6 +371,9 @@ public enum VideoTranscoder {
             && audioFormats.allSatisfy { CMFormatDescriptionGetMediaSubType($0) == kAudioFormatMPEG4AAC }
         let strategy = audioStrategy(
             trackCount: audioTracks.count, estimatedDataRate: nil, canPassThrough: canPassThrough)
+        stage?(.loaded)
+        // A transcode cancelled before the writer exists never creates (or replaces) the output.
+        try Task.checkCancellation()
 
         let videoOutput = AVAssetReaderTrackOutput(
             track: videoTrack,
@@ -283,8 +417,8 @@ public enum VideoTranscoder {
         /// A started writer with its inputs, `.encoderUnavailable` when the hardware encoder cannot be used, or
         /// a thrown error (with the writer's reason, logged) for anything else.
         func startWriter(hardware: Bool) throws -> Attempt {
-            try? FileManager.default.removeItem(at: output)
-            guard let writer = try? AVAssetWriter(outputURL: output, fileType: .mp4) else {
+            try? FileManager.default.removeItem(at: partial)
+            guard let writer = try? AVAssetWriter(outputURL: partial, fileType: .mp4) else {
                 throw TranscodeError.cannotWrite
             }
             writer.shouldOptimizeForNetworkUse = true
@@ -303,7 +437,7 @@ public enum VideoTranscoder {
             videoInput.transform = transform
             videoInput.expectsMediaDataInRealTime = false
             guard writer.canAdd(videoInput) else {
-                try? FileManager.default.removeItem(at: output)
+                try? FileManager.default.removeItem(at: partial)
                 if VideoEncoding.shouldRetryInSoftware(hardware: hardware, inputRejected: true, error: nil) {
                     return .encoderUnavailable(
                         "the writer rejected the hardware \(plan.codec.label) settings")
@@ -340,8 +474,9 @@ public enum VideoTranscoder {
             }
             guard writer.startWriting() else {
                 let error = writer.error
+                // Synchronous on purpose: this writer never started, so cancelling it returns at once.
                 writer.cancelWriting()
-                try? FileManager.default.removeItem(at: output)
+                try? FileManager.default.removeItem(at: partial)
                 let reason = VideoEncoding.describe(error)
                 if VideoEncoding.shouldRetryInSoftware(hardware: hardware, inputRejected: false, error: error)
                 {
@@ -353,25 +488,45 @@ public enum VideoTranscoder {
             return .started((writer, videoInput, audioInput))
         }
 
+        // A stale output from an earlier transcode must not outlive this one if it fails.
+        try? FileManager.default.removeItem(at: output)
         var attempt = try startWriter(hardware: hardwareEncoder)
         if case .encoderUnavailable(let reason) = attempt {
+            // Cancelled while the hardware attempt failed: nothing is started, so there is nothing to undo.
+            try Task.checkCancellation()
             log?("hardware \(plan.codec.label) encoder unavailable (\(reason)), using software")
             attempt = try startWriter(hardware: false)
         }
         guard case .started(let (writer, videoInput, audioInput)) = attempt else {
             throw TranscodeError.cannotWrite
         }
+        let writerBox = Unchecked(writer)
+        /// Cancels the writer (bounded by `teardownLimit`; a stuck one is logged and left) and removes this
+        /// attempt's partial file.
+        func discard() async {
+            let stopped = await cancelWritingBounded(writerBox)
+            if !stopped {
+                log?("cancelWriting did not return within \(teardownLimit); partial file removed anyway")
+            }
+            try? FileManager.default.removeItem(at: partial)
+        }
+        stage?(.writerStarted)
+        if Task.isCancelled {
+            await discard()
+            throw CancellationError()
+        }
         guard reader.startReading() else {
-            writer.cancelWriting()
-            try? FileManager.default.removeItem(at: output)
+            await discard()
             throw TranscodeError.cannotRead
         }
         writer.startSession(atSourceTime: .zero)
+        stage?(.pumping)
 
         let total = duration.seconds
-        let writerBox = Unchecked(writer)
+        let activity = Activity()
         let videoPump = Pump(
-            output: videoOutput, input: videoInput, writer: writerBox, label: "video",
+            output: videoOutput, input: videoInput, writer: writerBox, label: "video", activity: activity,
+            log: log,
             onSample: { seconds in
                 guard total.isFinite, total > 0 else { return }
                 progress(min(0.99, max(0, seconds / total)))
@@ -381,7 +536,8 @@ public enum VideoTranscoder {
             pumps.append(
                 Pump(
                     output: audioOutput, input: audioInput, writer: writerBox, label: "audio",
-                    onSample: { _ in }))
+                    activity: activity,
+                    log: log, onSample: { _ in /* audio progress is not reported */ }))
         }
         // Stops every pump, including one parked waiting for `isReadyForMoreMediaData`, so the group always ends.
         let readerBox = Unchecked(reader)
@@ -390,6 +546,10 @@ public enum VideoTranscoder {
             readerBox.value.cancelReading()
             for pump in pumpList { pump.abort() }
         }
+        let watchdog = Watchdog(
+            writer: writerBox, activity: activity, stallLimit: stallLimit, log: log,
+            onTick: { for pump in pumpList { pump.kick() } }, onTrip: abortAll)
+        watchdog.start()
         await withTaskCancellationHandler {
             await withTaskGroup(of: Void.self) { group in
                 for pump in pumpList { group.addTask { await pump.run(onFailure: abortAll) } }
@@ -397,38 +557,66 @@ public enum VideoTranscoder {
         } onCancel: {
             abortAll()
         }
+        watchdog.stop()
 
-        func discard() {
-            writer.cancelWriting()
-            try? FileManager.default.removeItem(at: output)
-        }
+        // Never `finishWriting` after a cancel: the writer is cancelled instead, and nothing waits on it unbounded.
         if Task.isCancelled {
-            discard()
+            await discard()
             throw CancellationError()
         }
         if writer.status == .failed {
-            discard()
-            throw TranscodeError.failed(writer.error?.localizedDescription ?? "writing failed")
+            let reason = writer.error?.localizedDescription ?? "writing failed"
+            await discard()
+            throw TranscodeError.failed(reason)
         }
         if reader.status == .failed {
-            discard()
+            await discard()
             throw TranscodeError.failed(reader.error?.localizedDescription ?? "reading failed")
         }
         if reader.status == .cancelled || writer.status != .writing {
-            discard()
+            await discard()
             throw TranscodeError.failed("transcoding stopped early")
         }
         await writer.finishWritingOnce()
+        // Cancelled while finishing (the caller may already have given up): the partial file is dropped (defer).
+        try Task.checkCancellation()
         guard writer.status == .completed else {
-            let reason = writer.error?.localizedDescription ?? "writing did not complete"
-            try? FileManager.default.removeItem(at: output)
-            throw TranscodeError.failed(reason)
+            throw TranscodeError.failed(writer.error?.localizedDescription ?? "writing did not complete")
+        }
+        do {
+            if FileManager.default.fileExists(atPath: output.path) {
+                _ = try FileManager.default.replaceItemAt(output, withItemAt: partial)
+            } else {
+                try FileManager.default.moveItem(at: partial, to: output)
+            }
+        } catch {
+            log?("could not move the transcode into place: \(error.localizedDescription)")
+            throw TranscodeError.cannotWrite
         }
         progress(1)
         let elapsed = start.duration(to: clock.now)
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
-        log?(throughputLine(frames: videoPump.framesWritten, seconds: seconds, plan: plan))
+        log?(throughputLine(frames: activity.appended("video"), seconds: seconds, plan: plan))
         return output
+    }
+
+    /// `cancelWriting()` off the cooperative pool, awaited for at most `teardownLimit`; false when it overran
+    /// (it then finishes on its own).
+    private static func cancelWritingBounded(_ writer: Unchecked<AVAssetWriter>) async -> Bool {
+        struct Overran: Error {}
+        do {
+            try await Deadline.run(timeout: teardownLimit, error: Overran()) {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    DispatchQueue.global(qos: .utility).async {
+                        writer.value.cancelWriting()
+                        continuation.resume()
+                    }
+                }
+            }
+            return true
+        } catch {
+            return false
+        }
     }
 
     private struct Unchecked<T>: @unchecked Sendable {
@@ -436,29 +624,140 @@ public enum VideoTranscoder {
         init(_ value: T) { self.value = value }
     }
 
+    /// When any pump last appended a sample, and how many each appended. Stall time is measured on
+    /// `SuspendingClock`, so time the Mac spends asleep never counts as a stall.
+    private final class Activity: @unchecked Sendable {
+        private let lock = NSLock()
+        private let clock = SuspendingClock()
+        private var last: SuspendingClock.Instant
+        private var counts: [String: Int] = [:]
+
+        init() { last = clock.now }
+
+        func touch(_ label: String) {
+            lock.withLock {
+                last = clock.now
+                counts[label, default: 0] += 1
+            }
+        }
+
+        /// Awake time since any pump last appended.
+        var idle: Duration { lock.withLock { last.duration(to: clock.now) } }
+
+        func appended(_ label: String) -> Int { lock.withLock { counts[label] ?? 0 } }
+
+        /// "video 12, audio 30".
+        var summary: String {
+            lock.withLock {
+                counts.sorted { $0.key > $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
+            }
+        }
+    }
+
+    /// Watches one transcode from its own queue and stops every pump (`onTrip`, once) when the writer leaves
+    /// `.writing` (`requestMediaDataWhenReady` never calls back after that) or no pump appended anything for
+    /// `stallLimit` while the writer still writes. Pumps waiting on each other (interleaving) do not count as
+    /// a stall as long as one of them moves.
+    private final class Watchdog: @unchecked Sendable {
+        static let interval: DispatchTimeInterval = .milliseconds(250)
+
+        private let writer: Unchecked<AVAssetWriter>
+        private let activity: Activity
+        private let stallLimit: Duration
+        private let log: (@Sendable (String) -> Void)?
+        private let onTrip: @Sendable () -> Void
+        private let onTick: @Sendable () -> Void
+        private let queue = DispatchQueue(label: "QuickTube.transcode.watchdog")
+        // Touched only on `queue`.
+        private var timer: DispatchSourceTimer?
+        private var tripped = false
+
+        init(
+            writer: Unchecked<AVAssetWriter>, activity: Activity, stallLimit: Duration,
+            log: (@Sendable (String) -> Void)?, onTick: @escaping @Sendable () -> Void,
+            onTrip: @escaping @Sendable () -> Void
+        ) {
+            self.onTick = onTick
+            self.writer = writer
+            self.activity = activity
+            self.stallLimit = stallLimit
+            self.log = log
+            self.onTrip = onTrip
+        }
+
+        func start() {
+            queue.sync {
+                let timer = DispatchSource.makeTimerSource(queue: queue)
+                timer.schedule(
+                    deadline: .now() + Self.interval, repeating: Self.interval, leeway: .milliseconds(100))
+                timer.setEventHandler { [self] in check() }
+                self.timer = timer
+                timer.resume()
+            }
+        }
+
+        func stop() {
+            queue.sync {
+                timer?.cancel()
+                timer = nil
+            }
+        }
+
+        /// Runs on `queue`.
+        private func check() {
+            guard !tripped else { return }
+            // A missed `requestMediaDataWhenReady` callback must not leave a ready input parked.
+            onTick()
+            let writer = writer.value
+            if writer.status != .writing {
+                trip(
+                    "writer left writing (status \(writer.status.rawValue): "
+                        + "\(VideoEncoding.describe(writer.error))); appended \(activity.summary)")
+            } else if activity.idle > stallLimit {
+                trip(
+                    "no sample on any track for \(stallLimit), writer still writing; appended \(activity.summary)"
+                )
+            }
+        }
+
+        /// Runs on `queue`.
+        private func trip(_ reason: String) {
+            tripped = true
+            timer?.cancel()
+            timer = nil
+            log?("transcode watchdog stopped the pumps: \(reason)")
+            onTrip()
+        }
+    }
+
     /// Moves samples from one reader output to one writer input on its own queue until either runs dry,
-    /// the writer stops writing, or `abort()` is called.
+    /// the writer stops writing, or `abort()` is called (by cancellation, a sibling's failure or the
+    /// `Watchdog`).
     private final class Pump: @unchecked Sendable {
         private let output: AVAssetReaderOutput
         private let input: AVAssetWriterInput
         private let writer: Unchecked<AVAssetWriter>
+        private let label: String
+        private let activity: Activity
+        private let log: (@Sendable (String) -> Void)?
         private let queue: DispatchQueue
         private let onSample: @Sendable (Double) -> Void
-        /// Touched only on `queue`.
+        // Touched only on `queue`.
         private var finished = false
         private var continuation: CheckedContinuation<Void, Never>?
-        /// Touched only on `queue`.
-        private var appended = 0
-        /// Samples appended so far.
-        var framesWritten: Int { queue.sync { appended } }
+        private var onFailure: (@Sendable () -> Void)?
 
         init(
             output: AVAssetReaderOutput, input: AVAssetWriterInput, writer: Unchecked<AVAssetWriter>,
-            label: String, onSample: @escaping @Sendable (Double) -> Void
+            label: String, activity: Activity, log: (@Sendable (String) -> Void)?,
+            onSample: @escaping @Sendable (Double) -> Void
         ) {
             self.output = output
             self.input = input
             self.writer = writer
+            self.label = label
+            self.activity = activity
+            self.log = log
             self.queue = DispatchQueue(label: "QuickTube.transcode.\(label)")
             self.onSample = onSample
         }
@@ -467,13 +766,15 @@ public enum VideoTranscoder {
         func run(onFailure: @escaping @Sendable () -> Void) async {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 // Registration, `abort()` and `finish()` all run on `queue`, so an input is never asked for
-                // data after it was marked finished (AVFoundation raises on that).
+                // data after it was marked finished (AVFoundation raises on that), and the continuation is
+                // resumed exactly once.
                 queue.sync {
                     self.continuation = continuation
                     guard !finished, writer.value.status == .writing else {
                         finish()
                         return
                     }
+                    self.onFailure = onFailure
                     input.requestMediaDataWhenReady(on: queue) { [self] in pull(onFailure: onFailure) }
                 }
             }
@@ -484,8 +785,7 @@ public enum VideoTranscoder {
             guard !finished else { return }
             while input.isReadyForMoreMediaData {
                 guard writer.value.status == .writing else {
-                    finish()
-                    onFailure()
+                    fail("the writer left writing", onFailure)
                     return
                 }
                 guard let sample = output.copyNextSampleBuffer() else {
@@ -493,16 +793,32 @@ public enum VideoTranscoder {
                     return
                 }
                 guard input.append(sample) else {
-                    finish()
-                    onFailure()
+                    fail("an append was rejected", onFailure)
                     return
                 }
-                appended += 1
+                activity.touch(label)
                 onSample(CMSampleBufferGetPresentationTimeStamp(sample).seconds)
             }
             if writer.value.status != .writing {
-                finish()
-                onFailure()
+                fail("the writer left writing", onFailure)
+            }
+        }
+
+        /// Runs on `queue`.
+        private func fail(_ reason: String, _ onFailure: @Sendable () -> Void) {
+            let writer = writer.value
+            log?(
+                "\(label) pump stopped: \(reason) (writer status \(writer.status.rawValue): "
+                    + "\(VideoEncoding.describe(writer.error)))")
+            finish()
+            onFailure()
+        }
+
+        /// Pulls if the input is ready, in case AVFoundation missed a `requestMediaDataWhenReady` callback.
+        func kick() {
+            queue.async { [self] in
+                guard !finished, let onFailure else { return }
+                pull(onFailure: onFailure)
             }
         }
 
@@ -511,7 +827,7 @@ public enum VideoTranscoder {
             queue.async { [self] in finish() }
         }
 
-        /// Runs on `queue`; marks the input finished once and resumes `run` if it is waiting.
+        /// Runs on `queue`; marks the input finished once and resumes `run` once.
         private func finish() {
             if !finished {
                 finished = true
