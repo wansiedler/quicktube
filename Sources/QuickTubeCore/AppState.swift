@@ -82,6 +82,24 @@ public enum Destination: String, Sendable, CaseIterable, Codable {
     }
 }
 
+/// What the history shows about a recording; each part nil when it cannot be read.
+public struct MediaFacts: Sendable, Equatable {
+    public let duration: TimeInterval?
+    public let fileSize: Int?
+
+    public init(duration: TimeInterval?, fileSize: Int?) {
+        self.duration = duration
+        self.fileSize = fileSize
+    }
+
+    /// The size from the file's attributes, the length from its video track (nil for a non-video).
+    public static func read(_ url: URL) async -> MediaFacts {
+        let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int
+        let duration = try? await VideoInfo.read(url).duration
+        return MediaFacts(duration: duration, fileSize: size)
+    }
+}
+
 /// One successful upload, as listed under "Recent Links".
 public struct HistoryItem: Codable, Sendable, Equatable, Identifiable {
     public let id: UUID
@@ -89,13 +107,68 @@ public struct HistoryItem: Codable, Sendable, Equatable, Identifiable {
     public let destination: Destination
     public let date: Date
     public let title: String
+    /// The recording's length in seconds; nil when unknown (entries saved before it was recorded too).
+    public let duration: TimeInterval?
+    /// The recording's size in bytes; nil when unknown.
+    public let fileSize: Int?
 
-    public init(id: UUID = UUID(), link: URL, destination: Destination, date: Date, title: String) {
+    public init(
+        id: UUID = UUID(), link: URL, destination: Destination, date: Date, title: String,
+        duration: TimeInterval? = nil, fileSize: Int? = nil
+    ) {
         self.id = id
         self.link = link
         self.destination = destination
         self.date = date
         self.title = title
+        self.duration = duration
+        self.fileSize = fileSize
+    }
+
+    /// "1:42 · 26.3 MB"; `compact` rounds megabytes ("26 MB"). Only the known parts; nil when neither is.
+    public func detailText(compact: Bool = false) -> String? {
+        let parts = [
+            duration.map(Self.durationText),
+            fileSize.map { Self.sizeText($0, compact: compact) },
+        ].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// The Recent Links entry: "Talk — Telegram · 1:42 · 26 MB", or "Talk — Telegram".
+    public var menuLabel: String {
+        let base = "\(title) — \(destination.label)"
+        return detailText(compact: true).map { "\(base) · \($0)" } ?? base
+    }
+
+    /// "0:10", "1:42", "1:02:05"; rounded to whole seconds.
+    static func durationText(_ seconds: TimeInterval) -> String {
+        let total = Int(max(0, seconds).rounded())
+        let (hours, minutes, secs) = (total / 3600, total / 60 % 60, total % 60)
+        if hours > 0 { return String(format: "%d:%02d:%02d", hours, minutes, secs) }
+        return String(format: "%d:%02d", minutes, secs)
+    }
+
+    /// Decimal units, independent of the locale: "512 KB", "26.3 MB" ("26 MB" compact), "1.5 GB".
+    static func sizeText(_ bytes: Int, compact: Bool) -> String {
+        let value = Double(bytes)
+        if value >= 1e9 { return String(format: "%.1f GB", value / 1e9) }
+        if value >= 1e6 { return String(format: compact ? "%.0f MB" : "%.1f MB", value / 1e6) }
+        return String(format: "%.0f KB", value / 1e3)
+    }
+
+    /// True when the trimmed query is empty or appears, ignoring case, in the title, the destination
+    /// label or the link.
+    public func matches(_ query: String) -> Bool {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return true }
+        return [title, destination.label, link.absoluteString].contains {
+            $0.localizedCaseInsensitiveContains(needle)
+        }
+    }
+
+    /// The link's host, or the file name for a local file.
+    public var displayHost: String {
+        link.isFileURL ? link.lastPathComponent : (link.host() ?? link.absoluteString)
     }
 }
 
@@ -168,7 +241,11 @@ public final class AppState {
 
     /// The last `Self.historyLimit` successful uploads, newest first.
     public private(set) var history: [HistoryItem]
-    public static let historyLimit = 20
+    public static let historyLimit = 200
+    /// How many of the newest entries the menu's "Recent Links" lists; the History window shows all.
+    public static let menuHistoryLimit = 5
+    /// The newest `Self.menuHistoryLimit` entries, for the menu.
+    public var menuHistory: [HistoryItem] { Array(history.prefix(Self.menuHistoryLimit)) }
 
     private let recorder: ScreenRecorder
     private let uploaders: [Destination: VideoUploader]
@@ -187,6 +264,9 @@ public final class AppState {
     private let historyEnabled: @Sendable () -> Bool
     /// Called with the whole list after every change, so the app can persist it.
     private let onHistoryChange: (@MainActor @Sendable ([HistoryItem]) -> Void)?
+    /// Reads the recording's length and size for its history entry, before the upload (which may move or
+    /// delete it).
+    private let mediaFacts: @Sendable (URL) async -> MediaFacts
     /// Called once per successful upload with the uploaded file; a failure is logged, never surfaced.
     private let afterUpload: (@Sendable (URL) throws -> Void)?
     /// Captured when a recording starts: the app and display it was made of.
@@ -238,9 +318,11 @@ public final class AppState {
         history: [HistoryItem] = [],
         historyEnabled: @escaping @Sendable () -> Bool = { true },
         onHistoryChange: (@MainActor @Sendable ([HistoryItem]) -> Void)? = nil,
+        mediaFacts: @escaping @Sendable (URL) async -> MediaFacts = { await MediaFacts.read($0) },
         afterUpload: (@Sendable (URL) throws -> Void)? = nil
     ) {
         self.afterUpload = afterUpload
+        self.mediaFacts = mediaFacts
         self.history = Array(history.prefix(Self.historyLimit))
         self.historyEnabled = historyEnabled
         self.onHistoryChange = onHistoryChange
@@ -489,6 +571,7 @@ public final class AppState {
                 title: title, display: context.display)
             return
         }
+        let facts = historyEnabled() ? await mediaFacts(file) : MediaFacts(duration: nil, fileSize: nil)
         do {
             context.onStatus = { stage in
                 Task { @MainActor in self.setStage(stage, upload: id) }
@@ -518,7 +601,7 @@ public final class AppState {
                     break
                 }
             }
-            record(link: link, destination: destination, title: title)
+            record(link: link, destination: destination, title: title, facts: facts)
             notifier.linkReady(link, isUnlisted: result.isUnlisted)
             // A GIF is made from the recording and "Save only" keeps it; neither uploaded the recording.
             if destination != .gif, destination != .local { runAfterUpload(file) }
@@ -556,15 +639,24 @@ public final class AppState {
         }
     }
 
-    private func record(link: URL, destination: Destination, title: String) {
+    private func record(link: URL, destination: Destination, title: String, facts: MediaFacts) {
         guard historyEnabled() else { return }
-        let item = HistoryItem(link: link, destination: destination, date: clock(), title: title)
+        let item = HistoryItem(
+            link: link, destination: destination, date: clock(), title: title, duration: facts.duration,
+            fileSize: facts.fileSize)
         history = Array(([item] + history).prefix(Self.historyLimit))
         onHistoryChange?(history)
     }
 
     public func clearHistory() {
         history = []
+        onHistoryChange?(history)
+    }
+
+    /// Drops one entry; an unknown id changes and reports nothing.
+    public func removeHistory(id: HistoryItem.ID) {
+        guard let index = history.firstIndex(where: { $0.id == id }) else { return }
+        history.remove(at: index)
         onHistoryChange?(history)
     }
 

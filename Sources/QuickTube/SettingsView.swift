@@ -113,8 +113,10 @@ struct SettingsView: View {
             Section("History") {
                 Toggle("Keep recent links", isOn: $model.settings.historyEnabled)
                 HStack {
-                    Text("The last 20 uploaded links, under Recent Links in the menu.")
-                        .font(.callout).foregroundStyle(.secondary)
+                    Text(
+                        "The last 200 uploaded links; the menu shows the five newest, Show All opens the list."
+                    )
+                    .font(.callout).foregroundStyle(.secondary)
                     Spacer()
                     Button("Clear") { model.state.clearHistory() }
                         .disabled(model.state.history.isEmpty)

@@ -861,18 +861,144 @@ final class LogLines: @unchecked Sendable {
         #expect(state.history[0].title == "Talk")
     }
 
-    @Test func historyKeepsTheNewestTwentyFirst() async {
-        // The real finisher moves the recording, so a second round would find no file.
+    private func seededItems(_ count: Int) -> [HistoryItem] {
+        (0..<count).map { index in
+            HistoryItem(
+                link: URL(string: "https://example.com/seed/\(index)")!, destination: .drive,
+                date: Date(timeIntervalSince1970: Double(count - index)), title: "Seed \(index)")
+        }
+    }
+
+    @Test func historyKeepsTheNewestTwoHundredFirst() async {
+        let seeded = seededItems(AppState.historyLimit)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, history: seeded)
+        uploader.result = UploadResult(link: URL(string: "https://example.com/new")!)
+        await record(state)
+        #expect(AppState.historyLimit == 200)
+        #expect(state.history.count == 200)
+        #expect(state.history.first?.link.absoluteString == "https://example.com/new")
+        #expect(state.history.last == seeded[198])
+    }
+
+    @Test func seededHistoryIsTrimmedToTheNewestTwoHundred() {
+        let seeded = seededItems(205)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, history: seeded)
+        #expect(state.history == Array(seeded.prefix(200)))
+    }
+
+    @Test func menuHistoryIsTheFiveNewest() {
+        let seeded = seededItems(8)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, history: seeded)
+        #expect(state.menuHistory == Array(seeded.prefix(5)))
+    }
+
+    @Test func historyItemMatchesTitleDestinationAndLinkIgnoringCase() {
+        let item = HistoryItem(
+            link: URL(string: "https://youtu.be/abc123")!, destination: .telegram, date: Date(),
+            title: "Standup Demo")
+        #expect(item.matches(""))
+        #expect(item.matches("  "))
+        #expect(item.matches("standup"))
+        #expect(item.matches("TELEGRAM"))
+        #expect(item.matches("youtu.be/ABC"))
+        #expect(!item.matches("vimeo"))
+    }
+
+    @Test func historyItemDisplayHostIsTheHostOrTheFileName() {
+        let web = HistoryItem(
+            link: URL(string: "https://www.youtube.com/watch?v=1")!, destination: .youtube, date: Date(),
+            title: "A")
+        let file = HistoryItem(
+            link: URL(fileURLWithPath: "/tmp/Clip.gif"), destination: .gif, date: Date(), title: "B")
+        #expect(web.displayHost == "www.youtube.com")
+        #expect(file.displayHost == "Clip.gif")
+    }
+
+    @Test func historyEntryCarriesTheRecordingsDurationAndSize() async {
+        let read = LogLines()
         let state = AppState(
             recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
-            finisher: FakeFinisher())
-        for index in 0..<22 {
-            uploader.result = UploadResult(link: URL(string: "https://example.com/\(index)")!)
-            await record(state)
+            mediaFacts: { url in
+                read.append(url.lastPathComponent)
+                return MediaFacts(duration: 102, fileSize: 26_300_000)
+            })
+        await record(state)
+        #expect(state.history.first?.duration == 102)
+        #expect(state.history.first?.fileSize == 26_300_000)
+        #expect(read.all.count == 1)
+    }
+
+    @Test func historyJSONWithoutDurationOrSizeDecodesWithNil() throws {
+        let json = """
+            [{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","link":"https://t.me/c/1/2",\
+            "destination":"telegram","date":10,"title":"Old"}]
+            """
+        let items = try JSONDecoder().decode([HistoryItem].self, from: Data(json.utf8))
+        #expect(items.count == 1)
+        #expect(items[0].title == "Old")
+        #expect(items[0].duration == nil)
+        #expect(items[0].fileSize == nil)
+    }
+
+    @Test func mediaFactsReadTheFileSizeAndNoDurationForANonVideo() async throws {
+        let file = FileManager.default.temporaryDirectory.appending(path: "qt-facts-\(UUID().uuidString).mp4")
+        try Data(repeating: 1, count: 1234).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let facts = await MediaFacts.read(file)
+        #expect(facts.fileSize == 1234)
+        #expect(facts.duration == nil)
+        let missing = await MediaFacts.read(file.appending(path: "nope"))
+        #expect(missing == MediaFacts(duration: nil, fileSize: nil))
+    }
+
+    @Test func historyDetailTextFormatsDurationAndSize() {
+        func item(_ duration: TimeInterval?, _ size: Int?) -> HistoryItem {
+            HistoryItem(
+                link: URL(string: "https://t.me/c/1/2")!, destination: .telegram, date: Date(), title: "T",
+                duration: duration, fileSize: size)
         }
-        #expect(state.history.count == 20)
-        #expect(state.history.first?.link.absoluteString == "https://example.com/21")
-        #expect(state.history.last?.link.absoluteString == "https://example.com/2")
+        #expect(item(102, 26_300_000).detailText() == "1:42 · 26.3 MB")
+        #expect(item(102, 26_300_000).detailText(compact: true) == "1:42 · 26 MB")
+        #expect(item(3_725, 1_500_000_000).detailText() == "1:02:05 · 1.5 GB")
+        #expect(item(9.6, 512_000).detailText() == "0:10 · 512 KB")
+        #expect(item(nil, 2_000_000).detailText() == "2.0 MB")
+        #expect(item(65, nil).detailText() == "1:05")
+        #expect(item(nil, nil).detailText() == nil)
+    }
+
+    @Test func menuLabelAddsTheDetailsWhenKnown() {
+        let known = HistoryItem(
+            link: URL(string: "https://t.me/c/1/2")!, destination: .telegram, date: Date(), title: "Talk",
+            duration: 102, fileSize: 26_300_000)
+        let unknown = HistoryItem(
+            link: URL(string: "https://t.me/c/1/2")!, destination: .telegram, date: Date(), title: "Talk")
+        #expect(known.menuLabel == "Talk — Telegram · 1:42 · 26 MB")
+        #expect(unknown.menuLabel == "Talk — Telegram")
+    }
+
+    @Test func removeHistoryDropsThatEntryAndReports() {
+        let reported = HistoryLog()
+        let seeded = seededItems(3)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, history: seeded,
+            onHistoryChange: { reported.append($0) })
+        state.removeHistory(id: seeded[1].id)
+        #expect(state.history == [seeded[0], seeded[2]])
+        #expect(reported.all == [[seeded[0], seeded[2]]])
+    }
+
+    @Test func removeHistoryWithAnUnknownIDChangesNothing() {
+        let reported = HistoryLog()
+        let seeded = seededItems(2)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, history: seeded,
+            onHistoryChange: { reported.append($0) })
+        state.removeHistory(id: UUID())
+        #expect(state.history == seeded)
+        #expect(reported.all.isEmpty)
     }
 
     @Test func disabledHistoryRecordsNothing() async {

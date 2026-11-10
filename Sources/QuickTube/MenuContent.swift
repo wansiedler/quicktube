@@ -5,6 +5,7 @@ import SwiftUI
 struct MenuContent: View {
     @Bindable var model: AppModel
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Text(statusText)
@@ -50,12 +51,17 @@ struct MenuContent: View {
         }
         if model.settings.historyEnabled {
             Menu("Recent Links") {
-                ForEach(model.state.history) { item in
-                    Button("\(item.title) — \(item.destination.label)") {
+                ForEach(model.state.menuHistory) { item in
+                    Button(item.menuLabel) {
                         model.copyToPasteboard(item.link)
                     }
                 }
                 if !model.state.history.isEmpty { Divider() }
+                Button("Show All…") {
+                    // A menu bar app is never active, so the window would open behind others.
+                    NSApp.activate(ignoringOtherApps: true)
+                    openWindow(id: HistoryView.windowID)
+                }
                 Button("Clear History") { model.state.clearHistory() }
                     .disabled(model.state.history.isEmpty)
             }

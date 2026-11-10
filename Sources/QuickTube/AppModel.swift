@@ -292,6 +292,15 @@ final class AppModel {
         NSPasteboard.general.setString(link.absoluteString, forType: .string)
     }
 
+    /// A local file shows selected in Finder; any other link opens in the default browser.
+    func openHistoryLink(_ link: URL) {
+        if link.isFileURL {
+            NSWorkspace.shared.activateFileViewerSelecting([link])
+        } else {
+            NSWorkspace.shared.open(link)
+        }
+    }
+
     func refreshPermissions() {
         microphoneStatus = Permissions.microphone
         screenRecordingStatus = Permissions.screenRecording
