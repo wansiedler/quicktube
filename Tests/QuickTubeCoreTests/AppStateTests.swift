@@ -940,16 +940,29 @@ final class LogLines: @unchecked Sendable {
         #expect(read.all.count == 1)
     }
 
+    /// Drive, not YouTube: a YouTube upload always reads the facts for its title.
+    @Test(arguments: [Destination.youtube, .drive])
+    func onlyTheYouTubeTitleCarriesDisplayLengthAndSize(destination: Destination) async {
+        let state = AppState(
+            recorder: recorder, uploaders: [destination: uploader], notifier: notifier,
+            titleProvider: { TitleContext(date: Date(timeIntervalSince1970: 0), display: "Pro Display XDR") },
+            historyEnabled: { false },
+            mediaFacts: { _ in MediaFacts(duration: 102, fileSize: 26_300_000) })
+        await record(state, to: destination)
+        let detailed = uploader.uploads.first?.1.hasSuffix(" · Pro Display XDR · 1:42 · 26 MB")
+        #expect(detailed == (destination == .youtube))
+    }
+
     @Test func disabledHistoryReadsNoMediaFacts() async {
         let read = LogLines()
         let state = AppState(
-            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            recorder: recorder, uploaders: [.drive: uploader], notifier: notifier,
             historyEnabled: { false },
             mediaFacts: { url in
                 read.append(url.lastPathComponent)
                 return MediaFacts(duration: 1, fileSize: 1)
             })
-        await record(state)
+        await record(state, to: .drive)
         #expect(read.all.isEmpty)
         #expect(state.phase == .done(link: uploader.result.link))
     }

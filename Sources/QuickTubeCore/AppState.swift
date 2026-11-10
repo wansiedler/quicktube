@@ -617,16 +617,23 @@ public final class AppState {
             return
         }
         var facts = MediaFacts.unknown
-        if historyEnabled() {
+        // YouTube shows nothing but the title, so that one also carries the display, length and size.
+        let detailedTitle = destination == .youtube
+        if historyEnabled() || detailedTitle {
             let read = mediaFacts
             facts = await MediaFacts.read(timeout: mediaFactsTimeout) { await read(file) }
         }
+        let sentTitle =
+            detailedTitle
+            ? RecordingNaming.uploadTitle(
+                title, display: context.display, duration: facts.duration, fileSize: facts.fileSize)
+            : title
         do {
             context.onStatus = { stage in
                 Task { @MainActor in self.setStage(stage, upload: id) }
             }
             let result = try await uploader.upload(
-                file: file, title: title, context: context
+                file: file, title: sentTitle, context: context
             ) {
                 value in
                 Task { @MainActor in self.setProgress(value, upload: id) }
