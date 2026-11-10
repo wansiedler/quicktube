@@ -10,6 +10,8 @@ struct HistoryView: View {
     @State private var query = ""
     /// The row whose link was just copied; shows "Copied" for a moment.
     @State private var copiedID: HistoryItem.ID?
+    /// Clears `copiedID`; replaced (and the old one cancelled) by every copy.
+    @State private var copiedReset: Task<Void, Never>?
 
     private var items: [HistoryItem] { model.state.history.filter { $0.matches(query) } }
 
@@ -62,9 +64,14 @@ struct HistoryView: View {
     private func copy(_ item: HistoryItem) {
         model.copyToPasteboard(item.link)
         copiedID = item.id
-        Task {
-            try? await Task.sleep(for: .seconds(1.5))
-            if copiedID == item.id { copiedID = nil }
+        copiedReset?.cancel()
+        copiedReset = Task {
+            do {
+                try await Task.sleep(for: .seconds(1.5))
+            } catch {
+                return  // A newer copy took over.
+            }
+            copiedID = nil
         }
     }
 }

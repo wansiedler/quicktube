@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import Synchronization
 
 /// A recording is a list of segments: pausing closes one, resuming opens the next.
 public protocol ScreenRecorder: Sendable {
@@ -92,11 +93,51 @@ public struct MediaFacts: Sendable, Equatable {
         self.fileSize = fileSize
     }
 
+    public static let unknown = MediaFacts(duration: nil, fileSize: nil)
+
     /// The size from the file's attributes, the length from its video track (nil for a non-video).
     public static func read(_ url: URL) async -> MediaFacts {
-        let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int
         let duration = try? await VideoInfo.read(url).duration
-        return MediaFacts(duration: duration, fileSize: size)
+        return MediaFacts(duration: duration, fileSize: fileSize(of: url))
+    }
+
+    /// Nil when the file is missing or unreadable.
+    public static func fileSize(of url: URL) -> Int? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int
+    }
+
+    /// `read`'s result, or `.unknown` once `timeout` passes; a read that ignores cancellation (a stalled
+    /// AVURLAsset load) is left behind rather than awaited.
+    static func read(
+        timeout: Duration, using read: @escaping @Sendable () async -> MediaFacts
+    ) async -> MediaFacts {
+        let once = ResumeOnce()
+        return await withCheckedContinuation { continuation in
+            once.arm(continuation)
+            let work = Task { once.resume(await read()) }
+            Task {
+                try? await Task.sleep(for: timeout)
+                work.cancel()
+                once.resume(.unknown)
+            }
+        }
+    }
+
+    /// Resumes its continuation with the first value only.
+    private final class ResumeOnce: Sendable {
+        private let continuation = Mutex<CheckedContinuation<MediaFacts, Never>?>(nil)
+
+        func arm(_ value: CheckedContinuation<MediaFacts, Never>) {
+            continuation.withLock { $0 = value }
+        }
+
+        func resume(_ facts: MediaFacts) {
+            let pending = continuation.withLock { stored in
+                defer { stored = nil }
+                return stored
+            }
+            pending?.resume(returning: facts)
+        }
     }
 }
 
@@ -267,6 +308,8 @@ public final class AppState {
     /// Reads the recording's length and size for its history entry, before the upload (which may move or
     /// delete it).
     private let mediaFacts: @Sendable (URL) async -> MediaFacts
+    /// After this the upload goes on without the facts.
+    private let mediaFactsTimeout: Duration
     /// Called once per successful upload with the uploaded file; a failure is logged, never surfaced.
     private let afterUpload: (@Sendable (URL) throws -> Void)?
     /// Captured when a recording starts: the app and display it was made of.
@@ -319,10 +362,12 @@ public final class AppState {
         historyEnabled: @escaping @Sendable () -> Bool = { true },
         onHistoryChange: (@MainActor @Sendable ([HistoryItem]) -> Void)? = nil,
         mediaFacts: @escaping @Sendable (URL) async -> MediaFacts = { await MediaFacts.read($0) },
+        mediaFactsTimeout: Duration = .seconds(2),
         afterUpload: (@Sendable (URL) throws -> Void)? = nil
     ) {
         self.afterUpload = afterUpload
         self.mediaFacts = mediaFacts
+        self.mediaFactsTimeout = mediaFactsTimeout
         self.history = Array(history.prefix(Self.historyLimit))
         self.historyEnabled = historyEnabled
         self.onHistoryChange = onHistoryChange
@@ -571,7 +616,11 @@ public final class AppState {
                 title: title, display: context.display)
             return
         }
-        let facts = historyEnabled() ? await mediaFacts(file) : MediaFacts(duration: nil, fileSize: nil)
+        var facts = MediaFacts.unknown
+        if historyEnabled() {
+            let read = mediaFacts
+            facts = await MediaFacts.read(timeout: mediaFactsTimeout) { await read(file) }
+        }
         do {
             context.onStatus = { stage in
                 Task { @MainActor in self.setStage(stage, upload: id) }
@@ -600,6 +649,10 @@ public final class AppState {
                 default:
                     break
                 }
+            }
+            // A GIF or saved file is the link itself: its size, not the recording's (the length is the same).
+            if link.isFileURL {
+                facts = MediaFacts(duration: facts.duration, fileSize: MediaFacts.fileSize(of: link))
             }
             record(link: link, destination: destination, title: title, facts: facts)
             notifier.linkReady(link, isUnlisted: result.isUnlisted)

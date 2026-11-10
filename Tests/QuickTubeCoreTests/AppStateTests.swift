@@ -931,6 +931,50 @@ final class LogLines: @unchecked Sendable {
         #expect(read.all.count == 1)
     }
 
+    @Test func disabledHistoryReadsNoMediaFacts() async {
+        let read = LogLines()
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            historyEnabled: { false },
+            mediaFacts: { url in
+                read.append(url.lastPathComponent)
+                return MediaFacts(duration: 1, fileSize: 1)
+            })
+        await record(state)
+        #expect(read.all.isEmpty)
+        #expect(state.phase == .done(link: uploader.result.link))
+    }
+
+    @Test func slowMediaFactsTimeOutAndTheUploadStillRecords() async {
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier,
+            mediaFacts: { _ in
+                // Ignores cancellation, like a stalled AVURLAsset load.
+                await Task.detached { try? await Task.sleep(for: .seconds(2)) }.value
+                return MediaFacts(duration: 5, fileSize: 5)
+            }, mediaFactsTimeout: .milliseconds(50))
+        let start = ContinuousClock.now
+        await record(state)
+        #expect(ContinuousClock.now - start < .seconds(1.5))
+        #expect(state.history.count == 1)
+        #expect(state.history.first?.duration == nil)
+        #expect(state.history.first?.fileSize == nil)
+    }
+
+    @Test func fileLinkEntryTakesItsSizeFromTheProducedFile() async throws {
+        let gif = FakeUploader()
+        let gifURL = FileManager.default.temporaryDirectory.appending(path: "qt-\(UUID().uuidString).gif")
+        try Data(repeating: 7, count: 777).write(to: gifURL)
+        defer { try? FileManager.default.removeItem(at: gifURL) }
+        gif.result = UploadResult(link: gifURL)
+        let state = AppState(
+            recorder: recorder, uploaders: [.youtube: uploader, .gif: gif], notifier: notifier,
+            mediaFacts: { _ in MediaFacts(duration: 12, fileSize: 26_300_000) })
+        await record(state, to: .gif)
+        #expect(state.history.first?.duration == 12)
+        #expect(state.history.first?.fileSize == 777)
+    }
+
     @Test func historyJSONWithoutDurationOrSizeDecodesWithNil() throws {
         let json = """
             [{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","link":"https://t.me/c/1/2",\
