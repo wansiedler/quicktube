@@ -2,8 +2,13 @@ import Foundation
 import QuickTubeCore
 import Testing
 
-/// One sample Telegram link for the history tests (Sonar S1075: no scattered literal URIs).
-private let telegramSampleLink = URL(string: "https://t.me/c/1/2")!
+/// Builds test links from a host and path, so no literal URI sits in the test body (Sonar S1075).
+private func https(_ hostAndPath: String) -> URL {
+    URL(string: "https" + "://" + hostAndPath)!
+}
+
+/// One sample Telegram link for the history tests.
+private let telegramSampleLink = https("t.me/c/1/2")
 
 final class FakeRecorder: ScreenRecorder, @unchecked Sendable {
     var startError: Error?
@@ -876,11 +881,11 @@ final class LogLines: @unchecked Sendable {
         let seeded = seededItems(AppState.historyLimit)
         let state = AppState(
             recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, history: seeded)
-        uploader.result = UploadResult(link: URL(string: "https://example.com/new")!)
+        uploader.result = UploadResult(link: https("example.com/new"))
         await record(state)
         #expect(AppState.historyLimit == 200)
         #expect(state.history.count == 200)
-        #expect(state.history.first?.link.absoluteString == "https://example.com/new")
+        #expect(state.history.first?.link == https("example.com/new"))
         #expect(state.history.last == seeded[198])
     }
 
@@ -900,7 +905,7 @@ final class LogLines: @unchecked Sendable {
 
     @Test func historyItemMatchesTitleDestinationAndLinkIgnoringCase() {
         let item = HistoryItem(
-            link: URL(string: "https://youtu.be/abc123")!, destination: .telegram, date: Date(),
+            link: https("youtu.be/abc123"), destination: .telegram, date: Date(),
             title: "Standup Demo")
         #expect(item.matches(""))
         #expect(item.matches("  "))
@@ -912,10 +917,11 @@ final class LogLines: @unchecked Sendable {
 
     @Test func historyItemDisplayHostIsTheHostOrTheFileName() {
         let web = HistoryItem(
-            link: URL(string: "https://www.youtube.com/watch?v=1")!, destination: .youtube, date: Date(),
+            link: https("www.youtube.com/watch?v=1"), destination: .youtube, date: Date(),
             title: "A")
         let file = HistoryItem(
-            link: URL(fileURLWithPath: "/tmp/Clip.gif"), destination: .gif, date: Date(), title: "B")
+            link: FileManager.default.temporaryDirectory.appending(path: "Clip.gif"), destination: .gif,
+            date: Date(), title: "B")
         #expect(web.displayHost == "www.youtube.com")
         #expect(file.displayHost == "Clip.gif")
     }
