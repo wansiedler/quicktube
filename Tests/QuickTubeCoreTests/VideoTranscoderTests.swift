@@ -802,9 +802,28 @@ enum ClipMaker {
         return true
     }
 
+    /// Makes the clip, retrying once with a fresh writer: on the CI VMs the software H.264 encoder now and then
+    /// stops taking frames for good under parallel load (the writer stays `.writing`, the input never ready).
     static func make(
         _ url: URL, width: Int, height: Int, fps: Int32, seconds: Int, audio: Bool = false,
         audioTracks: Int = 1
+    ) async throws {
+        do {
+            try await makeOnce(
+                url, width: width, height: height, fps: fps, seconds: seconds, audio: audio,
+                audioTracks: audioTracks)
+        } catch let first as Failure {
+            print("ClipMaker: \(first), retrying once")
+            try? FileManager.default.removeItem(at: url)
+            try await makeOnce(
+                url, width: width, height: height, fps: fps, seconds: seconds, audio: audio,
+                audioTracks: audioTracks)
+        }
+    }
+
+    private static func makeOnce(
+        _ url: URL, width: Int, height: Int, fps: Int32, seconds: Int, audio: Bool,
+        audioTracks: Int
     ) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let input = AVAssetWriterInput(
@@ -836,14 +855,10 @@ enum ClipMaker {
         let activity = FeedActivity()
         var feeders = [
             Feeder(writer: writer, input: input, count: count, label: "video", activity: activity) { frame in
+                // Own buffers, not the adaptor's pool: under parallel load the pool handed out nothing, and once
+                // crashed (SIGSEGV in CVPixelBufferPoolCreatePixelBuffer).
                 var buffer: CVPixelBuffer?
-                if let pool = adaptor.pixelBufferPool {
-                    CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer)
-                }
-                // The pool can be missing or refuse a buffer under load (many clips made in parallel).
-                if buffer == nil {
-                    CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, nil, &buffer)
-                }
+                CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, nil, &buffer)
                 guard let buffer else { return false }
                 CVPixelBufferLockBaseAddress(buffer, [])
                 if let base = CVPixelBufferGetBaseAddress(buffer) {
@@ -870,7 +885,9 @@ enum ClipMaker {
             return await group.reduce(into: [String]()) { if let failure = $1 { $0.append(failure) } }
         }
         guard failures.isEmpty else {
-            writer.cancelWriting()
+            // Not awaited: a wedged writer's `cancelWriting()` may never return.
+            let stuck = WriterBox(writer: writer)
+            DispatchQueue.global().async { stuck.writer.cancelWriting() }
             throw Failure(reason: failures.joined(separator: "; "))
         }
         writer.endSession(atSourceTime: CMTime(value: Int64(fps) * Int64(seconds), timescale: fps))
@@ -986,31 +1003,39 @@ private final class Feeder: @unchecked Sendable {
                     leeway: .milliseconds(100))
                 timer.setEventHandler { [self] in
                     guard !done else { return }
+                    // A missed `requestMediaDataWhenReady` callback must not park a ready input.
+                    feed()
+                    guard !done else { return }
                     if writer.status != .writing {
                         end(
                             "\(label): writer status \(writer.status.rawValue): \(String(describing: writer.error))"
                         )
                     } else if activity.idle > Self.stallLimit {
-                        end("\(label): no feeder appended for \(Self.stallLimit) (at \(index)/\(count))")
+                        end(
+                            "\(label): no feeder appended for \(Self.stallLimit) (at \(index)/\(count), "
+                                + "ready \(input.isReadyForMoreMediaData))")
                     }
                 }
                 watchdog = timer
                 timer.resume()
-                input.requestMediaDataWhenReady(on: queue) { [self] in
-                    while !done && input.isReadyForMoreMediaData {
-                        if index >= count {
-                            end(nil)
-                            return
-                        }
-                        guard append(index) else {
-                            end("\(label): append \(index) failed: \(String(describing: writer.error))")
-                            return
-                        }
-                        index += 1
-                        activity.touch()
-                    }
-                }
+                input.requestMediaDataWhenReady(on: queue) { [self] in feed() }
             }
+        }
+    }
+
+    /// Runs on `queue`; appends while the input is ready.
+    private func feed() {
+        while !done && input.isReadyForMoreMediaData {
+            if index >= count {
+                end(nil)
+                return
+            }
+            guard append(index) else {
+                end("\(label): append \(index) failed: \(String(describing: writer.error))")
+                return
+            }
+            index += 1
+            activity.touch()
         }
     }
 

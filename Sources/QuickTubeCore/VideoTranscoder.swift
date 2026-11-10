@@ -521,7 +521,8 @@ public enum VideoTranscoder {
             for pump in pumpList { pump.abort() }
         }
         let watchdog = Watchdog(
-            writer: writerBox, activity: activity, stallLimit: stallLimit, log: log, onTrip: abortAll)
+            writer: writerBox, activity: activity, stallLimit: stallLimit, log: log,
+            onTick: { for pump in pumpList { pump.kick() } }, onTrip: abortAll)
         watchdog.start()
         await withTaskCancellationHandler {
             await withTaskGroup(of: Void.self) { group in
@@ -639,6 +640,7 @@ public enum VideoTranscoder {
         private let stallLimit: Duration
         private let log: (@Sendable (String) -> Void)?
         private let onTrip: @Sendable () -> Void
+        private let onTick: @Sendable () -> Void
         private let queue = DispatchQueue(label: "QuickTube.transcode.watchdog")
         // Touched only on `queue`.
         private var timer: DispatchSourceTimer?
@@ -646,8 +648,10 @@ public enum VideoTranscoder {
 
         init(
             writer: Unchecked<AVAssetWriter>, activity: Activity, stallLimit: Duration,
-            log: (@Sendable (String) -> Void)?, onTrip: @escaping @Sendable () -> Void
+            log: (@Sendable (String) -> Void)?, onTick: @escaping @Sendable () -> Void,
+            onTrip: @escaping @Sendable () -> Void
         ) {
+            self.onTick = onTick
             self.writer = writer
             self.activity = activity
             self.stallLimit = stallLimit
@@ -676,6 +680,8 @@ public enum VideoTranscoder {
         /// Runs on `queue`.
         private func check() {
             guard !tripped else { return }
+            // A missed `requestMediaDataWhenReady` callback must not leave a ready input parked.
+            onTick()
             let writer = writer.value
             if writer.status != .writing {
                 trip(
@@ -713,6 +719,7 @@ public enum VideoTranscoder {
         // Touched only on `queue`.
         private var finished = false
         private var continuation: CheckedContinuation<Void, Never>?
+        private var onFailure: (@Sendable () -> Void)?
 
         init(
             output: AVAssetReaderOutput, input: AVAssetWriterInput, writer: Unchecked<AVAssetWriter>,
@@ -741,6 +748,7 @@ public enum VideoTranscoder {
                         finish()
                         return
                     }
+                    self.onFailure = onFailure
                     input.requestMediaDataWhenReady(on: queue) { [self] in pull(onFailure: onFailure) }
                 }
             }
@@ -778,6 +786,14 @@ public enum VideoTranscoder {
                     + "\(VideoEncoding.describe(writer.error)))")
             finish()
             onFailure()
+        }
+
+        /// Pulls if the input is ready, in case AVFoundation missed a `requestMediaDataWhenReady` callback.
+        func kick() {
+            queue.async { [self] in
+                guard !finished, let onFailure else { return }
+                pull(onFailure: onFailure)
+            }
         }
 
         /// Ends `run` even if the writer never asks for more data again.
