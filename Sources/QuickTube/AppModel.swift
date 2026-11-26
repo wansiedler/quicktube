@@ -208,9 +208,11 @@ final class AppModel {
             guard let self, self.state.failureKind == .auth else { return }
             self.refreshAuth()
         }
-        // A microphone switch that could not reopen the capture pauses the recording in the UI too.
-        let onInterruption: @Sendable (String) -> Void = { [weak state] reason in
-            Task { @MainActor in await state?.recordingInterrupted(reason) }
+        // A capture that stopped on its own (the display went away, a microphone switch could not reopen
+        // it) pauses the recording in the UI too; the clock stops at the moment the capture did.
+        let onInterruption: @Sendable (RecordingInterruption, Date) -> Void = {
+            [weak state] interruption, time in
+            Task { @MainActor in await state?.recordingInterrupted(interruption, at: time) }
         }
         Task { await recorder.setInterruptionHandler(onInterruption) }
         let hud = HUDController(state: state)

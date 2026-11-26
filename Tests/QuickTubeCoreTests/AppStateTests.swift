@@ -652,7 +652,7 @@ final class LogLines: @unchecked Sendable {
     @Test func interruptedRecordingPausesAndNotifies() async {
         let state = makePausableState(finisher: FakeFinisher())
         await state.toggle()
-        await state.recordingInterrupted("Microphone switch failed")
+        await state.recordingInterrupted(.microphoneSwitchFailed)
         #expect(state.phase == .paused)
         #expect(recorder.pauses == 1)
         #expect(notifier.failures == ["Microphone switch failed — recording paused; press pause to resume"])
@@ -666,14 +666,79 @@ final class LogLines: @unchecked Sendable {
 
     @Test func interruptionOutsideRecordingIsIgnored() async {
         let state = makePausableState(finisher: FakeFinisher())
-        await state.recordingInterrupted("Microphone switch failed")
+        await state.recordingInterrupted(.microphoneSwitchFailed)
         #expect(state.phase == .idle)
         await state.toggle()
         await state.pause()
-        await state.recordingInterrupted("Microphone switch failed")
+        await state.recordingInterrupted(.microphoneSwitchFailed)
         #expect(state.phase == .paused)
         #expect(recorder.pauses == 1)
         #expect(notifier.failures.isEmpty)
+    }
+
+    @Test func displayLossPausesWithItsOwnNotification() async {
+        let state = makePausableState(finisher: FakeFinisher())
+        await state.toggle()
+        await state.recordingInterrupted(.displayLost)
+        #expect(state.phase == .paused)
+        #expect(state.interruption == .displayLost)
+        #expect(notifier.failures == ["The display went away — recording paused; resume when it is back"])
+    }
+
+    @Test func interruptionStopsTheClockWhenTheCaptureStopped() async {
+        let clock = ManualClock()
+        let state = makePausableState(finisher: FakeFinisher(), clock: clock)
+        await state.toggle()
+        clock.advance(10)
+        let stopped = clock.now
+        // Closing the segment took a while before the recorder reported it.
+        clock.advance(8)
+        await state.recordingInterrupted(.displayLost, at: stopped)
+        #expect(state.recordedDuration(at: clock.now) == 10)
+        clock.advance(100)
+        #expect(state.recordedDuration(at: clock.now) == 10)
+        await state.resume()
+        clock.advance(5)
+        #expect(state.recordedDuration(at: clock.now) == 15)
+    }
+
+    @Test func canResumeOnlyWhilePaused() async {
+        let state = makePausableState(finisher: FakeFinisher())
+        #expect(!state.canResume)
+        await state.toggle()
+        #expect(!state.canResume)
+        await state.recordingInterrupted(.displayLost)
+        #expect(state.canResume)
+        await state.resume()
+        #expect(!state.canResume)
+        #expect(state.interruption == nil)
+    }
+
+    @Test func resumeWithoutADisplayStaysPausedAndNotifiesAgain() async {
+        let state = makePausableState(finisher: FakeFinisher())
+        await state.toggle()
+        await state.recordingInterrupted(.displayLost)
+        recorder.resumeError = RecorderError.noDisplay
+        await state.resume()
+        #expect(state.phase == .paused)
+        #expect(state.canResume)
+        #expect(notifier.failures.count == 2)
+        #expect(
+            notifier.failures.last == "No display to record — still paused; resume when a display is back")
+        recorder.resumeError = nil
+        await state.resume()
+        #expect(state.phase == .recording)
+    }
+
+    @Test func interruptedRecordingCanStillBeStoppedAndSaved() async {
+        let finisher = FakeFinisher()
+        let state = makePausableState(finisher: finisher)
+        await state.toggle()
+        await state.recordingInterrupted(.displayLost)
+        await state.toggle(destination: .youtube)
+        #expect(finisher.calls.count == 1)
+        #expect(uploader.uploads.count == 1)
+        #expect(state.interruption == nil)
     }
 
     @Test func pauseAndResumeAreIgnoredInOtherPhases() async {
@@ -1695,5 +1760,123 @@ extension AppStateTests {
         #expect(
             AppState.backgroundStatus([telegram, youtube])
                 == "Uploading to Telegram 43%, YouTube 10% in background")
+    }
+}
+
+// MARK: - Cancelling a recording
+
+extension AppStateTests {
+    func makeCancellableState(trashed: LogLines, failTrash: Bool = false, log: LogLines? = nil) -> AppState {
+        AppState(
+            recorder: recorder, uploaders: [.youtube: uploader], notifier: notifier, finisher: FakeFinisher(),
+            captureTarget: { .display(7) }, titleProvider: { [now] in TitleContext(date: now) },
+            log: { log?.append($0) },
+            afterUpload: { file in trashed.append("after-upload \(file.lastPathComponent)") },
+            trash: { file in
+                if failTrash { throw CocoaError(.fileWriteNoPermission) }
+                trashed.append(file.lastPathComponent)
+            })
+    }
+
+    @Test func cancelTrashesTheSegmentsAndReturnsToIdle() async {
+        recorder.segments = [
+            recorder.directory.appending(path: "x.seg1.mp4"),
+            recorder.directory.appending(path: "x.seg2.mp4"),
+        ]
+        let trashed = LogLines()
+        let state = makeCancellableState(trashed: trashed)
+        await state.toggle()
+        await state.cancelRecording()
+        #expect(state.phase == .idle)
+        #expect(recorder.stops == 1)
+        #expect(trashed.all == ["x.seg1.mp4", "x.seg2.mp4"])
+        #expect(uploader.uploads.isEmpty)
+        #expect(state.history.isEmpty)
+        #expect(notifier.links.isEmpty && notifier.failures.isEmpty)
+        #expect(state.notice == "Recording cancelled")
+        #expect(state.recordedDuration(at: Date()) == 0)
+    }
+
+    @Test func cancelWorksWhilePaused() async {
+        let trashed = LogLines()
+        let state = makeCancellableState(trashed: trashed)
+        await state.toggle()
+        await state.pause()
+        await state.cancelRecording()
+        #expect(state.phase == .idle)
+        #expect(trashed.all == ["rec.mp4"])
+    }
+
+    @Test func cancelWorksAfterAnInterruption() async {
+        let trashed = LogLines()
+        let state = makeCancellableState(trashed: trashed)
+        await state.toggle()
+        await state.recordingInterrupted(.displayLost)
+        await state.cancelRecording()
+        #expect(state.phase == .idle)
+        #expect(state.interruption == nil)
+        #expect(trashed.all == ["rec.mp4"])
+        #expect(uploader.uploads.isEmpty)
+    }
+
+    @Test func cancelIsIgnoredWhenIdle() async {
+        let trashed = LogLines()
+        let state = makeCancellableState(trashed: trashed)
+        await state.cancelRecording()
+        #expect(state.phase == .idle)
+        #expect(recorder.stops == 0)
+        #expect(trashed.all.isEmpty)
+        #expect(state.notice == nil)
+    }
+
+    @Test func cancelIsIgnoredWhileUploading() async {
+        let gate = GateUploader()
+        let state = makeGatedState(gate)
+        await state.toggle()
+        async let upload: Void = state.toggle()
+        await waitUntil { gate.calls == 1 }
+        await state.cancelRecording()
+        #expect(state.phase == .uploading(progress: 0))
+        #expect(recorder.stops == 1)
+        gate.openAll()
+        await upload
+        #expect(state.phase == .done(link: gate.link(0)))
+    }
+
+    @Test func cancelAfterAStopTimeoutTrashesTheKeptSegments() async {
+        let kept = [recorder.directory.appending(path: "x.seg1.mp4")]
+        recorder.stopError = RecorderError.stopTimedOut(segments: kept)
+        let trashed = LogLines()
+        let state = makeCancellableState(trashed: trashed)
+        await state.toggle()
+        await state.cancelRecording()
+        #expect(state.phase == .idle)
+        #expect(trashed.all == ["x.seg1.mp4"])
+        #expect(notifier.failures.isEmpty)
+    }
+
+    @Test func aFailedTrashIsLoggedAndStillEndsIdle() async {
+        let trashed = LogLines()
+        let logs = LogLines()
+        let state = makeCancellableState(trashed: trashed, failTrash: true, log: logs)
+        await state.toggle()
+        await state.cancelRecording()
+        #expect(state.phase == .idle)
+        #expect(logs.all.contains { $0.contains("rec.mp4") && $0.contains("Trash") })
+    }
+
+    @Test func theCancelledNoticeGoesOnDismissAndWithTheNextRecording() async {
+        let trashed = LogLines()
+        let state = makeCancellableState(trashed: trashed)
+        await state.toggle()
+        await state.cancelRecording()
+        state.dismissNotice()
+        #expect(state.notice == nil)
+        await state.toggle()
+        await state.cancelRecording()
+        #expect(state.notice == "Recording cancelled")
+        await state.toggle()
+        #expect(state.notice == nil)
+        #expect(state.phase == .recording)
     }
 }

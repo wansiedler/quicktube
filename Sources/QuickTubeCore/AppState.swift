@@ -271,6 +271,11 @@ public final class AppState {
     public private(set) var recordingTarget: CaptureTarget?
     /// True while the recorder is starting, after `onRecordingWillStart` ran and before `phase` settles.
     public private(set) var isStarting = false
+    /// Why the recorder stopped capturing on its own; set while the recording is paused for it.
+    public private(set) var interruption: RecordingInterruption?
+    /// A short transient line for the status pill ("Recording cancelled"); gone with `dismissNotice()`
+    /// or the next recording.
+    public private(set) var notice: String?
     /// Called right before the recorder starts, once the target is known, so windows that belong in the
     /// recording (the camera bubble) can already be on screen for its first frame.
     @ObservationIgnored public var onRecordingWillStart: (@MainActor (CaptureTarget) -> Void)?
@@ -312,6 +317,8 @@ public final class AppState {
     private let mediaFactsTimeout: Duration
     /// Called once per successful upload with the uploaded file; a failure is logged, never surfaced.
     private let afterUpload: (@Sendable (URL) throws -> Void)?
+    /// Moves a cancelled recording's segment to the Trash; never deletes for good.
+    private let trash: @Sendable (URL) throws -> Void
     /// Captured when a recording starts: the app and display it was made of.
     private var titleContext = TitleContext()
     /// Title and context of the file being uploaded; `retry()` reuses them.
@@ -363,9 +370,13 @@ public final class AppState {
         onHistoryChange: (@MainActor @Sendable ([HistoryItem]) -> Void)? = nil,
         mediaFacts: @escaping @Sendable (URL) async -> MediaFacts = { await MediaFacts.read($0) },
         mediaFactsTimeout: Duration = .seconds(2),
-        afterUpload: (@Sendable (URL) throws -> Void)? = nil
+        afterUpload: (@Sendable (URL) throws -> Void)? = nil,
+        trash: @escaping @Sendable (URL) throws -> Void = {
+            try FileManager.default.trashItem(at: $0, resultingItemURL: nil)
+        }
     ) {
         self.afterUpload = afterUpload
+        self.trash = trash
         self.mediaFacts = mediaFacts
         self.mediaFactsTimeout = mediaFactsTimeout
         self.history = Array(history.prefix(Self.historyLimit))
@@ -390,6 +401,10 @@ public final class AppState {
         guard case .failed(_, let file) = phase else { return false }
         return file != nil || pendingSegments != nil
     }
+
+    /// True while paused, also when the recorder paused on its own and pause is off in Settings: the menu
+    /// then still offers "Resume Recording".
+    public var canResume: Bool { phase == .paused }
 
     /// Recorded time of the current recording at `now`, excluding pauses.
     public func recordedDuration(at now: Date) -> TimeInterval {
@@ -446,6 +461,11 @@ public final class AppState {
     /// Closes the current segment. A failure is logged and still ends in `.paused`: the stream is gone
     /// either way, and stopping from `.paused` hands whatever was recorded to the finisher.
     public func pause() async {
+        await pause(at: nil)
+    }
+
+    /// `time` is when the capture actually stopped (nil: now); the clock counts nothing after it.
+    private func pause(at time: Date?) async {
         guard !busy, phase == .recording else { return }
         busy = true
         defer { busy = false }
@@ -454,19 +474,60 @@ public final class AppState {
         } catch {
             log("Pause failed: \(error)")
         }
-        recordedBefore = recordedDuration(at: clock())
+        recordedBefore = recordedDuration(at: min(time ?? clock(), clock()))
         stretchStart = nil
         phase = .paused
     }
 
-    /// The recorder stopped capturing on its own (`reason`, e.g. a microphone switch could not reopen the
-    /// capture). The recording is paused, so the HUD and the clock match what is recorded, and the user is
-    /// told; resuming opens a new segment. Ignored unless recording and idle otherwise.
-    public func recordingInterrupted(_ reason: String) async {
+    /// The recorder stopped capturing on its own at `time` (nil: now), e.g. the display went away or a
+    /// microphone switch could not reopen the capture. The recording is paused, so the HUD and the clock
+    /// match what is recorded (the time since the capture stopped is not counted), and the user is told;
+    /// resuming opens a new segment. Ignored unless recording and idle otherwise.
+    public func recordingInterrupted(_ interruption: RecordingInterruption, at time: Date? = nil) async {
         guard !busy, phase == .recording else { return }
-        log("Recording interrupted: \(reason)")
-        await pause()
-        notifier.failed("\(reason) — recording paused; press pause to resume")
+        log("Recording interrupted: \(interruption.reason)")
+        await pause(at: time)
+        self.interruption = interruption
+        notifier.failed(interruption.notification)
+    }
+
+    /// The cancel hotkey: stops the capture, moves the segments to the Trash and returns to `.idle`
+    /// without finishing, uploading or a history entry. Works while recording or paused (also after an
+    /// interruption); ignored otherwise.
+    public func cancelRecording() async {
+        guard !busy, phase == .recording || phase == .paused else { return }
+        busy = true
+        defer { busy = false }
+        let segments: [URL]
+        do {
+            segments = try await recorder.stop()
+        } catch RecorderError.stopTimedOut(let kept) {
+            segments = kept
+        } catch {
+            log("Stopping the cancelled recording failed: \(error)")
+            segments = []
+        }
+        for segment in segments {
+            do {
+                try trash(segment)
+            } catch {
+                log(
+                    "Moving \(segment.lastPathComponent) of the cancelled recording to the Trash failed: \(error)"
+                )
+            }
+        }
+        log("Recording cancelled; \(segments.count) segment(s) moved to the Trash")
+        recordedBefore = 0
+        stretchStart = nil
+        pendingSegments = nil
+        interruption = nil
+        phase = .idle
+        notice = "Recording cancelled"
+    }
+
+    /// Clears `notice` once it has been shown.
+    public func dismissNotice() {
+        notice = nil
     }
 
     /// Opens a new segment. On failure the recording stays paused (it can still be stopped) and the
@@ -478,7 +539,11 @@ public final class AppState {
         do {
             try await recorder.resume()
             stretchStart = clock()
+            interruption = nil
             phase = .recording
+        } catch RecorderError.noDisplay {
+            log("Resume failed: no display to record")
+            notifier.failed("No display to record — still paused; resume when a display is back")
         } catch {
             log("Resume failed: \(error)")
             notifier.failed(Self.message(for: error, stage: .recording))
@@ -526,6 +591,7 @@ public final class AppState {
             target = captureTarget()
         }
         recordingTarget = target
+        notice = nil
         isStarting = true
         onRecordingWillStart?(target)
         defer { isStarting = false }
@@ -547,6 +613,7 @@ public final class AppState {
         pendingUploadContext = UploadContext(display: titleContext.display)
         recordedBefore = recordedDuration(at: clock())
         stretchStart = nil
+        interruption = nil
         let segments: [URL]
         do {
             segments = try await recorder.stop()
