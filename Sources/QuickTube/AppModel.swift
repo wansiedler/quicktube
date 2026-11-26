@@ -243,6 +243,7 @@ final class AppModel {
             self?.updateCamera()
             self?.updateOverlays()
         }
+        hud.model = self
         observeCamera()
         observeOverlays()
         // Grants changed in System Settings take effect when QuickTube is next activated.
@@ -318,7 +319,20 @@ final class AppModel {
         inputMonitoringStatus = Permissions.inputMonitoring
     }
 
-    /// Only from the Settings button; never at launch.
+    /// Menu and status-pill toggle; takes effect at once, also in the middle of a recording.
+    func setClickHighlightEnabled(_ enabled: Bool) {
+        settings.clickHighlightEnabled = enabled
+    }
+
+    /// Menu and status-pill toggle; asks for Input Monitoring the first time it is switched on.
+    func setKeystrokeOverlayEnabled(_ enabled: Bool) {
+        settings.keystrokeOverlayEnabled = enabled
+        if enabled, inputMonitoringStatus == .notDetermined {
+            requestInputMonitoring()
+        }
+    }
+
+    /// From Settings and from the keystroke toggles; never at launch.
     func requestInputMonitoring() {
         inputMonitoringStatus = Permissions.requestInputMonitoring()
     }

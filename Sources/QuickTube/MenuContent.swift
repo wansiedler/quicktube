@@ -96,6 +96,16 @@ struct MenuContent: View {
             isOn: Binding(
                 get: { model.settings.cameraEnabled },
                 set: { model.setCameraEnabled($0) }))
+        Toggle(
+            "Highlight Clicks",
+            isOn: Binding(
+                get: { model.settings.clickHighlightEnabled },
+                set: { model.setClickHighlightEnabled($0) }))
+        Toggle(
+            "Show Keystrokes",
+            isOn: Binding(
+                get: { model.settings.keystrokeOverlayEnabled },
+                set: { model.setKeystrokeOverlayEnabled($0) }))
         Divider()
         Button("Open Recordings Folder") { model.openRecordingsFolder() }
         Button("Open Log File") { NSWorkspace.shared.open(DiagnosticsLog.url) }

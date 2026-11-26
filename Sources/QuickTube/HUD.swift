@@ -15,9 +15,13 @@ final class HUDController {
     /// The done/failed pill timed out while background uploads still run; the pill shows those instead.
     private var expired = false
 
+    /// Set once by `AppModel` after its own init; gives the pill its camera/click/keystroke toggles.
+    weak var model: AppModel?
+
     init(state: AppState) {
         self.state = state
-        hosting = NSHostingView(rootView: HUDView(state: state, maxWidth: 480, backgroundOnly: false))
+        hosting = NSHostingView(
+            rootView: HUDView(state: state, model: nil, maxWidth: 480, backgroundOnly: false))
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 320, height: 44),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -146,7 +150,7 @@ final class HUDController {
         } else {
             maxWidth = 480
         }
-        hosting.rootView = HUDView(state: state, maxWidth: maxWidth, backgroundOnly: expired)
+        hosting.rootView = HUDView(state: state, model: model, maxWidth: maxWidth, backgroundOnly: expired)
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
         let y = position == .top ? visible.maxY - 24 - size.height : visible.minY + 24
@@ -181,6 +185,8 @@ final class HUDController {
 
 struct HUDView: View {
     let state: AppState
+    /// Nil until `AppModel` hands itself over; the toggles are left out then.
+    let model: AppModel?
     let maxWidth: CGFloat
     /// Shows only the background uploads, whatever the phase: the done/failed pill timed out.
     let backgroundOnly: Bool
@@ -191,6 +197,7 @@ struct HUDView: View {
                 backgroundPill
             } else {
                 phaseContent
+                if let model, showsToggles { toggles(model) }
             }
         }
         .font(.system(size: 13, weight: .medium))
@@ -200,6 +207,45 @@ struct HUDView: View {
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(.white.opacity(0.12)))
         .padding(6)
+    }
+
+    /// Only while a recording runs or is paused.
+    private var showsToggles: Bool {
+        switch state.phase {
+        case .recording, .paused: true
+        default: false
+        }
+    }
+
+    /// Camera bubble, click rings and keystroke pill, switchable in the middle of a recording.
+    private func toggles(_ model: AppModel) -> some View {
+        HStack(spacing: 6) {
+            Divider().frame(height: 14)
+            toggle("video", on: model.settings.cameraEnabled, help: "Camera bubble") {
+                model.setCameraEnabled(!model.settings.cameraEnabled)
+            }
+            toggle(
+                "cursorarrow.click.2", on: model.settings.clickHighlightEnabled, help: "Highlight clicks"
+            ) {
+                model.setClickHighlightEnabled(!model.settings.clickHighlightEnabled)
+            }
+            toggle("keyboard", on: model.settings.keystrokeOverlayEnabled, help: "Show keystrokes") {
+                model.setKeystrokeOverlayEnabled(!model.settings.keystrokeOverlayEnabled)
+            }
+        }
+    }
+
+    private func toggle(
+        _ symbol: String, on: Bool, help: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(help, systemImage: symbol)
+                .labelStyle(.iconOnly)
+                .frame(width: 22, height: 18)
+                .foregroundStyle(on ? Color.accentColor : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .help(help + (on ? ": on" : ": off"))
     }
 
     @ViewBuilder private var phaseContent: some View {
