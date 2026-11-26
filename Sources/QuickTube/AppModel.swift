@@ -34,6 +34,9 @@ final class AppModel {
     /// Pause/resume; registered only while `pauseEnabled` is on.
     private static let pauseSlot: UInt32 = 5
     static let pauseCombo = HotkeyManager.Combo.pauseDefault
+    /// Cancel recording (trash it, no upload); always registered.
+    private static let cancelSlot: UInt32 = 9
+    static let cancelCombo = HotkeyManager.Combo.cancelDefault
 
     private(set) var combos: [Destination: HotkeyManager.Combo] = [:]
     var hotkeyMessage: String?
@@ -176,6 +179,10 @@ final class AppModel {
                 Task { await self.state.togglePause() }
                 return
             }
+            if slot == Self.cancelSlot {
+                Task { await self.state.cancelRecording() }
+                return
+            }
             guard let destination = Self.slots.first(where: { $0.value == slot })?.key else { return }
             // A recording hotkey while the selection overlay is up cancels it, rather than being ignored.
             if self.selectionOverlay.isPicking {
@@ -202,6 +209,7 @@ final class AppModel {
         }
         updatePauseHotkey()
         updateGIFHotkey()
+        registerCancelHotkey()
         // A revoked or missing token surfaces during upload; re-read the Keychain so
         // Settings stops showing "Signed in".
         notifier.onFailure = { [weak self] in
@@ -458,6 +466,17 @@ final class AppModel {
         }
     }
 
+    /// Fixed and always on; a destination shortcut equal to it keeps it off (the destination came first).
+    private func registerCancelHotkey() {
+        if let taken = combos.first(where: { $0.value == Self.cancelCombo })?.key {
+            hotkeyMessage =
+                "\(Self.cancelCombo.label) is taken by the \(taken.label) shortcut; cancel has no hotkey."
+        } else if !hotkey.register(Self.cancelCombo, slot: Self.cancelSlot) {
+            hotkeyMessage =
+                "\(Self.cancelCombo.label) is already in use by another app; cancel has no hotkey."
+        }
+    }
+
     /// Turns the GIF destination (menu item and hotkey) on or off.
     func setGIFEnabled(_ enabled: Bool) {
         settings.gifEnabled = enabled
@@ -510,6 +529,10 @@ final class AppModel {
         }
         if settings.pauseEnabled, newCombo == Self.pauseCombo {
             hotkeyMessage = "\(newCombo.label) is the pause shortcut."
+            return
+        }
+        if newCombo == Self.cancelCombo {
+            hotkeyMessage = "\(newCombo.label) is the cancel shortcut."
             return
         }
         // A disabled GIF shortcut is only stored; it is registered when GIF is turned on.

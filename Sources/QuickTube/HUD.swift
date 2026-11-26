@@ -57,6 +57,7 @@ final class HUDController {
             _ = state.phase
             _ = state.uploadStage
             _ = state.backgroundUploads
+            _ = state.notice
         } onChange: { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
@@ -73,6 +74,8 @@ final class HUDController {
         let repick = shownPhase.map { !Self.sameKind($0, state.phase) } ?? true
         shownPhase = state.phase
         switch state.phase {
+        case .idle where state.notice != nil:
+            showNotice(repick: repick)
         case .idle:
             cancelHide()
             showOrHideBackground(repick: repick)
@@ -152,6 +155,19 @@ final class HUDController {
         panel.orderFrontRegardless()
     }
 
+    /// A transient line ("Recording cancelled") for a few seconds; then the notice is dismissed and the
+    /// pill shows the background uploads or goes. A background change meanwhile keeps the timer.
+    private func showNotice(repick: Bool) {
+        show(repick: repick && hideTask == nil)
+        guard hideTask == nil else { return }
+        hideTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, let self else { return }
+            self.hideTask = nil
+            self.state.dismissNotice()
+        }
+    }
+
     /// After `delay` the done/failed pill goes, or makes way for the background uploads still running.
     private func hide(after delay: Duration) {
         hideTask = Task { [weak self] in
@@ -189,7 +205,12 @@ struct HUDView: View {
     @ViewBuilder private var phaseContent: some View {
         switch state.phase {
         case .idle:
-            backgroundPill
+            if let notice = state.notice {
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                Text(notice)
+            } else {
+                backgroundPill
+            }
         case .recording:
             Circle().fill(Color.red).frame(width: 10, height: 10)
             TimelineView(.periodic(from: Date(), by: 1)) { context in

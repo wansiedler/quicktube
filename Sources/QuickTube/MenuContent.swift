@@ -15,8 +15,10 @@ struct MenuContent: View {
         Divider()
         switch model.state.phase {
         case .recording, .paused:
-            if model.state.phase == .paused {
-                Button("Resume") { Task { await model.state.resume() } }
+            // Offered whenever paused: the recorder may have paused on its own (the display went away)
+            // with pause and its hotkey off in Settings.
+            if model.state.canResume {
+                Button("Resume Recording") { Task { await model.state.resume() } }
             } else if model.settings.pauseEnabled {
                 Button("Pause") { Task { await model.state.pause() } }
             }
@@ -31,6 +33,10 @@ struct MenuContent: View {
             if model.settings.gifEnabled {
                 Button("Stop and Make GIF") { Task { await model.state.toggle(destination: .gif) } }
             }
+            Divider()
+            // Shows ⌃⌥⌘⎋, the global cancel hotkey.
+            Button("Cancel Recording") { Task { await model.state.cancelRecording() } }
+                .keyboardShortcut(.escape, modifiers: [.control, .option, .command])
         default:
             // During an upload too: it carries on in the background.
             Button("Start Recording") { Task { await model.state.toggle() } }
@@ -120,11 +126,18 @@ struct MenuContent: View {
         model.visibleDestinations.map { "\(model.combo(for: $0).label) \($0.label)" }.joined(separator: " · ")
     }
 
+    /// "Paused (the display went away) — resume with ⌃⌥⌘P"; without the pause hotkey, from this menu.
+    private var pausedText: String {
+        let why = model.state.interruption.map { " (\($0.reason.lowercased()))" } ?? ""
+        let how = model.settings.pauseEnabled ? "with \(AppModel.pauseCombo.label)" : "from this menu"
+        return "Paused\(why) — resume \(how)"
+    }
+
     private var statusText: String {
         switch model.state.phase {
-        case .idle: "Ready — " + shortcutSummary
+        case .idle: (model.state.notice.map { "\($0) — " } ?? "Ready — ") + shortcutSummary
         case .recording: "Recording… stop with " + shortcutSummary
-        case .paused: "Paused — resume with \(AppModel.pauseCombo.label), stop with " + shortcutSummary
+        case .paused: pausedText + ", stop with " + shortcutSummary
         case .uploading(let progress): AppState.uploadText(stage: model.state.uploadStage, progress: progress)
         case .done(let link) where link.isFileURL:
             "\(model.state.destination == .local ? "Saved" : "GIF saved"): \(link.lastPathComponent)"

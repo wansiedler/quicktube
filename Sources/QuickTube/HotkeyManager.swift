@@ -42,6 +42,11 @@ final class HotkeyManager {
             keyCode: UInt32(kVK_ANSI_P),
             modifiers: UInt32(controlKey | optionKey | cmdKey),
             label: "⌃⌥⌘P")
+        /// Cancels the recording; fixed and always registered.
+        static let cancelDefault = Combo(
+            keyCode: UInt32(kVK_Escape),
+            modifiers: UInt32(controlKey | optionKey | cmdKey),
+            label: "⌃⌥⌘⎋")
 
         static func fallback(for destination: Destination) -> Combo {
             switch destination {
