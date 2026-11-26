@@ -322,15 +322,14 @@ struct SettingsView: View {
                     shortcutRow("Record → GIF", destination: .gif)
                 }
                 if model.settings.pauseEnabled {
-                    HStack {
-                        Text("Pause / Resume")
-                        Spacer()
-                        Text(AppModel.pauseCombo.label).font(.title3.monospaced())
-                        Text("fixed").foregroundStyle(.secondary)
-                    }
+                    fixedShortcutRow("Pause / Resume", combo: AppModel.pauseCombo)
                 }
+                fixedShortcutRow("Cancel recording", combo: AppModel.cancelCombo)
                 Text(
-                    "Hold ⌘ or ⌃ (plus any other modifiers). ⌃⌥⌘R starts a recording; press it again to just save the file, or press a destination shortcut to stop and upload there. The GIF and Pause rows appear when those features are on."
+                    "Hold ⌘ or ⌃ (plus any other modifiers). ⌃⌥⌘R starts a recording; press it again to just "
+                        + "save the file, or press a destination shortcut to stop and upload there. "
+                        + "\(AppModel.cancelCombo.label) cancels a recording and moves it to the Trash. The GIF "
+                        + "and Pause rows appear when those features are on."
                 )
                 .font(.callout).foregroundStyle(.secondary)
                 if let message = model.hotkeyMessage {
@@ -404,6 +403,16 @@ struct SettingsView: View {
             Text(model.combo(for: destination).label).font(.title3.monospaced())
             Button(listening == destination ? "Press keys…" : "Change") { startListening(destination) }
                 .disabled(listening != nil)
+        }
+    }
+
+    /// A shortcut that cannot be changed, like pause and cancel.
+    private func fixedShortcutRow(_ name: String, combo: HotkeyManager.Combo) -> some View {
+        HStack {
+            Text(name)
+            Spacer()
+            Text(combo.label).font(.title3.monospaced())
+            Text("fixed").foregroundStyle(.secondary)
         }
     }
 

@@ -22,6 +22,8 @@ public struct RecorderOptions: Sendable, Equatable {
 /// `RecordingWriter` encodes them at the bitrate of the recording's `RecordingQuality.Bitrate` preset.
 /// Pausing closes the current segment, resuming opens the next one with the same target and options.
 /// The microphone follows the system default input: see `microphoneChanged(uid:name:)`.
+/// When the stream stops by itself (the display went away) the segment is closed and the recording waits,
+/// interrupted, for `pause()` or `stop()`; see `setInterruptionHandler(_:)`.
 public actor Recorder: ScreenRecorder {
     public static let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appending(path: "Movies/QuickTube")
@@ -33,6 +35,8 @@ public actor Recorder: ScreenRecorder {
         let output: StreamOutput
         let index: Int
         let bitrate: Int
+        /// What this segment captures: the take's target, or a fallback display when that one is gone.
+        let target: CaptureTarget
         /// The input device the microphone was opened on; nil when unknown or not recorded.
         let microphoneUID: String?
         let microphoneName: String?
@@ -48,15 +52,17 @@ public actor Recorder: ScreenRecorder {
         /// Closing a segment and opening the next one for a microphone switch; outside callers see
         /// recording, since `pause()` and `stop()` wait for it.
         case rolling
-        /// A microphone switch closed the segment but could not open the next one. Outside callers still
-        /// see recording: `pause()` takes effect without a segment to close, `stop()` returns the segments.
+        /// A microphone switch closed the segment but could not open the next one, or the stream stopped by
+        /// itself (the display went away). Outside callers still see recording: `pause()` takes effect
+        /// without a segment to close, `stop()` returns the segments.
         case interrupted
         case stopping
     }
 
     /// The recording in progress: where it captures, with what, its file stem, and the closed segments.
     private struct Take: Sendable {
-        let target: CaptureTarget
+        /// A resume onto a fallback display moves the rest of the recording there.
+        var target: CaptureTarget
         let options: RecorderOptions
         let stem: String
         var segments: [URL] = []
@@ -88,8 +94,8 @@ public actor Recorder: ScreenRecorder {
     private var epoch = 0
     /// Segments a roll could not close in time; `stop()` reports them as `stopTimedOut`.
     private var unfinished: [URL] = []
-    /// Told when a microphone switch closed the segment but could not open the next one.
-    private var onInterruption: (@Sendable (String) -> Void)?
+    /// Told when the recorder stops capturing on its own, with the moment the capture stopped.
+    private var onInterruption: (@Sendable (RecordingInterruption, Date) -> Void)?
 
     /// `options` is read at the start of every recording, so Settings changes apply to the next one.
     /// `excludedWindows` lists the app's windows to keep out of display and region recordings (the HUD,
@@ -120,6 +126,24 @@ public actor Recorder: ScreenRecorder {
             if known.contains(id) { matched.append(id) } else { missing.append(id) }
         }
         return (matched, missing)
+    }
+
+    /// What a segment captures, given the displays there are now: `target` while its display is there,
+    /// otherwise the display under the cursor (`cursorDisplay`), else the first one; a region on a display
+    /// that is gone becomes that whole display. Nil when there is no display at all. Windows are resolved
+    /// by the filter.
+    public static func resumeTarget(
+        for target: CaptureTarget, displays: [CGDirectDisplayID], cursorDisplay: CGDirectDisplayID?
+    ) -> CaptureTarget? {
+        let wanted: CGDirectDisplayID
+        switch target {
+        case .window: return target
+        case .display(let id): wanted = id
+        case .region(let id, _): wanted = id
+        }
+        if displays.contains(wanted) { return target }
+        if let cursorDisplay, displays.contains(cursorDisplay) { return .display(cursorDisplay) }
+        return displays.first.map { .display($0) }
     }
 
     public func start(target: CaptureTarget) async throws {
@@ -175,6 +199,7 @@ public actor Recorder: ScreenRecorder {
         do {
             let session = try await beginSession(take, index: index)
             state = .recording(session)
+            self.take?.target = session.target
             follower.began(uid: session.microphoneUID)
             followIfDefaultMoved(since: session)
         } catch {
@@ -214,11 +239,36 @@ public actor Recorder: ScreenRecorder {
         }
     }
 
-    /// `handler` is called (on the recorder) with a short reason when the recorder stops capturing on its
-    /// own: a microphone switch closed the segment but could not open the next one. The recorder is then
-    /// waiting for `pause()` (which takes effect at once) or `stop()`.
-    public func setInterruptionHandler(_ handler: @escaping @Sendable (String) -> Void) {
+    /// `handler` is called (on the recorder) with the reason and the moment the capture stopped when the
+    /// recorder stops capturing on its own: a microphone switch closed the segment but could not open the
+    /// next one, or the stream stopped by itself (the display went away). The recorder is then waiting for
+    /// `pause()` (which takes effect at once) or `stop()`.
+    public func setInterruptionHandler(
+        _ handler: @escaping @Sendable (RecordingInterruption, Date) -> Void
+    ) {
         onInterruption = handler
+    }
+
+    /// The stream of segment `index` stopped by itself at `time` (`hostTime` on the capture clock).
+    /// While that segment is the one recording, it is closed at once (the file is kept) and the recording
+    /// is interrupted. A pause or stop meanwhile takes over, as for a roll.
+    private func captureStopped(index: Int, at time: Date, hostTime: CMTime) async {
+        guard case .recording(let session) = state, session.index == index else { return }
+        state = .rolling
+        let epoch = self.epoch
+        let close = Task {
+            await self.closeForRoll(session, purpose: "after the capture stopped", at: hostTime)
+        }
+        closing = close
+        await close.value
+        closing = nil
+        guard epoch == self.epoch, case .rolling = state else { return }
+        state = .interrupted
+        follower.paused()
+        log(
+            "Recorder: the capture stopped by itself; nothing is recorded until the recording is resumed or stopped"
+        )
+        onInterruption?(.displayLost, time)
     }
 
     /// After a start or resume: a change that came while the segment was opening.
@@ -251,7 +301,7 @@ public actor Recorder: ScreenRecorder {
         guard case .recording(let session) = state else { return .notOpened }
         state = .rolling
         let epoch = self.epoch
-        let close = Task { await self.closeForRoll(session) }
+        let close = Task { await self.closeForRoll(session, purpose: "for the microphone switch") }
         closing = close
         await close.value
         closing = nil
@@ -273,16 +323,17 @@ public actor Recorder: ScreenRecorder {
             log(
                 "Recorder: reopening the capture for the microphone switch failed (\(error)); "
                     + "nothing is recorded until the recording is paused or stopped")
-            onInterruption?("Microphone switch failed")
+            onInterruption?(.microphoneSwitchFailed, Date())
             return .notOpened
         }
     }
 
-    /// The closing half of a roll. A segment that did not close in time is remembered, so `stop()`
-    /// reports it as `stopTimedOut` and finishing can be retried.
-    private func closeForRoll(_ session: Session) async {
+    /// The closing half of a roll (or of an interruption, `purpose` says which, for the log). A segment
+    /// that did not close in time is remembered, so `stop()` reports it as `stopTimedOut` and finishing
+    /// can be retried. `stopTime` is where the file ends; nil: now.
+    private func closeForRoll(_ session: Session, purpose: String, at stopTime: CMTime? = nil) async {
         do {
-            try await end(session)
+            try await end(session, at: stopTime)
             if FileManager.default.fileExists(atPath: session.fileURL.path) {
                 take?.segments.append(session.fileURL)
             }
@@ -290,7 +341,7 @@ public actor Recorder: ScreenRecorder {
             // Kept in order even if the file is not there yet: stop() reports it as stopTimedOut.
             unfinished.append(session.fileURL)
             take?.segments.append(session.fileURL)
-            log("Recorder: segment \(session.index) did not close for the microphone switch: \(error)")
+            log("Recorder: segment \(session.index) did not close \(purpose): \(error)")
         }
     }
 
@@ -415,6 +466,16 @@ public actor Recorder: ScreenRecorder {
         } catch {
             throw RecorderError.screenPermissionDenied
         }
+        let displays = content.displays.map(\.displayID)
+        guard
+            let target = Self.resumeTarget(
+                for: take.target, displays: displays, cursorDisplay: Self.displayUnderCursor())
+        else { throw RecorderError.noDisplay }
+        if target != take.target {
+            log(
+                "Recorder: the display of \(take.target) is gone; recording \(target) (under the cursor) instead"
+            )
+        }
         let requested = await excludedWindows()
         let (matched, missing) = Self.excludedWindowIDs(
             requested: requested, available: content.windows.map(\.windowID))
@@ -423,7 +484,7 @@ public actor Recorder: ScreenRecorder {
         }
         let ids = Set(matched)
         let (filter, sourceRect) = try Self.filter(
-            for: take.target, in: content, excluding: content.windows.filter { ids.contains($0.windowID) })
+            for: target, in: content, excluding: content.windows.filter { ids.contains($0.windowID) })
         let scale = CGFloat(filter.pointPixelScale)
         let configuration = Self.baseConfiguration(options)
         let captured = sourceRect?.size ?? filter.contentRect.size
@@ -445,7 +506,9 @@ public actor Recorder: ScreenRecorder {
         let writer = try RecordingWriter(
             url: url, width: configuration.width, height: configuration.height, fps: options.quality.fps,
             videoBitrate: bitrate, systemAudio: options.systemAudio, microphone: options.microphone, log: log)
-        let output = StreamOutput(writer: writer, log: log)
+        let output = StreamOutput(writer: writer, log: log) { [weak self] time, hostTime in
+            Task { await self?.captureStopped(index: index, at: time, hostTime: hostTime) }
+        }
         let stream = SCStream(filter: filter, configuration: configuration, delegate: output)
         do {
             try output.attach(to: stream, systemAudio: options.systemAudio, microphone: options.microphone)
@@ -456,7 +519,12 @@ public actor Recorder: ScreenRecorder {
         }
         return Session(
             stream: stream, writer: writer, fileURL: url, output: output, index: index, bitrate: bitrate,
-            microphoneUID: microphone?.uid, microphoneName: microphone?.name)
+            target: target, microphoneUID: microphone?.uid, microphoneName: microphone?.name)
+    }
+
+    private static func displayUnderCursor() -> CGDirectDisplayID? {
+        guard case .display(let id) = CaptureTarget.displayUnderCursor() else { return nil }
+        return id
     }
 
     /// Everything but the size: frame rate, cursor, audio, and 420v BT.709 frames for the HEVC encoder.
@@ -515,28 +583,20 @@ public actor Recorder: ScreenRecorder {
 
     /// Stops the stream (bounded by `stopCaptureTimeout`, a stuck stop is logged and skipped) and then always
     /// closes the segment file, so it gets its index even when the stream hangs; both together are bounded
-    /// by `stopTimeout`. Frames stop at the moment of the call; a still screen is held until then. A stream
-    /// that stopped with an error (the recorded window closed, a display was unplugged) is only logged: the
-    /// closed file is a good recording up to that point.
-    private func end(_ session: Session) async throws {
-        let stopTime = CMClockGetTime(CMClockGetHostTimeClock())
+    /// by `stopTimeout`. Frames stop at `stopTime` (nil: the moment of the call); a still screen is held
+    /// until then. A stream that stopped with an error (the recorded window closed, a display was
+    /// unplugged) is only logged: the closed file is a good recording up to that point.
+    private func end(_ session: Session, at stopTime: CMTime? = nil) async throws {
+        let stopTime = stopTime ?? CMClockGetTime(CMClockGetHostTimeClock())
         let stream = Unchecked(value: session.stream)
         let writer = session.writer
         let log = self.log
+        // A stream that stopped by itself refuses another stop ("already stopped"); only the file is closed.
+        let alreadyStopped = session.output.streamError != nil
         try await Deadline.run(
             timeout: Self.stopTimeout, error: RecorderError.stopTimedOut(segments: [session.fileURL])
         ) {
-            do {
-                try await Deadline.run(timeout: Self.stopCaptureTimeout, error: StopCaptureTimedOut()) {
-                    try await Self.stopCapture(stream)
-                }
-            } catch is StopCaptureTimedOut {
-                log(
-                    "Recorder: stopping the capture took over \(Self.stopCaptureTimeout), closing the file anyway"
-                )
-            } catch {
-                log("Recorder: stopping the capture failed: \(error.localizedDescription)")
-            }
+            if !alreadyStopped { await Self.stopCaptureBounded(stream, log: log) }
             _ = try await writer.finish(at: stopTime)
         }
         let bytes = (try? session.fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
@@ -552,20 +612,41 @@ public actor Recorder: ScreenRecorder {
 
     private struct StopCaptureTimedOut: Error {}
 
+    /// `stopCapture` bounded by `stopCaptureTimeout`; a stuck or failed stop is logged and skipped.
+    private nonisolated static func stopCaptureBounded(
+        _ stream: Unchecked<SCStream>, log: @escaping @Sendable (String) -> Void
+    ) async {
+        do {
+            try await Deadline.run(timeout: stopCaptureTimeout, error: StopCaptureTimedOut()) {
+                try await stopCapture(stream)
+            }
+        } catch is StopCaptureTimedOut {
+            log("Recorder: stopping the capture took over \(stopCaptureTimeout), closing the file anyway")
+        } catch {
+            log("Recorder: stopping the capture failed: \(error.localizedDescription)")
+        }
+    }
+
 }
 
 /// Receives the stream's sample buffers on one serial queue and hands them to the segment's writer; keeps
-/// the error the stream stopped with, if any.
+/// the error the stream stopped with, if any, and reports that stop with its time.
 private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private let writer: RecordingWriter
     private let log: @Sendable (String) -> Void
+    /// Called when the stream stops by itself, with the wall-clock and capture-clock time of the stop.
+    private let onStop: @Sendable (Date, CMTime) -> Void
     private let queue = DispatchQueue(label: "QuickTube.Recorder.samples", qos: .userInteractive)
     private let lock = NSLock()
     private var failure: Error?
 
-    init(writer: RecordingWriter, log: @escaping @Sendable (String) -> Void) {
+    init(
+        writer: RecordingWriter, log: @escaping @Sendable (String) -> Void,
+        onStop: @escaping @Sendable (Date, CMTime) -> Void
+    ) {
         self.writer = writer
         self.log = log
+        self.onStop = onStop
     }
 
     /// Screen always, system audio and microphone when recorded.
@@ -591,8 +672,10 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate, @u
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
+        let hostTime = CMClockGetTime(CMClockGetHostTimeClock())
         lock.withLock { failure = error }
         log("Recorder: the capture stopped: \(error.localizedDescription)")
+        onStop(Date(), hostTime)
     }
 }
 

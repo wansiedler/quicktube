@@ -152,6 +152,7 @@ modifiers).
 | `⌃⌥⌘V` | stop and upload to Vimeo |
 | `⌃⌥⌘G` | stop and save a GIF (when Settings → GIF is on) |
 | `⌃⌥⌘P` | pause / resume (when pause is on in Settings → Recording; fixed) |
+| `⌃⌥⌘⎋` | cancel the recording: nothing is saved or uploaded, the segments go to the Trash (fixed) |
 
 ### Features
 
@@ -181,6 +182,14 @@ modifiers).
   short gap); the log says "Microphone switched to …".
 - **Pause and resume**: each pause starts a new segment; on stop the segments
   are joined into one file. The status pill shows "Paused".
+- **Display loss pauses**: if the recorded display goes away (unplugged, asleep),
+  the segment so far is kept and the recording pauses with a notification;
+  "Resume Recording" in the menu (offered even with pause off) continues on the
+  same display, or on the display under the cursor if it is gone. Stopping saves
+  what was recorded; the paused time is not counted.
+- **Cancel** (`⌃⌥⌘⎋` or "Cancel Recording" in the menu): stops without saving or
+  uploading and moves the segments to the Trash; the pill says "Recording
+  cancelled".
 - **Trimming**: "Trim end" (default 1 s) cuts the stop-shortcut press, "Trim
   start" the beginning; at least half a second is always kept.
 - **Title template**: `{date}`, `{app}` (frontmost app) and `{display}` name the
